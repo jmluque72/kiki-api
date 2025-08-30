@@ -59,6 +59,12 @@ const userSchemas = {
     email: Joi.string().email().optional(),
     status: Joi.string().valid('pending', 'approved', 'rejected').optional().messages({
       'any.only': 'El status debe ser: pending, approved o rejected'
+    }),
+    phone: Joi.string().pattern(/^[\+]?[0-9\s\-\(\)]{7,15}$/).optional().messages({
+      'string.pattern.base': 'Número de teléfono inválido'
+    }),
+    telefono: Joi.string().pattern(/^[\+]?[0-9\s\-\(\)]{7,15}$/).optional().messages({
+      'string.pattern.base': 'Número de teléfono inválido'
     })
   })
 };
@@ -107,6 +113,7 @@ const accountSchemas = {
       'string.base64': 'El formato de imagen base64 no es válido. Formatos soportados: jpeg, jpg, png, gif, webp',
       'string.format': 'El logo debe ser una URL válida o una imagen en formato base64'
     }),
+    // Campos requeridos para crear el usuario administrador
     emailAdmin: Joi.string().email().required().messages({
       'string.empty': 'El email del administrador es obligatorio',
       'string.email': 'El email del administrador debe ser válido'
@@ -228,6 +235,78 @@ const roleSchemas = {
   }).min(1) // Al menos un campo debe ser enviado para actualizar
 };
 
+// Esquemas de validación para eventos
+const eventSchemas = {
+  create: Joi.object({
+    titulo: Joi.string().min(3).max(150).required().messages({
+      'string.empty': 'El título del evento es obligatorio',
+      'string.min': 'El título debe tener al menos 3 caracteres',
+      'string.max': 'El título no puede exceder 150 caracteres'
+    }),
+    descripcion: Joi.string().min(10).max(1000).required().messages({
+      'string.empty': 'La descripción es obligatoria',
+      'string.min': 'La descripción debe tener al menos 10 caracteres',
+      'string.max': 'La descripción no puede exceder 1000 caracteres'
+    }),
+    fecha: Joi.date().iso().min('now').required().messages({
+      'date.base': 'La fecha debe ser una fecha válida',
+      'date.min': 'La fecha debe ser futura',
+      'date.format': 'La fecha debe estar en formato ISO'
+    }),
+    hora: Joi.string().pattern(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/).required().messages({
+      'string.pattern.base': 'La hora debe estar en formato HH:MM'
+    }),
+    lugar: Joi.string().max(200).optional().allow('').messages({
+      'string.max': 'El lugar no puede exceder 200 caracteres'
+    }),
+    institucion: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required().messages({
+      'string.pattern.base': 'La institución debe ser un ID válido'
+    }),
+    division: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).optional().allow(null, '').messages({
+      'string.pattern.base': 'La división debe ser un ID válido'
+    }),
+    estado: Joi.string().valid('activo', 'finalizado', 'cancelado').optional().default('activo'),
+    participantes: Joi.array().items(
+      Joi.string().pattern(/^[0-9a-fA-F]{24}$/)
+    ).optional()
+  }),
+
+  update: Joi.object({
+    titulo: Joi.string().min(3).max(150).optional(),
+    descripcion: Joi.string().min(10).max(1000).optional(),
+    fecha: Joi.date().iso().optional(),
+    hora: Joi.string().pattern(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/).optional().messages({
+      'string.pattern.base': 'La hora debe estar en formato HH:MM'
+    }),
+    lugar: Joi.string().max(200).optional().allow(''),
+    institucion: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).optional().messages({
+      'string.pattern.base': 'La institución debe ser un ID válido'
+    }),
+    division: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).optional().allow(null, '').messages({
+      'string.pattern.base': 'La división debe ser un ID válido'
+    }),
+    estado: Joi.string().valid('activo', 'finalizado', 'cancelado').optional(),
+    participantes: Joi.array().items(
+      Joi.string().pattern(/^[0-9a-fA-F]{24}$/)
+    ).optional()
+  }).min(1), // Al menos un campo debe ser enviado para actualizar
+
+  addParticipant: Joi.object({
+    userId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required().messages({
+      'string.pattern.base': 'El ID del usuario debe ser válido'
+    })
+  }),
+
+  updateParticipantStatus: Joi.object({
+    userId: Joi.string().pattern(/^[0-9a-fA-F]{24}$/).required().messages({
+      'string.pattern.base': 'El ID del usuario debe ser válido'
+    }),
+    estado: Joi.string().valid('confirmado', 'pendiente', 'cancelado').required().messages({
+      'any.only': 'El estado debe ser confirmado, pendiente o cancelado'
+    })
+  })
+};
+
 // Middleware específicos para cada endpoint
 const validateUserRegister = validate(userSchemas.register);
 const validateUserLogin = validate(userSchemas.login);
@@ -240,6 +319,10 @@ const validateGroupAddUser = validate(groupSchemas.addUser);
 const validateGroupRemoveUser = validate(groupSchemas.removeUser);
 const validateRoleCreate = validate(roleSchemas.create);
 const validateRoleUpdate = validate(roleSchemas.update);
+const validateEventCreate = validate(eventSchemas.create);
+const validateEventUpdate = validate(eventSchemas.update);
+const validateEventAddParticipant = validate(eventSchemas.addParticipant);
+const validateEventUpdateParticipantStatus = validate(eventSchemas.updateParticipantStatus);
 
 module.exports = {
   validate,
@@ -247,6 +330,7 @@ module.exports = {
   accountSchemas,
   groupSchemas,
   roleSchemas,
+  eventSchemas,
   validateUserRegister,
   validateUserLogin,
   validateUserUpdate,
@@ -257,5 +341,9 @@ module.exports = {
   validateGroupAddUser,
   validateGroupRemoveUser,
   validateRoleCreate,
-  validateRoleUpdate
+  validateRoleUpdate,
+  validateEventCreate,
+  validateEventUpdate,
+  validateEventAddParticipant,
+  validateEventUpdateParticipantStatus
 }; 

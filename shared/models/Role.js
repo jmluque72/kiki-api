@@ -53,8 +53,7 @@ const roleSchema = new mongoose.Schema({
   }
 });
 
-// Índices para optimizar consultas
-roleSchema.index({ nombre: 1 });
+// Índices para optimizar consultas (nombre ya tiene índice único automático)
 roleSchema.index({ nivel: 1 });
 roleSchema.index({ activo: 1 });
 

@@ -621,3 +621,195 @@ curl -X POST http://localhost:3000/api/roles/initialize \
   ]
 }
 ``` 
+
+## 🎯 Eventos
+
+### Crear evento
+```bash
+curl -X POST http://localhost:3000/api/events \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "nombre": "Conferencia de Tecnología 2024",
+    "descripcion": "Conferencia anual sobre las últimas tendencias en tecnología e innovación digital",
+    "categoria": "conferencia",
+    "fechaInicio": "2024-06-15T09:00:00.000Z",
+    "fechaFin": "2024-06-15T18:00:00.000Z",
+    "ubicacion": {
+      "nombre": "Centro de Convenciones Plaza Mayor",
+      "direccion": "Av. Principal 123, Ciudad",
+      "esVirtual": false
+    },
+    "cuenta": "67890abcdef123456789012",
+    "capacidadMaxima": 200,
+    "estado": "borrador",
+    "esPublico": true,
+    "requiereAprobacion": false,
+    "imagen": "https://ejemplo.com/evento-tech.jpg",
+    "tags": ["tecnología", "innovación", "conferencia", "networking"]
+  }'
+```
+
+### Crear evento virtual
+```bash
+curl -X POST http://localhost:3000/api/events \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "nombre": "Webinar: Introducción a la IA",
+    "descripcion": "Webinar educativo sobre conceptos básicos de inteligencia artificial",
+    "categoria": "webinar",
+    "fechaInicio": "2024-05-20T15:00:00.000Z",
+    "fechaFin": "2024-05-20T16:30:00.000Z",
+    "ubicacion": {
+      "nombre": "Plataforma Zoom",
+      "esVirtual": true,
+      "enlaceVirtual": "https://zoom.us/j/123456789"
+    },
+    "cuenta": "67890abcdef123456789012",
+    "capacidadMaxima": 100,
+    "estado": "publicado",
+    "esPublico": true,
+    "requiereAprobacion": true,
+    "tags": ["ia", "educación", "webinar"]
+  }'
+```
+
+### Obtener todos los eventos
+```bash
+curl -X GET "http://localhost:3000/api/events?page=1&limit=10" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Filtrar eventos por cuenta
+```bash
+curl -X GET "http://localhost:3000/api/events?cuenta=67890abcdef123456789012" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Filtrar eventos por categoría
+```bash
+curl -X GET "http://localhost:3000/api/events?categoria=conferencia" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Filtrar eventos por estado
+```bash
+curl -X GET "http://localhost:3000/api/events?estado=publicado" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Filtrar eventos por fechas
+```bash
+curl -X GET "http://localhost:3000/api/events?fechaInicio=2024-05-01&fechaFin=2024-06-30" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Buscar eventos por texto
+```bash
+curl -X GET "http://localhost:3000/api/events?search=tecnología" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Filtrar eventos por tags
+```bash
+curl -X GET "http://localhost:3000/api/events?tags=tecnología,conferencia" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Obtener evento específico
+```bash
+curl -X GET http://localhost:3000/api/events/EVENT_ID \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Actualizar evento
+```bash
+curl -X PUT http://localhost:3000/api/events/EVENT_ID \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "nombre": "Conferencia de Tecnología 2024 - ACTUALIZADA",
+    "capacidadMaxima": 250,
+    "estado": "publicado"
+  }'
+```
+
+### Eliminar evento
+```bash
+curl -X DELETE http://localhost:3000/api/events/EVENT_ID \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Inscribir participante (usuario actual)
+```bash
+curl -X POST http://localhost:3000/api/events/EVENT_ID/participants \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{}'
+```
+
+### Inscribir otro usuario (solo organizadores/admins)
+```bash
+curl -X POST http://localhost:3000/api/events/EVENT_ID/participants \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "userId": "USER_ID_TO_ADD"
+  }'
+```
+
+### Remover participante
+```bash
+curl -X DELETE http://localhost:3000/api/events/EVENT_ID/participants/USER_ID \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Actualizar estado de participante
+```bash
+curl -X PUT http://localhost:3000/api/events/EVENT_ID/participants/USER_ID/status \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "estado": "confirmado"
+  }'
+```
+
+### Obtener eventos próximos de una cuenta
+```bash
+curl -X GET "http://localhost:3000/api/events/upcoming/ACCOUNT_ID?limit=5" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+### Obtener estadísticas de eventos por cuenta
+```bash
+curl -X GET http://localhost:3000/api/events/stats/ACCOUNT_ID \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN"
+```
+
+## Categorías de Eventos Disponibles
+
+- `conferencia`: Conferencias y congresos
+- `taller`: Talleres prácticos
+- `seminario`: Seminarios y charlas
+- `reunion`: Reuniones organizacionales
+- `webinar`: Seminarios web
+- `curso`: Cursos y capacitaciones
+- `actividad_social`: Eventos sociales
+- `deportivo`: Actividades deportivas
+- `cultural`: Eventos culturales
+- `otro`: Otros tipos de eventos
+
+## Estados de Eventos
+
+- `borrador`: Evento en preparación
+- `publicado`: Evento visible y abierto a inscripciones
+- `en_curso`: Evento en progreso
+- `finalizado`: Evento terminado
+- `cancelado`: Evento cancelado
+
+## Estados de Participantes
+
+- `confirmado`: Participación confirmada
+- `pendiente`: Esperando aprobación
+- `cancelado`: Participación cancelada 

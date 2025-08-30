@@ -19,6 +19,13 @@ const userSchema = new mongoose.Schema({
     lowercase: true,
     match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Email inválido']
   },
+  dni: {
+    type: String,
+    required: false,
+    unique: true,
+    sparse: true, // Permite múltiples valores null/undefined
+    trim: true
+  },
   password: {
     type: String,
     required: [true, 'La contraseña es obligatoria'],
@@ -29,6 +36,11 @@ const userSchema = new mongoose.Schema({
     ref: 'Role',
     required: [true, 'El rol es obligatorio']
   },
+  account: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Account',
+    required: false // No todos los usuarios tienen cuenta (ej: superadmin)
+  },
   status: {
     type: String,
     enum: ['pending', 'approved', 'rejected'],
@@ -37,6 +49,35 @@ const userSchema = new mongoose.Schema({
   },
   lastLogin: {
     type: Date
+  },
+  // Campos adicionales para registro mobile
+  telefono: {
+    type: String,
+    trim: true,
+    match: [/^[\+]?[0-9\s\-\(\)]{7,15}$/, 'Número de teléfono inválido']
+  },
+  direccion: {
+    type: String,
+    trim: true,
+    maxlength: [200, 'La dirección no puede exceder 200 caracteres']
+  },
+  fechaNacimiento: {
+    type: Date,
+    validate: {
+      validator: function(v) {
+        return !v || v <= new Date();
+      },
+      message: 'La fecha de nacimiento no puede ser futura'
+    }
+  },
+  genero: {
+    type: String,
+    enum: ['masculino', 'femenino', 'otro', 'prefiero_no_decir'],
+    trim: true
+  },
+  avatar: {
+    type: String,
+    trim: true
   }
 }, {
   timestamps: true,
@@ -103,5 +144,12 @@ userSchema.methods.updateLastLogin = async function() {
   this.lastLogin = new Date();
   await this.save();
 };
+
+// Índices para optimizar consultas (email ya tiene índice único automático)
+userSchema.index({ role: 1 });
+userSchema.index({ status: 1 });
+userSchema.index({ account: 1 });
+userSchema.index({ dni: 1 });
+userSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('User', userSchema); 

@@ -5,8 +5,8 @@ module.exports = {
   MONGODB_URI: process.env.MONGODB_URI || 'mongodb://localhost:27017/microservices_db',
   
   // JWT
-  JWT_SECRET: process.env.JWT_SECRET || 'your-super-secret-jwt-key-here-change-this-in-production',
-  JWT_EXPIRE: process.env.JWT_EXPIRE || '7d',
+  JWT_SECRET: process.env.JWT_SECRET || 'kiki-super-secret-jwt-key-2024-production-ready',
+  JWT_EXPIRE: process.env.JWT_EXPIRES_IN || '30d',
   
   // Puertos de los microservicios
   GATEWAY_PORT: process.env.GATEWAY_PORT || 3000,

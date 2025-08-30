@@ -7,10 +7,7 @@ const { seedRoles, updateRoles, deleteAllRoles, listRoles } = require('../databa
 // Conectar a la base de datos
 const connectDB = async () => {
   try {
-    await mongoose.connect(config.MONGODB_URI, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true
-    });
+    await mongoose.connect(config.MONGODB_URI);
     console.log('📦 Conectado a MongoDB');
   } catch (error) {
     console.error('❌ Error conectando a MongoDB:', error);

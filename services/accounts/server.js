@@ -10,6 +10,7 @@ const { errorHandler, notFound } = require('../../shared/middleware/errorHandler
 const { createFileServer } = require('../../shared/middleware/fileServer');
 const accountRoutes = require('./routes/accountRoutes');
 const groupRoutes = require('./routes/groupRoutes');
+const eventRoutes = require('./routes/eventRoutes');
 
 const app = express();
 
@@ -28,20 +29,16 @@ app.use(cors({
 // Rate limiting
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 100, // límite de 100 requests por IP por ventana
-  message: {
-    success: false,
-    message: 'Demasiadas solicitudes, intenta de nuevo más tarde'
-  }
+  max: 100 // límite de 100 requests por IP por ventana de tiempo
 });
 app.use(limiter);
 
-// Logging
-app.use(morgan('combined'));
-
-// Body parsing
+// Parsing
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Logging
+app.use(morgan('combined'));
 
 // Health check
 app.get('/health', (req, res) => {
@@ -57,6 +54,7 @@ app.get('/health', (req, res) => {
 // Routes
 app.use('/api/accounts', accountRoutes);
 app.use('/api/groups', groupRoutes);
+app.use('/api/events', eventRoutes);
 
 // File server para servir imágenes y archivos
 app.use('/api/files', createFileServer());
@@ -77,14 +75,6 @@ const server = app.listen(PORT, () => {
 // Manejar cierre graceful
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    console.log('Process terminated');
-    database.disconnect();
-  });
-});
-
-process.on('SIGINT', () => {
-  console.log('SIGINT received, shutting down gracefully');
   server.close(() => {
     console.log('Process terminated');
     database.disconnect();

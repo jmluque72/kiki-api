@@ -27,23 +27,15 @@ const accountSchema = new mongoose.Schema({
     default: null,
     maxlength: [500, 'La URL del logo no puede exceder 500 caracteres']
   },
-  emailAdmin: {
-    type: String,
-    required: [true, 'El email del administrador es obligatorio'],
-    trim: true,
-    lowercase: true,
-    match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Email del administrador inválido']
-  },
-  passwordAdmin: {
-    type: String,
-    required: [true, 'La contraseña del administrador es obligatoria'],
-    minlength: [6, 'La contraseña debe tener al menos 6 caracteres'],
-    select: false // No incluir en consultas por defecto
-  },
   usuarioAdministrador: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: false // Se creará automáticamente
+    required: [true, 'El usuario administrador es obligatorio']
+  },
+  activo: {
+    type: Boolean,
+    default: true,
+    required: [true, 'El estado activo es obligatorio']
   }
 }, {
   timestamps: true,

@@ -63,6 +63,16 @@ const errorHandler = (err, req, res, next) => {
 
 // Middleware para manejar rutas no encontradas
 const notFound = (req, res, next) => {
+  // Ignorar rutas que sabemos que no pertenecen al proyecto
+  const ignoredPaths = ['/mcp', '/favicon.ico', '/robots.txt'];
+  
+  if (ignoredPaths.includes(req.originalUrl)) {
+    return res.status(404).json({
+      success: false,
+      message: 'Ruta no encontrada'
+    });
+  }
+  
   const error = new Error(`Ruta no encontrada - ${req.originalUrl}`);
   res.status(404);
   next(error);

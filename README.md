@@ -1,6 +1,65 @@
 # Microservicios API REST
 
-Un proyecto de API REST con arquitectura de microservicios usando Node.js, Express y MongoDB.
+## Descripción
+
+API REST completa construida con arquitectura de microservicios utilizando Node.js, Express y MongoDB. El sistema incluye gestión de usuarios, cuentas, grupos, roles, eventos y autenticación con JWT. Diseñado para ser escalable, seguro y fácil de mantener.
+
+## ✨ Características Principales
+
+### 🔐 Sistema de Autenticación y Autorización
+- Registro e inicio de sesión de usuarios
+- Autenticación JWT con tokens seguros
+- Sistema de roles jerárquico con 5 niveles
+- Middleware de autorización por permisos
+- Estado de usuarios: pending, approved, rejected
+
+### 🏢 Gestión de Cuentas
+- CRUD completo de cuentas organizacionales  
+- Creación automática de usuario administrador
+- Soporte para logos (URL o base64)
+- Validaciones robustas y manejo de errores
+
+### 👥 Sistema de Grupos
+- Organización de usuarios dentro de cuentas
+- Gestión de permisos por grupo
+- Roles por defecto y usuarios múltiples
+- Estadísticas y reportes de grupos
+
+### 🎯 Gestión de Eventos
+- CRUD completo de eventos y actividades
+- 10 categorías predefinidas (conferencias, talleres, webinars, etc.)
+- Eventos presenciales y virtuales
+- Sistema de inscripciones y participantes
+- Estados de eventos: borrador, publicado, en_curso, finalizado, cancelado
+- Gestión de capacidad máxima y aprobaciones
+- Tags y búsqueda avanzada
+- Estadísticas por cuenta
+
+### 🛡️ Roles y Permisos
+- 5 roles predefinidos con jerarquía
+- Sistema granular de permisos por módulo
+- Seeder automático de roles del sistema
+- Gestión de permisos por acción (crear, leer, actualizar, eliminar, administrar)
+
+## 🏗️ Arquitectura
+
+### Microservicios
+- **Gateway** (Puerto 3000): Enrutador principal y documentación
+- **Users Service** (Puerto 3001): Gestión de usuarios y roles  
+- **Accounts Service** (Puerto 3002): Gestión de cuentas, grupos y eventos
+
+### Base de Datos
+- **MongoDB** con Mongoose ODM
+- Esquemas validados y relaciones pobladas
+- Índices optimizados para consultas
+- Transacciones para operaciones críticas
+
+### Seguridad
+- Autenticación JWT con expiración
+- Rate limiting para prevenir abuso
+- Validación de entrada con Joi
+- Manejo seguro de archivos y imágenes
+- Headers de seguridad con Helmet
 
 ## Arquitectura
 

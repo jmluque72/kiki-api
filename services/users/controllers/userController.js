@@ -122,7 +122,7 @@ const getProfile = asyncHandler(async (req, res) => {
 // @route   PUT /api/users/profile
 // @access  Private
 const updateProfile = asyncHandler(async (req, res) => {
-  const { name, email, status } = req.body;
+  const { name, email, status, phone, telefono } = req.body;
 
   const user = await User.findById(req.user.id);
   
@@ -142,6 +142,10 @@ const updateProfile = asyncHandler(async (req, res) => {
   if (name) user.name = name;
   if (email) user.email = email;
   if (status) user.status = status;
+  
+  // Manejar tanto 'phone' como 'telefono' para compatibilidad
+  if (phone) user.telefono = phone;
+  if (telefono) user.telefono = telefono;
 
   await user.save();
 
@@ -155,6 +159,7 @@ const updateProfile = asyncHandler(async (req, res) => {
         email: user.email,
         role: user.role,
         status: user.status,
+        telefono: user.telefono,
         updatedAt: user.updatedAt
       }
     }

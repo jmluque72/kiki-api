@@ -1,0 +1,14 @@
+# Formato del Excel para cargar alumnos:
+
+# Columnas requeridas:
+# - nombre (obligatorio)
+# - apellido (obligatorio) 
+# - email (obligatorio, único)
+# - dni (obligatorio, único)
+
+# Ejemplo de datos:
+nombre,apellido,email,dni
+Juan,Pérez,juan.perez@email.com,12345678
+María,García,maria.garcia@email.com,87654321
+Carlos,López,carlos.lopez@email.com,11223344
+Ana,Rodríguez,ana.rodriguez@email.com,44332211 

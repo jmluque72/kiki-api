@@ -13,10 +13,36 @@ const app = express();
 // Middleware de seguridad
 app.use(helmet());
 
-// CORS
+// CORS - Configurado para permitir conexiones desde apps móviles
 app.use(cors({
-  origin: process.env.FRONTEND_URL || '*',
-  credentials: true
+  origin: function (origin, callback) {
+    // Permitir requests sin origin (como apps móviles)
+    if (!origin) return callback(null, true);
+    
+    // Permitir localhost y IPs locales
+    const allowedOrigins = [
+      'http://localhost:3000',
+      'http://localhost:5173',
+      'http://localhost:5174',
+      'http://localhost:8080',
+      'http://localhost:8081',
+      'http://127.0.0.1:3000',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:5174',
+      'http://127.0.0.1:8080',
+      'http://127.0.0.1:8081',
+      process.env.FRONTEND_URL
+    ].filter(Boolean);
+    
+    if (allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
 // Rate limiting general
@@ -60,9 +86,10 @@ app.get('/api', (req, res) => {
     version: '1.0.0',
     endpoints: {
       users: '/api/users',
-      accounts: '/api/accounts',
-      groups: '/api/groups',
-      roles: '/api/roles'
+          accounts: '/api/accounts',
+    groups: '/api/groups',
+    events: '/api/events',
+    roles: '/api/roles'
     },
     documentation: {
       users: {
@@ -72,7 +99,7 @@ app.get('/api', (req, res) => {
         updateProfile: 'PUT /api/users/profile',
         getAllUsers: 'GET /api/users (admin only)',
         getUserById: 'GET /api/users/:id (admin only)',
-        deactivateUser: 'PUT /api/users/:id/deactivate (admin only)'
+        changeUserStatus: 'PUT /api/users/:id/status (admin only)'
       },
       accounts: {
         create: 'POST /api/accounts',
@@ -91,6 +118,18 @@ app.get('/api', (req, res) => {
         addUser: 'POST /api/groups/:id/users',
         removeUser: 'DELETE /api/groups/:id/users',
         stats: 'GET /api/groups/account/:accountId/stats'
+      },
+      events: {
+        create: 'POST /api/events',
+        getAll: 'GET /api/events',
+        getById: 'GET /api/events/:id',
+        update: 'PUT /api/events/:id',
+        delete: 'DELETE /api/events/:id',
+        upcoming: 'GET /api/events/upcoming/:accountId',
+        stats: 'GET /api/events/stats/:accountId',
+        addParticipant: 'POST /api/events/:id/participants',
+        removeParticipant: 'DELETE /api/events/:id/participants/:userId',
+        updateParticipantStatus: 'PUT /api/events/:id/participants/:userId/status'
       },
       roles: {
         getAll: 'GET /api/roles',
@@ -117,6 +156,12 @@ app.get('/api', (req, res) => {
         optional: ['activo', 'esRolSistema'],
         availableRoles: ['superadmin', 'adminaccount', 'coordinador', 'familyadmin', 'familyviewer']
       }
+    },
+    notes: {
+      authentication: 'Todas las rutas (excepto register y login) requieren autenticación con JWT Bearer token',
+      authorization: 'Algunas rutas requieren roles específicos según se indica',
+      pagination: 'Los endpoints GET que retornan listas soportan paginación con parámetros page y limit',
+      filtering: 'Muchos endpoints soportan filtros mediante query parameters'
     }
   });
 });
@@ -138,7 +183,9 @@ const usersProxy = createProxyMiddleware({
   },
   onProxyReq: (proxyReq, req, res) => {
     console.log(`Proxy request to Users Service: ${req.method} ${req.url}`);
-  }
+  },
+  timeout: 30000,
+  proxyTimeout: 30000
 });
 
 // Configuración del proxy para Accounts Service
@@ -201,10 +248,33 @@ const rolesProxy = createProxyMiddleware({
   }
 });
 
+// Configuración del proxy para Events Service (dentro de Accounts Service)
+const eventsProxy = createProxyMiddleware({
+  target: config.ACCOUNTS_SERVICE_URL,
+  changeOrigin: true,
+  pathRewrite: {
+    '^/api/events': '/api/events'
+  },
+  onError: (err, req, res) => {
+    console.error('Proxy error (Events Service):', err);
+    res.status(503).json({
+      success: false,
+      message: 'Events Service no disponible',
+      error: 'Service temporarily unavailable'
+    });
+  },
+  onProxyReq: (proxyReq, req, res) => {
+    console.log(`Proxy request to Events Service: ${req.method} ${req.url}`);
+  }
+});
+
+
+
 // Rutas del proxy
 app.use('/api/users', usersProxy);
 app.use('/api/accounts', accountsProxy);
 app.use('/api/groups', groupsProxy);
+app.use('/api/events', eventsProxy);
 app.use('/api/roles', rolesProxy);
 
 // Middleware de rutas no encontradas
@@ -215,10 +285,11 @@ app.use(errorHandler);
 
 const PORT = config.GATEWAY_PORT;
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 API Gateway corriendo en puerto ${PORT}`);
   console.log(`📡 Health check disponible en http://localhost:${PORT}/health`);
   console.log(`📖 Documentación disponible en http://localhost:${PORT}/api`);
+  console.log(`🌐 API accesible desde la red local en http://0.0.0.0:${PORT}`);
   console.log(`🔄 Proxying to:`);
   console.log(`   - Users Service: ${config.USERS_SERVICE_URL}`);
   console.log(`   - Accounts Service: ${config.ACCOUNTS_SERVICE_URL}`);
