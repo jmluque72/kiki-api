@@ -1,7 +1,7 @@
 const { S3Client } = require('@aws-sdk/client-s3');
 const multerS3 = require('multer-s3');
 const { v4: uuidv4 } = require('uuid');
-require('dotenv').config({ path: '../env.config' });
+require('dotenv').config();
 
 // Configuración de AWS S3
 const s3Config = {

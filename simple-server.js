@@ -12,7 +12,7 @@ const fs = require('fs');
 const XLSX = require('xlsx');
 
 // Importar configuración
-require('dotenv').config({ path: './env.config' });
+require('dotenv').config();
 const config = require('./config/database');
 const { generateSignedUrl } = require('./config/s3.config');
 
