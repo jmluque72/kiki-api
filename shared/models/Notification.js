@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const Shared = require('./Shared');
 
 const notificationSchema = new mongoose.Schema({
   title: {
@@ -55,8 +56,8 @@ const notificationSchema = new mongoose.Schema({
   },
   priority: {
     type: String,
-    enum: ['low', 'medium', 'high'],
-    default: 'medium'
+    enum: ['low', 'normal', 'medium', 'high'],
+    default: 'normal'
   },
   scheduledFor: {
     type: Date,
@@ -138,9 +139,46 @@ notificationSchema.statics.getUserNotifications = async function(userId, options
     if (divisionId) {
       query.division = divisionId;
     }
+  } else if (userRole === 'familyadmin' || userRole === 'familyviewer') {
+    // Para familyadmin/familyviewer: buscar estudiantes asociados y obtener sus notificaciones
+    console.log('🔔 [MODEL] Usuario es familyadmin/familyviewer - buscando notificaciones de estudiantes asociados');
+    
+    // Buscar estudiantes asociados al usuario
+    const associations = await Shared.find({
+      user: userId,
+      account: accountId,
+      status: 'active'
+    }).populate('student', '_id');
+
+    if (associations.length === 0) {
+      console.log('🔔 [MODEL] No se encontraron estudiantes asociados');
+      return [];
+    }
+
+    // Obtener IDs de estudiantes asociados
+    const studentIds = associations
+      .map(assoc => assoc.student?._id)
+      .filter(id => id); // Filtrar IDs válidos
+
+    console.log('🔔 [MODEL] Estudiantes asociados:', studentIds);
+
+    if (studentIds.length === 0) {
+      console.log('🔔 [MODEL] No hay estudiantes válidos asociados');
+      return [];
+    }
+
+    // Buscar notificaciones donde los estudiantes sean destinatarios
+    query = {
+      account: accountId,
+      recipients: { $in: studentIds }
+    };
+    
+    if (divisionId) {
+      query.division = divisionId;
+    }
   } else {
-    // Para familyadmin/familyview: devolver SOLO las notificaciones donde el usuario es destinatario
-    console.log('🔔 [MODEL] Usuario es familyadmin/familyview - mostrando solo notificaciones destinadas al usuario');
+    // Para otros roles: devolver SOLO las notificaciones donde el usuario es destinatario directo
+    console.log('🔔 [MODEL] Usuario es otro rol - mostrando solo notificaciones destinadas al usuario');
     query = {
       account: accountId,
       recipients: userId

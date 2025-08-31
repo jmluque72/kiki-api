@@ -28,12 +28,8 @@ async function resetProfePassword() {
     // Nueva contraseña
     const newPassword = 'profe123';
     
-    // Hashear la nueva contraseña
-    const saltRounds = 10;
-    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
-    
-    // Actualizar la contraseña
-    user.password = hashedPassword;
+    // Actualizar la contraseña (el middleware pre-save la hasheará automáticamente)
+    user.password = newPassword;
     await user.save();
     
     console.log('✅ Contraseña actualizada exitosamente');

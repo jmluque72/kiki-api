@@ -1,3 +1,4 @@
+# Dockerfile simplificado para EasyVoley API con jsPDF
 FROM node:18-alpine
 
 # Crear directorio de trabajo
@@ -9,14 +10,23 @@ COPY package*.json ./
 # Instalar dependencias
 RUN npm ci --only=production
 
-# Instalar Express 4.x para evitar problemas de compatibilidad
-RUN npm install express@4.18.2
-
-# Copiar todo el código fuente
+# Copiar código de la aplicación
 COPY . .
 
-# Exponer puertos
-EXPOSE 3000 3001 3002
+# Configurar variables de entorno
+ENV NODE_ENV=production
+ENV PORT=3000
 
-# Comando para iniciar el servidor unificado
-CMD ["node", "--no-deprecation", "simple-server.js"] 
+# Crear usuario no-root para seguridad
+RUN addgroup -g 1001 -S nodejs
+RUN adduser -S nodejs -u 1001
+
+# Cambiar permisos del directorio
+RUN chown -R nodejs:nodejs /app
+USER nodejs
+
+# Exponer puerto
+EXPOSE 3000
+
+# Comando para iniciar la aplicación
+CMD ["node", "simple-server.js"] 

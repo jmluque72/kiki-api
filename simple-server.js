@@ -30,6 +30,8 @@ const Student = require('./shared/models/Student');
 const Notification = require('./shared/models/Notification');
 const Pickup = require('./shared/models/Pickup');
 const RequestedShared = require('./shared/models/RequestedShared');
+const PasswordReset = require('./shared/models/PasswordReset');
+const { sendPasswordResetEmail } = require('./config/email.config');
 
 // Función helper para crear asociaciones según el rol
 async function createAssociationByRole(userId, accountId, roleName, divisionId = null, studentId = null, createdBy) {
@@ -213,7 +215,7 @@ app.use(cors({
     // Permitir requests sin origin (como apps móviles)
     if (!origin) return callback(null, true);
     
-    // Permitir localhost y IPs locales
+    // Permitir localhost, IPs locales y dominios de producción
     const allowedOrigins = [
       'http://localhost:3000',
       'http://localhost:5173',
@@ -225,6 +227,8 @@ app.use(cors({
       'http://127.0.0.1:5174',
       'http://127.0.0.1:8080',
       'http://127.0.0.1:8081',
+      'https://backoffice.kiki.com.ar',
+      'http://backoffice.kiki.com.ar',
       process.env.FRONTEND_URL
     ].filter(Boolean);
     
@@ -260,7 +264,8 @@ app.use((req, res, next) => {
   console.log(`🔑 Headers:`, {
     'authorization': req.headers.authorization ? 'Bearer ***' : 'No auth',
     'content-type': req.headers['content-type'],
-    'user-agent': req.headers['user-agent']
+    'user-agent': req.headers['user-agent'],
+    'origin': req.headers['origin'] || 'No origin'
   });
   console.log(`📋 Query:`, req.query);
   console.log(`🆔 Params:`, req.params);
@@ -349,7 +354,7 @@ const authenticateToken = async (req, res, next) => {
 app.get('/health', (req, res) => {
   res.json({
     success: true,
-    message: 'API Unificada de Kiki está funcionando correctamente',
+    message: 'API de Kiki está funcionando correctamente',
     timestamp: new Date().toISOString(),
     version: '1.0.0',
     services: ['users', 'accounts', 'groups', 'events', 'roles']
@@ -360,7 +365,7 @@ app.get('/health', (req, res) => {
 app.get('/api', (req, res) => {
   res.json({
     success: true,
-    message: 'API Unificada de Kiki',
+    message: 'API de Kiki',
     version: '1.0.0',
     endpoints: {
       auth: {
@@ -807,19 +812,50 @@ app.put('/api/users/avatar', authenticateToken, upload.single('avatar'), async (
       });
     }
 
-    // El archivo se guardó localmente, generar URL accesible
-    const imageKey = `avatars/${userId}/${req.file.filename}`;
+    // El archivo se guardó localmente, ahora lo subimos a S3
     console.log('🖼️ [UPDATE AVATAR] Archivo guardado localmente:', req.file.filename);
+    console.log('🖼️ [UPDATE AVATAR] Subiendo a S3...');
     
-    // Generar URL local accesible (como funciona para las actividades)
-    const avatarUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-    console.log('🖼️ [UPDATE AVATAR] URL local generada:', avatarUrl);
+    // Leer el archivo local
+    const fileBuffer = fs.readFileSync(req.file.path);
+    
+    // Subir a S3
+    const AWS = require('aws-sdk');
+    const s3 = new AWS.S3({
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      region: process.env.AWS_REGION || 'us-east-1'
+    });
+    
+    const avatarKey = `avatars/${userId}/${Date.now()}-${req.file.originalname}`;
+    
+    const uploadParams = {
+      Bucket: process.env.AWS_S3_BUCKET_NAME,
+      Key: avatarKey,
+      Body: fileBuffer,
+      ContentType: req.file.mimetype
+    };
+    
+    const s3Result = await s3.upload(uploadParams).promise();
+    console.log('🖼️ [UPDATE AVATAR] Archivo subido a S3:', s3Result.Location);
+    
+    // Eliminar archivo local
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+        console.log('🖼️ [UPDATE AVATAR] Archivo local eliminado:', req.file.path);
+      } else {
+        console.log('🖼️ [UPDATE AVATAR] Archivo local no existe:', req.file.path);
+      }
+    } catch (error) {
+      console.error('🖼️ [UPDATE AVATAR] Error eliminando archivo local:', error.message);
+    }
 
     // Actualizar el usuario con la nueva imagen
     const updatedUser = await User.findByIdAndUpdate(
       userId,
       { 
-        avatar: imageKey,
+        avatar: avatarKey, // Guardar la key de S3 (no la URL completa)
         updatedAt: new Date()
       },
       { new: true }
@@ -834,6 +870,12 @@ app.put('/api/users/avatar', authenticateToken, upload.single('avatar'), async (
 
     console.log('✅ [UPDATE AVATAR] Avatar actualizado exitosamente');
 
+    // Generar URL firmada para la respuesta
+    const { generateSignedUrl } = require('./config/s3.config');
+    const signedUrl = await generateSignedUrl(avatarKey, 3600); // 1 hora
+    
+    console.log('🖼️ [UPDATE AVATAR] URL firmada generada:', signedUrl);
+
     res.json({
       success: true,
       message: 'Avatar actualizado exitosamente',
@@ -842,7 +884,7 @@ app.put('/api/users/avatar', authenticateToken, upload.single('avatar'), async (
           _id: updatedUser._id,
           name: updatedUser.name,
           email: updatedUser.email,
-          avatar: avatarUrl,
+          avatar: signedUrl, // Devolver la URL firmada
           role: updatedUser.role
         }
       }
@@ -919,7 +961,8 @@ app.put('/api/students/:studentId/avatar', authenticateToken, uploadStudentAvata
       bucket: req.file.bucket
     });
     
-    // Guardar la key de S3 (no la URL completa)
+    // Nota: Para estudiantes usamos multer-s3 directamente, pero podríamos procesar antes de subir
+    // Por ahora mantenemos la funcionalidad actual
     const avatarKey = req.file.key;
     console.log('🖼️ [UPDATE STUDENT AVATAR] Key de S3 guardada:', avatarKey);
 
@@ -3727,10 +3770,37 @@ app.get('/api/students/by-account-division', authenticateToken, async (req, res)
       .populate('division', 'nombre descripcion')
       .sort({ apellido: 1, nombre: 1 });
 
+    // Procesar URLs de avatares para cada estudiante
+    const studentsWithAvatarUrls = await Promise.all(students.map(async (student) => {
+      const studentObj = student.toObject();
+      
+      if (student.avatar) {
+        try {
+          // Verificar si es una key de S3 para estudiantes
+          if (student.avatar.includes('students/')) {
+            // Es una key de S3 para estudiantes, generar URL firmada
+            const { generateSignedUrl } = require('./config/s3.config');
+            const signedUrl = await generateSignedUrl(student.avatar, 3600); // 1 hora
+            studentObj.avatar = signedUrl;
+          } else if (!student.avatar.startsWith('http')) {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${student.avatar.split('/').pop()}`;
+            studentObj.avatar = localUrl;
+          }
+          // Si ya es una URL completa, no hacer nada
+        } catch (error) {
+          console.error('Error procesando avatar del estudiante:', student._id, error);
+          // En caso de error, mantener el avatar original
+        }
+      }
+      
+      return studentObj;
+    }));
+
     res.json({
       success: true,
       data: {
-        students,
+        students: studentsWithAvatarUrls,
         total: students.length
       }
     });
@@ -5200,12 +5270,13 @@ app.delete('/api/notifications/:id', authenticateToken, async (req, res) => {
       });
     }
     
-    // Verificar permisos: solo el remitente o un superadmin puede eliminar
+    // Verificar permisos: remitente, superadmin o coordinador puede eliminar
     const user = await User.findById(userId).populate('role');
     const isSuperAdmin = user?.role?.nombre === 'superadmin';
+    const isCoordinador = user?.role?.nombre === 'coordinador';
     const isSender = notification.sender.toString() === userId;
     
-    if (!isSuperAdmin && !isSender) {
+    if (!isSuperAdmin && !isCoordinador && !isSender) {
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para eliminar esta notificación'
@@ -5455,10 +5526,39 @@ app.get('/api/backoffice/notifications', authenticateToken, async (req, res) => 
       .populate('sender', 'nombre email')
       .populate('account', 'nombre')
       .populate('division', 'nombre')
-      .populate('recipients', 'nombre email') // Agregar población de destinatarios
       .sort({ sentAt: -1 })
       .limit(parseInt(limit))
       .skip(parseInt(skip));
+
+    // Poblar destinatarios manualmente (usuarios y estudiantes)
+    const populatedNotifications = [];
+    
+    for (let notification of notifications) {
+      // Convertir a objeto plano primero
+      let notificationObj = notification.toObject();
+      
+      if (notification.recipients && notification.recipients.length > 0) {
+        const populatedRecipients = [];
+        
+        for (let recipientId of notification.recipients) {
+          // Intentar buscar como usuario
+          let recipient = await User.findById(recipientId).select('nombre email');
+          
+          // Si no es usuario, buscar como estudiante
+          if (!recipient) {
+            recipient = await Student.findById(recipientId).select('nombre email');
+          }
+          
+          if (recipient) {
+            populatedRecipients.push(recipient.toObject());
+          }
+        }
+        
+        notificationObj.recipients = populatedRecipients;
+      }
+      
+      populatedNotifications.push(notificationObj);
+    }
     
     // Calcular información de paginación
     const currentPage = Math.floor(parseInt(skip) / parseInt(limit)) + 1;
@@ -5466,12 +5566,12 @@ app.get('/api/backoffice/notifications', authenticateToken, async (req, res) => 
     const hasNextPage = currentPage < totalPages;
     const hasPrevPage = currentPage > 1;
     
-    console.log('🔔 [BACKOFFICE NOTIFICATIONS] Notificaciones encontradas:', notifications.length);
+    console.log('🔔 [BACKOFFICE NOTIFICATIONS] Notificaciones encontradas:', populatedNotifications.length);
     console.log('🔔 [BACKOFFICE NOTIFICATIONS] Paginación:', { currentPage, totalPages, total });
     
     res.json({
       success: true,
-      data: notifications,
+      data: populatedNotifications,
       pagination: {
         currentPage,
         totalPages,
@@ -5545,7 +5645,7 @@ app.post('/api/notifications', authenticateToken, async (req, res) => {
       division: divisionId,
       recipients,
       status: 'sent',
-      priority: 'medium',
+      priority: 'normal',
       readBy: [],
       sentAt: new Date()
     });
@@ -5996,14 +6096,18 @@ app.get('/api/backoffice/asistencias', authenticateToken, async (req, res) => {
     }
     
     if (fechaInicio && fechaFin) {
+      // El campo fecha es String en formato YYYY-MM-DD, no Date
+      console.log('📊 [BACKOFFICE ASISTENCIAS] Aplicando filtro de fechas:', { fechaInicio, fechaFin });
       query.fecha = {
-        $gte: new Date(fechaInicio),
-        $lte: new Date(fechaFin)
+        $gte: fechaInicio,
+        $lte: fechaFin
       };
     } else if (fechaInicio) {
-      query.fecha = { $gte: new Date(fechaInicio) };
+      console.log('📊 [BACKOFFICE ASISTENCIAS] Aplicando filtro fecha inicio:', fechaInicio);
+      query.fecha = { $gte: fechaInicio };
     } else if (fechaFin) {
-      query.fecha = { $lte: new Date(fechaFin) };
+      console.log('📊 [BACKOFFICE ASISTENCIAS] Aplicando filtro fecha fin:', fechaFin);
+      query.fecha = { $lte: fechaFin };
     }
     
     if (estado && estado !== 'all') {
@@ -6019,6 +6123,7 @@ app.get('/api/backoffice/asistencias', authenticateToken, async (req, res) => {
     }
     
     console.log('📊 [BACKOFFICE ASISTENCIAS] Query final:', JSON.stringify(query, null, 2));
+    console.log('📊 [BACKOFFICE ASISTENCIAS] Query fecha específico:', JSON.stringify(query.fecha, null, 2));
     
     // Obtener total de asistencias para la paginación
     const total = await Asistencia.countDocuments(query);
@@ -7412,6 +7517,204 @@ app.post('/api/shared/request', authenticateToken, async (req, res) => {
   }
 });
 
+// ========================================
+// ENDPOINTS DE RECUPERACIÓN DE CONTRASEÑA
+// ========================================
+
+// Generar código de recuperación y enviar email
+app.post('/api/users/forgot-password', async (req, res) => {
+  try {
+    const { email } = req.body;
+
+    if (!email) {
+      return res.status(400).json({
+        success: false,
+        message: 'El email es requerido'
+      });
+    }
+
+    // Verificar si el usuario existe
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'No se encontró un usuario con ese email'
+      });
+    }
+
+    // Generar código de 6 dígitos
+    const code = Math.floor(100000 + Math.random() * 900000).toString();
+    
+    // El código expira en 10 minutos
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+    // Eliminar códigos anteriores para este email
+    await PasswordReset.deleteMany({ email: email.toLowerCase() });
+
+    // Crear nuevo código de recuperación
+    const passwordReset = new PasswordReset({
+      email: email.toLowerCase(),
+      code,
+      expiresAt
+    });
+
+    await passwordReset.save();
+
+    try {
+      // Enviar email con el código
+      await sendPasswordResetEmail(email, code, user.nombre);
+      
+      res.json({
+        success: true,
+        message: 'Se ha enviado un código de recuperación a tu email',
+        data: {
+          email: email.toLowerCase()
+        }
+      });
+    } catch (emailError) {
+      console.error('Error enviando email:', emailError);
+      
+      // Si falla el envío de email, eliminar el código y devolver error
+      await PasswordReset.deleteOne({ email: email.toLowerCase() });
+      
+      res.status(500).json({
+        success: false,
+        message: 'Error enviando el email. Por favor, intenta nuevamente.'
+      });
+    }
+
+  } catch (error) {
+    console.error('Error en forgot-password:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Verificar código de recuperación
+app.post('/api/users/verify-reset-code', async (req, res) => {
+  try {
+    const { email, code } = req.body;
+
+    if (!email || !code) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email y código son requeridos'
+      });
+    }
+
+    // Buscar el código de recuperación
+    const passwordReset = await PasswordReset.findOne({
+      email: email.toLowerCase(),
+      code
+    });
+
+    if (!passwordReset) {
+      return res.status(400).json({
+        success: false,
+        message: 'Código inválido'
+      });
+    }
+
+    // Verificar si el código es válido
+    if (!passwordReset.isValid()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Código expirado o ya utilizado'
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Código verificado correctamente'
+    });
+
+  } catch (error) {
+    console.error('Error en verify-reset-code:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Resetear contraseña
+app.post('/api/users/reset-password', async (req, res) => {
+  try {
+    const { email, code, newPassword } = req.body;
+
+    if (!email || !code || !newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'Email, código y nueva contraseña son requeridos'
+      });
+    }
+
+    if (newPassword.length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'La contraseña debe tener al menos 6 caracteres'
+      });
+    }
+
+    // Buscar el código de recuperación
+    const passwordReset = await PasswordReset.findOne({
+      email: email.toLowerCase(),
+      code
+    });
+
+    if (!passwordReset) {
+      return res.status(400).json({
+        success: false,
+        message: 'Código inválido'
+      });
+    }
+
+    // Verificar si el código es válido
+    if (!passwordReset.isValid()) {
+      return res.status(400).json({
+        success: false,
+        message: 'Código expirado o ya utilizado'
+      });
+    }
+
+    // Buscar el usuario
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+
+    // Hashear la nueva contraseña
+    const saltRounds = 12;
+    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
+
+    // Actualizar la contraseña del usuario
+    user.password = hashedPassword;
+    await user.save();
+
+    // Marcar el código como usado
+    await passwordReset.markAsUsed();
+
+    console.log(`✅ [PASSWORD RESET] Contraseña actualizada para ${email}`);
+
+    res.json({
+      success: true,
+      message: 'Contraseña actualizada correctamente'
+    });
+
+  } catch (error) {
+    console.error('Error en reset-password:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
 // Middleware para rutas no encontradas
 app.use('*', (req, res) => {
   res.status(404).json({
@@ -7423,7 +7726,7 @@ app.use('*', (req, res) => {
 const PORT = config.GATEWAY_PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 API Unificada de Kiki corriendo en puerto ${PORT}`);
+  console.log(`🚀 API de Kiki corriendo en puerto ${PORT}`);
   console.log(`📡 Health check disponible en http://localhost:${PORT}/health`);
   console.log(`📖 Documentación disponible en http://localhost:${PORT}/api`);
   console.log(`🌐 API accesible desde la red local en http://0.0.0.0:${PORT}`);

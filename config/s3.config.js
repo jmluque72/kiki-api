@@ -1,4 +1,4 @@
-const { S3Client } = require('@aws-sdk/client-s3');
+const AWS = require('aws-sdk');
 const multerS3 = require('multer-s3');
 const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
@@ -11,8 +11,8 @@ const s3Config = {
   bucketName: process.env.AWS_S3_BUCKET_NAME
 };
 
-// Crear instancia de S3 usando AWS SDK v3
-const s3 = new S3Client({
+// Crear instancia de S3 usando AWS SDK v2 (compatible con multer-s3)
+const s3 = new AWS.S3({
   accessKeyId: s3Config.accessKeyId,
   secretAccessKey: s3Config.secretAccessKey,
   region: s3Config.region
@@ -32,19 +32,16 @@ const multerS3Config = {
 };
 
 // Función para generar URL firmada de S3
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { GetObjectCommand } = require('@aws-sdk/client-s3');
-
 const generateSignedUrl = async (key, expiresIn = 3600) => {
   if (!key) return null;
   
-  const command = new GetObjectCommand({
-    Bucket: s3Config.bucketName,
-    Key: key
-  });
-
   try {
-    return await getSignedUrl(s3, command, { expiresIn });
+    const signedUrl = s3.getSignedUrl('getObject', {
+      Bucket: s3Config.bucketName,
+      Key: key,
+      Expires: expiresIn
+    });
+    return signedUrl;
   } catch (error) {
     console.error('Error generando URL firmada:', error);
     return null;

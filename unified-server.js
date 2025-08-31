@@ -28,7 +28,7 @@ app.use(cors({
     // Permitir requests sin origin (como apps móviles)
     if (!origin) return callback(null, true);
     
-    // Permitir localhost y IPs locales
+    // Permitir localhost, IPs locales y dominios de producción
     const allowedOrigins = [
       'http://localhost:3000',
       'http://localhost:5173',
@@ -40,6 +40,8 @@ app.use(cors({
       'http://127.0.0.1:5174',
       'http://127.0.0.1:8080',
       'http://127.0.0.1:8081',
+      'https://backoffice.kiki.com.ar',
+      'http://backoffice.kiki.com.ar',
       process.env.FRONTEND_URL
     ].filter(Boolean);
     

@@ -277,14 +277,7 @@ router.post('/s3/image', authenticateToken, uploadToMemory.single('image'), asyn
 
     // Upload directo a S3 sin multer-s3
     const { v4: uuidv4 } = require('uuid');
-    const AWS = require('aws-sdk');
-    require('dotenv').config();
-
-    const s3 = new AWS.S3({
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
-      region: process.env.AWS_REGION || 'us-east-1'
-    });
+    const { s3 } = require('../config/s3.config');
 
     const fileExtension = req.file.mimetype.split('/')[1];
     const fileName = `${uuidv4()}.${fileExtension}`;
