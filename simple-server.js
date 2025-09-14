@@ -30,6 +30,7 @@ const Activity = require('./shared/models/Activity');
 const ActivityFavorite = require('./shared/models/ActivityFavorite');
 const Student = require('./shared/models/Student');
 const Notification = require('./shared/models/Notification');
+const Device = require('./shared/models/Device');
 const Pickup = require('./shared/models/Pickup');
 const RequestedShared = require('./shared/models/RequestedShared');
 const PasswordReset = require('./shared/models/PasswordReset');
@@ -2420,16 +2421,39 @@ app.get('/accounts', authenticateToken, async (req, res) => {
     const currentUser = req.user;
     console.log('🔍 Usuario actual:', currentUser.email, 'Rol:', currentUser.role?.nombre);
 
-    // Solo superadmin puede ver todas las cuentas
-    if (currentUser.role?.nombre !== 'superadmin') {
+    // Verificar permisos según el rol
+    if (currentUser.role?.nombre === 'superadmin') {
+      console.log('👑 Superadmin: mostrando todas las cuentas');
+    } else if (currentUser.role?.nombre === 'adminaccount') {
+      console.log('👤 Adminaccount: mostrando solo sus cuentas');
+      // Obtener las cuentas asociadas al usuario adminaccount
+      const userAssociations = await Shared.find({
+        user: currentUser._id,
+        status: 'active'
+      }).select('account');
+      
+      const accountIds = userAssociations.map(assoc => assoc.account);
+      if (accountIds.length === 0) {
+        return res.status(200).json({
+          success: true,
+          data: {
+            accounts: [],
+            total: 0,
+            page,
+            limit
+          }
+        });
+      }
+      
+      // Filtrar por las cuentas del usuario
+      query._id = { $in: accountIds };
+    } else {
       console.log('🚫 Usuario no autorizado para ver cuentas:', currentUser.role?.nombre);
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para ver cuentas'
       });
     }
-
-    console.log('👑 Superadmin: mostrando todas las cuentas');
 
     // Obtener datos reales de la base de datos
     const total = await Account.countDocuments(query);
@@ -2686,7 +2710,7 @@ app.post('/accounts/:accountId/admin-users', authenticateToken, async (req, res)
     // Populate el rol del usuario
     await adminUser.populate('role', 'nombre descripcion');
 
-    res.status(201).json({
+    const responseData = {
       success: true,
       message: 'Usuario adminaccount creado exitosamente',
       data: {
@@ -2703,13 +2727,136 @@ app.post('/accounts/:accountId/admin-users', authenticateToken, async (req, res)
           nombre: account.nombre
         }
       }
-    });
+    };
+
+    console.log('✅ [CREATE ADMIN USER] Respuesta exitosa:', JSON.stringify(responseData, null, 2));
+    res.status(201).json(responseData);
 
   } catch (error) {
     console.error('❌ [CREATE ADMIN USER] Error:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Endpoint para obtener estadísticas del dashboard (solo superadmin)
+app.get('/dashboard/stats', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.user;
+
+    // Verificar que el usuario sea superadmin
+    const currentUser = await User.findById(userId).populate('role');
+    if (!currentUser || currentUser.role?.nombre !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los superadministradores pueden ver estadísticas del dashboard'
+      });
+    }
+
+    console.log('📊 [DASHBOARD STATS] Obteniendo estadísticas para superadmin...');
+
+    // Obtener estadísticas
+    const [
+      institucionesActivas,
+      usuariosActivos,
+      alumnosActivos,
+      totalActividades
+    ] = await Promise.all([
+      // Instituciones activas
+      Account.countDocuments({ activo: true }),
+      
+      // Usuarios activos (todos los usuarios aprobados)
+      User.countDocuments({ status: 'approved' }),
+      
+      // Alumnos activos (usuarios con rol estudiante)
+      User.countDocuments({ 
+        status: 'approved',
+        role: await Role.findOne({ nombre: 'estudiante' }).select('_id')
+      }),
+      
+      // Total de actividades
+      Activity.countDocuments({})
+    ]);
+
+    const stats = {
+      institucionesActivas,
+      usuariosActivos,
+      alumnosActivos,
+      totalActividades
+    };
+
+    console.log('📊 [DASHBOARD STATS] Estadísticas obtenidas:', stats);
+
+    res.json({
+      success: true,
+      data: stats
+    });
+
+  } catch (error) {
+    console.error('❌ [DASHBOARD STATS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener estadísticas del dashboard'
+    });
+  }
+});
+
+// Endpoint para obtener actividades recientes (solo superadmin)
+app.get('/dashboard/recent-activities', authenticateToken, async (req, res) => {
+  try {
+    const { userId } = req.user;
+
+    // Verificar que el usuario sea superadmin
+    const currentUser = await User.findById(userId).populate('role');
+    if (!currentUser || currentUser.role?.nombre !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los superadministradores pueden ver actividades recientes'
+      });
+    }
+
+    console.log('📋 [RECENT ACTIVITIES] Obteniendo últimas 20 actividades...');
+
+    // Obtener las últimas 20 actividades con información de institución y división
+    const activities = await Activity.find({})
+      .populate({
+        path: 'usuario',
+        select: 'name email'
+      })
+      .populate({
+        path: 'account',
+        select: 'nombre'
+      })
+      .populate({
+        path: 'division',
+        select: 'nombre'
+      })
+      .sort({ createdAt: -1 })
+      .limit(20)
+      .select('descripcion account division createdAt');
+
+    const recentActivities = activities.map(activity => ({
+      id: activity._id,
+      descripcion: activity.descripcion,
+      institucion: activity.account?.nombre || 'Sin institución',
+      division: activity.division?.nombre || 'Sin división',
+      fecha: activity.createdAt
+    }));
+
+    console.log('📋 [RECENT ACTIVITIES] Actividades obtenidas:', recentActivities.length);
+
+    res.json({
+      success: true,
+      data: recentActivities
+    });
+
+  } catch (error) {
+    console.error('❌ [RECENT ACTIVITIES] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener actividades recientes'
     });
   }
 });
@@ -3050,6 +3197,114 @@ app.get('/groups/account/:accountId', authenticateToken, async (req, res) => {
 
 // ===== RUTAS DE EVENTOS =====
 
+// Obtener datos del calendario de eventos
+app.get('/backoffice/eventos/calendar', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { 
+      divisionId,
+      fechaInicio,
+      fechaFin
+    } = req.query;
+    
+    console.log('📅 [CALENDAR EVENTOS] Usuario:', userId);
+    console.log('📅 [CALENDAR EVENTOS] Parámetros:', { divisionId, fechaInicio, fechaFin });
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Construir query base
+    let query = {};
+    
+    // Lógica según el rol
+    if (user.role?.nombre === 'superadmin') {
+      // Superadmin ve todos los eventos
+    } else if (user.role?.nombre === 'adminaccount') {
+      // Adminaccount ve todos los eventos de su cuenta
+      query.account = user.account?._id;
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para acceder a esta sección'
+      });
+    }
+    
+    // Filtros adicionales
+    if (divisionId) {
+      query.division = divisionId;
+    }
+    
+    if (fechaInicio && fechaFin) {
+      query.fechaInicio = {
+        $gte: fechaInicio,
+        $lte: fechaFin
+      };
+    }
+    
+    console.log('📅 [CALENDAR EVENTOS] Query:', JSON.stringify(query, null, 2));
+    
+    // Buscar eventos
+    const eventos = await Event.find(query)
+      .populate('account', 'nombre')
+      .populate('division', 'nombre')
+      .populate('organizador', 'name email')
+      .lean();
+    
+    console.log('📅 [CALENDAR EVENTOS] Eventos encontrados:', eventos.length);
+    
+    // Agrupar eventos por fecha
+    const calendarData = {};
+    
+    eventos.forEach(evento => {
+      const fecha = evento.fechaInicio.split('T')[0]; // YYYY-MM-DD
+      
+      if (!calendarData[fecha]) {
+        calendarData[fecha] = {
+          fecha: fecha,
+          totalEventos: 0,
+          eventos: []
+        };
+      }
+      
+      calendarData[fecha].totalEventos++;
+      calendarData[fecha].eventos.push({
+        _id: evento._id,
+        nombre: evento.nombre,
+        descripcion: evento.descripcion,
+        fechaInicio: evento.fechaInicio,
+        fechaFin: evento.fechaFin,
+        ubicacion: evento.ubicacion,
+        categoria: evento.categoria,
+        estado: evento.estado,
+        participantes: evento.participantes || [],
+        capacidadMaxima: evento.capacidadMaxima,
+        organizador: evento.organizador,
+        autorizaciones: evento.autorizaciones || []
+      });
+    });
+    
+    console.log('📅 [CALENDAR EVENTOS] Datos del calendario generados:', Object.keys(calendarData).length, 'fechas');
+    
+    res.json({
+      success: true,
+      data: calendarData
+    });
+    
+  } catch (error) {
+    console.error('❌ [CALENDAR EVENTOS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener datos del calendario de eventos'
+    });
+  }
+});
+
 // Listar eventos
 app.get('/events', authenticateToken, async (req, res) => {
   try {
@@ -3276,7 +3531,7 @@ app.get('/asistencias', authenticateToken, async (req, res) => {
 
     // Filtros adicionales
     if (grupoId) {
-      query.grupo = grupoId;
+      query.division = grupoId;
     }
     
     if (alumnoId) {
@@ -6285,6 +6540,245 @@ app.get('/students/:studentId', authenticateToken, async (req, res) => {
   }
 });
 
+// ==================== FUNCIONES AUXILIARES PARA PUSH NOTIFICATIONS ====================
+
+/**
+ * Obtener usuarios familyadmin y familyviewer asociados a un estudiante
+ * @param {string} studentId - ID del estudiante
+ * @returns {Array} Array de usuarios con sus dispositivos
+ */
+async function getFamilyUsersForStudent(studentId) {
+  try {
+    console.log('🔔 [FAMILY LOOKUP] Buscando familiares para estudiante:', studentId);
+    
+    // Buscar asociaciones activas del estudiante con roles familyadmin y familyviewer
+    const associations = await Shared.find({
+      student: studentId,
+      status: 'active',
+      'role.nombre': { $in: ['familyadmin', 'familyviewer'] }
+    }).populate('user', 'name email').populate('role', 'nombre');
+    
+    console.log('🔔 [FAMILY LOOKUP] Asociaciones encontradas:', associations.length);
+    
+    const familyUsers = [];
+    
+    for (const association of associations) {
+      if (association.user && association.role) {
+        // Obtener dispositivos activos del usuario
+        const devices = await Device.getActiveDevicesForUser(association.user._id);
+        
+        if (devices.length > 0) {
+          familyUsers.push({
+            user: association.user,
+            role: association.role,
+            devices: devices
+          });
+          console.log('🔔 [FAMILY LOOKUP] Usuario con dispositivos:', association.user.name, '- Dispositivos:', devices.length);
+        } else {
+          console.log('🔔 [FAMILY LOOKUP] Usuario sin dispositivos activos:', association.user.name);
+        }
+      }
+    }
+    
+    console.log('🔔 [FAMILY LOOKUP] Total usuarios familiares con dispositivos:', familyUsers.length);
+    return familyUsers;
+    
+  } catch (error) {
+    console.error('❌ [FAMILY LOOKUP] Error:', error);
+    return [];
+  }
+}
+
+/**
+ * Enviar push notifications a usuarios familiares de un estudiante
+ * @param {string} studentId - ID del estudiante
+ * @param {Object} notification - Datos de la notificación
+ */
+async function sendPushNotificationToStudentFamily(studentId, notification) {
+  try {
+    console.log('🔔 [PUSH SEND] Enviando push notification para estudiante:', studentId);
+    
+    // Obtener usuarios familiares
+    const familyUsers = await getFamilyUsersForStudent(studentId);
+    
+    if (familyUsers.length === 0) {
+      console.log('🔔 [PUSH SEND] No se encontraron usuarios familiares con dispositivos');
+      return { sent: 0, failed: 0 };
+    }
+    
+    const pushNotificationService = require('./pushNotificationService');
+    let sent = 0;
+    let failed = 0;
+    
+    // Enviar a cada usuario familiar
+    for (const familyUser of familyUsers) {
+      for (const device of familyUser.devices) {
+        try {
+          const pushNotification = {
+            title: notification.title,
+            message: notification.message,
+            data: {
+              type: 'notification',
+              notificationId: notification._id,
+              studentId: studentId,
+              priority: notification.priority || 'normal'
+            }
+          };
+          
+          await pushNotificationService.sendNotification(
+            device.pushToken,
+            device.platform,
+            pushNotification
+          );
+          
+          // Actualizar último uso del dispositivo
+          await device.updateLastUsed();
+          
+          sent++;
+          console.log('🔔 [PUSH SEND] ✅ Enviado a:', familyUser.user.name, '-', device.platform);
+          
+        } catch (error) {
+          failed++;
+          console.error('🔔 [PUSH SEND] ❌ Error enviando a:', familyUser.user.name, '-', error.message);
+          
+          // Si el token es inválido, desactivar el dispositivo
+          if (error.message.includes('InvalidRegistration') || error.message.includes('NotRegistered')) {
+            await device.deactivate();
+            console.log('🔔 [PUSH SEND] Dispositivo desactivado por token inválido');
+          }
+        }
+      }
+    }
+    
+    console.log('🔔 [PUSH SEND] Resumen - Enviados:', sent, 'Fallidos:', failed);
+    return { sent, failed };
+    
+  } catch (error) {
+    console.error('❌ [PUSH SEND] Error general:', error);
+    return { sent: 0, failed: 1 };
+  }
+}
+
+// ==================== ENDPOINTS DE PUSH NOTIFICATIONS ====================
+
+// Registrar token de dispositivo para push notifications
+app.post('/push/register-token', authenticateToken, async (req, res) => {
+  try {
+    const { token, platform, deviceId, appVersion, osVersion } = req.body;
+    const userId = req.user.userId;
+
+    console.log('🔔 [PUSH REGISTER] Registrando token para usuario:', userId);
+
+    // Validar campos requeridos
+    if (!token || !platform) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token y platform son requeridos'
+      });
+    }
+
+    // Validar plataforma
+    if (!['ios', 'android'].includes(platform)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Platform debe ser "ios" o "android"'
+      });
+    }
+
+    // Buscar o crear dispositivo
+    const device = await Device.findOneAndUpdate(
+      { 
+        userId: userId,
+        pushToken: token 
+      },
+      {
+        userId: userId,
+        pushToken: token,
+        platform: platform,
+        deviceId: deviceId || null,
+        appVersion: appVersion || null,
+        osVersion: osVersion || null,
+        isActive: true,
+        lastUsed: new Date()
+      },
+      { 
+        upsert: true, 
+        new: true 
+      }
+    );
+
+    console.log('🔔 [PUSH REGISTER] Token registrado exitosamente:', device._id);
+
+    res.json({
+      success: true,
+      message: 'Token registrado exitosamente',
+      data: {
+        deviceId: device._id,
+        platform: device.platform,
+        isActive: device.isActive
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [PUSH REGISTER] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error registrando token de dispositivo'
+    });
+  }
+});
+
+// Desregistrar token de dispositivo
+app.post('/push/unregister-token', authenticateToken, async (req, res) => {
+  try {
+    const { token } = req.body;
+    const userId = req.user.userId;
+
+    console.log('🔔 [PUSH UNREGISTER] Desregistrando token para usuario:', userId);
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Token es requerido'
+      });
+    }
+
+    // Desactivar dispositivo
+    const device = await Device.findOneAndUpdate(
+      { 
+        userId: userId,
+        pushToken: token 
+      },
+      { 
+        isActive: false,
+        lastUsed: new Date()
+      },
+      { new: true }
+    );
+
+    if (!device) {
+      return res.status(404).json({
+        success: false,
+        message: 'Token no encontrado'
+      });
+    }
+
+    console.log('🔔 [PUSH UNREGISTER] Token desregistrado exitosamente');
+
+    res.json({
+      success: true,
+      message: 'Token desregistrado exitosamente'
+    });
+
+  } catch (error) {
+    console.error('❌ [PUSH UNREGISTER] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error desregistrando token de dispositivo'
+    });
+  }
+});
+
 // ==================== ENDPOINTS DE NOTIFICACIONES ====================
 
 // Obtener notificaciones del usuario (endpoint general)
@@ -7335,6 +7829,30 @@ app.post('/notifications', authenticateToken, async (req, res) => {
     await notification.save();
     console.log('🔔 [SEND NOTIFICATION] Notificación guardada:', notification._id);
 
+    // Enviar push notifications a usuarios familiares de estudiantes
+    if (recipients && recipients.length > 0) {
+      console.log('🔔 [SEND NOTIFICATION] Enviando push notifications a familiares...');
+      
+      // Verificar si los destinatarios son estudiantes
+      const students = await Student.find({ _id: { $in: recipients } });
+      
+      if (students.length > 0) {
+        console.log('🔔 [SEND NOTIFICATION] Encontrados', students.length, 'estudiantes destinatarios');
+        
+        // Enviar push notification a cada estudiante
+        for (const student of students) {
+          try {
+            const pushResult = await sendPushNotificationToStudentFamily(student._id, notification);
+            console.log('🔔 [SEND NOTIFICATION] Push para estudiante', student.nombre, '- Enviados:', pushResult.sent, 'Fallidos:', pushResult.failed);
+          } catch (pushError) {
+            console.error('🔔 [SEND NOTIFICATION] Error enviando push para estudiante', student.nombre, ':', pushError.message);
+          }
+        }
+      } else {
+        console.log('🔔 [SEND NOTIFICATION] No se encontraron estudiantes en los destinatarios');
+      }
+    }
+
     // Populate sender info
     await notification.populate('sender', 'nombre email');
 
@@ -7518,6 +8036,17 @@ app.post('/events/create', authenticateToken, async (req, res) => {
         if (notifications.length > 0) {
           await Notification.insertMany(notifications);
           console.log('📢 [CREATE EVENT] Notificaciones creadas:', notifications.length);
+          
+          // Enviar push notifications a usuarios familiares
+          console.log('📢 [CREATE EVENT] Enviando push notifications a familiares...');
+          for (const notification of notifications) {
+            try {
+              const pushResult = await sendPushNotificationToStudentFamily(notification.recipients[0], notification);
+              console.log('📢 [CREATE EVENT] Push para evento - Enviados:', pushResult.sent, 'Fallidos:', pushResult.failed);
+            } catch (pushError) {
+              console.error('📢 [CREATE EVENT] Error enviando push para evento:', pushError.message);
+            }
+          }
         }
 
       } catch (notificationError) {
@@ -8101,6 +8630,177 @@ app.get('/accounts/:accountId/logo', authenticateToken, async (req, res) => {
 
 // ===== ENDPOINTS DE ASISTENCIAS PARA BACKOFFICE =====
 
+// Obtener resumen de asistencias para calendario (solo fechas con asistencias)
+app.get('/backoffice/asistencias/calendar', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { 
+      grupoId,
+      fechaInicio,
+      fechaFin
+    } = req.query;
+    
+    console.log('📅 [CALENDAR ASISTENCIAS] Usuario:', userId);
+    console.log('📅 [CALENDAR ASISTENCIAS] Parámetros:', { grupoId, fechaInicio, fechaFin });
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Construir query base
+    let query = {};
+    
+    // Lógica según el rol
+    if (user.role?.nombre === 'superadmin') {
+      // Superadmin ve todas las asistencias
+    } else if (user.role?.nombre === 'adminaccount') {
+      // Adminaccount ve todas las asistencias de su cuenta
+      query.account = user.account?._id;
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para acceder a esta sección'
+      });
+    }
+    
+    // Filtros adicionales
+    if (grupoId) {
+      query.division = grupoId;
+    }
+    
+    if (fechaInicio && fechaFin) {
+      query.fecha = {
+        $gte: fechaInicio,
+        $lte: fechaFin
+      };
+    }
+    
+    console.log('📅 [CALENDAR ASISTENCIAS] Query:', JSON.stringify(query, null, 2));
+    
+    // Obtener solo fechas y conteos (sin populate para mejor rendimiento)
+    const asistencias = await Asistencia.find(query)
+      .select('fecha estudiantes')
+      .sort({ fecha: -1 });
+    
+    // Crear mapa de fechas con conteos
+    const calendarData = {};
+    asistencias.forEach(asistencia => {
+      calendarData[asistencia.fecha] = {
+        fecha: asistencia.fecha,
+        totalEstudiantes: asistencia.estudiantes.length,
+        presentes: asistencia.estudiantes.filter(e => e.presente).length,
+        ausentes: asistencia.estudiantes.filter(e => !e.presente).length
+      };
+    });
+    
+    console.log('📅 [CALENDAR ASISTENCIAS] Datos del calendario:', Object.keys(calendarData).length, 'días');
+    
+    res.json({
+      success: true,
+      data: calendarData
+    });
+
+  } catch (error) {
+    console.error('❌ [CALENDAR ASISTENCIAS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener datos del calendario'
+    });
+  }
+});
+
+// Obtener asistencias detalladas para un día específico
+app.get('/backoffice/asistencias/day/:fecha', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { fecha } = req.params;
+    const { grupoId } = req.query;
+    
+    console.log('📋 [DAY ASISTENCIAS] Usuario:', userId);
+    console.log('📋 [DAY ASISTENCIAS] Fecha:', fecha);
+    console.log('📋 [DAY ASISTENCIAS] GrupoId:', grupoId);
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Construir query base
+    let query = { fecha };
+    
+    // Lógica según el rol
+    if (user.role?.nombre === 'superadmin') {
+      // Superadmin ve todas las asistencias
+    } else if (user.role?.nombre === 'adminaccount') {
+      // Adminaccount ve todas las asistencias de su cuenta
+      query.account = user.account?._id;
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para acceder a esta sección'
+      });
+    }
+    
+    // Filtros adicionales
+    if (grupoId) {
+      query.division = grupoId;
+    }
+    
+    console.log('📋 [DAY ASISTENCIAS] Query:', JSON.stringify(query, null, 2));
+    
+    // Obtener asistencias con todos los datos poblados
+    const asistencias = await Asistencia.find(query)
+      .populate('account', 'nombre')
+      .populate('division', 'nombre')
+      .populate('creadoPor', 'nombre email')
+      .populate({
+        path: 'estudiantes.student',
+        select: 'nombre apellido email avatar'
+      })
+      .sort({ createdAt: -1 })
+      .lean(); // Usar lean() para obtener objetos planos
+    
+    // Hacer populate manual de los estudiantes ya que hay inconsistencia entre modelo y datos
+    for (let asistencia of asistencias) {
+      for (let estudiante of asistencia.estudiantes) {
+        // El campo en los datos reales se llama 'estudiante', no 'student'
+        const studentId = estudiante.estudiante || estudiante.student;
+        
+        if (studentId && mongoose.Types.ObjectId.isValid(studentId)) {
+          const studentData = await Student.findById(studentId).select('nombre apellido email avatar');
+          if (studentData) {
+            // Reemplazar el ID con los datos del estudiante
+            estudiante.student = studentData;
+          }
+        }
+      }
+    }
+    
+    console.log('📋 [DAY ASISTENCIAS] Asistencias encontradas:', asistencias.length);
+    
+    res.json({
+      success: true,
+      data: asistencias
+    });
+
+  } catch (error) {
+    console.error('❌ [DAY ASISTENCIAS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener asistencias del día'
+    });
+  }
+});
+
 // Obtener asistencias del backoffice con paginación
 app.get('/backoffice/asistencias', authenticateToken, async (req, res) => {
   try {
@@ -8153,7 +8853,7 @@ app.get('/backoffice/asistencias', authenticateToken, async (req, res) => {
     
     // Filtros adicionales
     if (grupoId) {
-      query.grupo = grupoId;
+      query.division = grupoId;
     }
     
     if (alumnoId) {
@@ -8201,10 +8901,25 @@ app.get('/backoffice/asistencias', authenticateToken, async (req, res) => {
       .populate('account', 'nombre')
       .populate('division', 'nombre')
       .populate('creadoPor', 'nombre email')
-      .populate('estudiantes.student', 'nombre apellido email')
+      .populate({
+        path: 'estudiantes.student',
+        select: 'nombre apellido email avatar',
+        populate: {
+          path: 'avatar',
+          select: 'url'
+        }
+      })
       .sort({ fecha: -1, createdAt: -1 })
       .skip(skip)
       .limit(parseInt(limit));
+    
+    console.log('📊 [BACKOFFICE ASISTENCIAS] Asistencias encontradas:', asistencias.length);
+    if (asistencias.length > 0) {
+      console.log('📊 [BACKOFFICE ASISTENCIAS] Primera asistencia:', JSON.stringify(asistencias[0], null, 2));
+      if (asistencias[0].estudiantes && asistencias[0].estudiantes.length > 0) {
+        console.log('📊 [BACKOFFICE ASISTENCIAS] Primer estudiante:', JSON.stringify(asistencias[0].estudiantes[0], null, 2));
+      }
+    }
     
     // Calcular información de paginación
     const currentPage = parseInt(page);
@@ -8604,7 +9319,7 @@ app.get('/backoffice/asistencias/export', authenticateToken, async (req, res) =>
     
     // Filtros adicionales
     if (grupoId) {
-      query.grupo = grupoId;
+      query.division = grupoId;
     }
     
     if (fechaInicio && fechaFin) {
