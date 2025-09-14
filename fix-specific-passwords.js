@@ -27,7 +27,7 @@ async function fixSpecificPasswords() {
     const usersToFix = [
       'admin@kiki.com.ar',
       'sanmartinadmin@kiki.com.ar', 
-      'jmluque72@gmail.com'
+      'sender@kiki.com.ar'
     ];
     
     for (const email of usersToFix) {

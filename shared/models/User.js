@@ -50,6 +50,10 @@ const userSchema = new mongoose.Schema({
   lastLogin: {
     type: Date
   },
+  isFirstLogin: {
+    type: Boolean,
+    default: true
+  },
   // Campos adicionales para registro mobile
   telefono: {
     type: String,

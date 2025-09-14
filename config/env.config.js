@@ -18,5 +18,11 @@ module.exports = {
   ACCOUNTS_SERVICE_URL: process.env.ACCOUNTS_SERVICE_URL || 'http://localhost:3002',
   
   // Configuración de entorno
-  NODE_ENV: process.env.NODE_ENV || 'development'
+  NODE_ENV: process.env.NODE_ENV || 'development',
+  
+  // Configuración de email SMTP
+  SMTP_HOST: process.env.SMTP_HOST || 'smtp.gmail.com',
+  SMTP_PORT: process.env.SMTP_PORT || 587,
+  SMTP_USER: process.env.SMTP_USER || '',
+  SMTP_PASS: process.env.SMTP_PASS || ''
 }; 

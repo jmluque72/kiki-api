@@ -5,7 +5,7 @@ async function testSESSimple() {
     console.log('📧 Enviando email de prueba con AWS SES...\n');
 
     // Email de prueba (debe estar verificado en SES)
-    const testEmail = 'jmluque72@gmail.com';
+    const testEmail = 'sender@kiki.com.ar';
     const testUserName = 'Manuel Luque';
 
     console.log('🎯 Enviando email de recuperación de contraseña...');

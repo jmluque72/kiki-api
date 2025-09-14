@@ -31,6 +31,13 @@ const studentSchema = new mongoose.Schema({
     required: false,
     trim: true
   },
+  qrCode: {
+    type: String,
+    required: false,
+    unique: true,
+    sparse: true, // Permite múltiples valores null/undefined
+    trim: true
+  },
   
   // Relaciones
   account: {
@@ -82,6 +89,7 @@ const studentSchema = new mongoose.Schema({
 studentSchema.index({ account: 1, division: 1, year: 1 });
 studentSchema.index({ email: 1 });
 studentSchema.index({ dni: 1 });
+studentSchema.index({ qrCode: 1 });
 
 // Middleware para actualizar updatedAt
 studentSchema.pre('save', function(next) {
@@ -92,6 +100,13 @@ studentSchema.pre('save', function(next) {
 // Método para obtener nombre completo
 studentSchema.methods.getFullName = function() {
   return `${this.nombre} ${this.apellido}`;
+};
+
+// Método para generar código QR único
+studentSchema.methods.generateQRCode = function() {
+  const crypto = require('crypto');
+  const data = `${this._id}-${this.dni}-${Date.now()}`;
+  return crypto.createHash('sha256').update(data).digest('hex').substring(0, 16);
 };
 
 // Método estático para buscar por institución y división

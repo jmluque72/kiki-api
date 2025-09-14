@@ -31,6 +31,23 @@ const asistenciaSchema = new mongoose.Schema({
       type: Boolean,
       required: true,
       default: false
+    },
+    retirado: {
+      type: Boolean,
+      default: false
+    },
+    retiradoPor: {
+      type: String,
+      enum: ['familyadmin', 'familyviewer', 'contact'],
+      default: null
+    },
+    retiradoPorNombre: {
+      type: String,
+      default: null
+    },
+    retiradoEn: {
+      type: Date,
+      default: null
     }
   }],
   creadoPor: {

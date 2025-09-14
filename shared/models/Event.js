@@ -28,6 +28,10 @@ const eventSchema = new mongoose.Schema({
     enum: ['activo', 'finalizado', 'cancelado'],
     default: 'activo'
   },
+  requiereAutorizacion: {
+    type: Boolean,
+    default: false
+  },
   creador: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

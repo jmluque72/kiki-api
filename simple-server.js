@@ -21,17 +21,45 @@ const User = require('./shared/models/User');
 const Account = require('./shared/models/Account');
 const Group = require('./shared/models/Group');
 const Event = require('./shared/models/Event');
+const EventAuthorization = require('./shared/models/EventAuthorization');
 const Role = require('./shared/models/Role');
 const Shared = require('./shared/models/Shared');
 const Grupo = require('./shared/models/Grupo');
 const Asistencia = require('./shared/models/Asistencia');
 const Activity = require('./shared/models/Activity');
+const ActivityFavorite = require('./shared/models/ActivityFavorite');
 const Student = require('./shared/models/Student');
 const Notification = require('./shared/models/Notification');
 const Pickup = require('./shared/models/Pickup');
 const RequestedShared = require('./shared/models/RequestedShared');
 const PasswordReset = require('./shared/models/PasswordReset');
-const { sendPasswordResetEmail } = require('./config/email.config');
+const ActiveAssociation = require('./shared/models/ActiveAssociation');
+const { sendPasswordResetEmail, sendWelcomeEmail, sendInstitutionWelcomeEmail, sendFamilyInvitationEmail, sendNotificationEmail, generateRandomPassword, sendEmailAsync } = require('./config/email.config');
+const emailService = require('./services/emailService');
+
+// Función helper para obtener la asociación activa del usuario
+async function getActiveAssociationForUser(userId) {
+  try {
+    const activeAssociation = await ActiveAssociation.getActiveAssociation(userId);
+    
+    if (!activeAssociation) {
+      console.log(`⚠️ [ACTIVE ASSOCIATION] No hay asociación activa para usuario ${userId}`);
+      return null;
+    }
+
+    // Populate los campos necesarios
+    const populatedAssociation = await ActiveAssociation.findById(activeAssociation._id)
+      .populate('account')
+      .populate('role')
+      .populate('division')
+      .populate('student');
+
+    return populatedAssociation;
+  } catch (error) {
+    console.error('❌ [ACTIVE ASSOCIATION] Error obteniendo asociación activa:', error);
+    return null;
+  }
+}
 
 // Función helper para crear asociaciones según el rol
 async function createAssociationByRole(userId, accountId, roleName, divisionId = null, studentId = null, createdBy) {
@@ -93,6 +121,22 @@ async function createAssociationByRole(userId, accountId, roleName, divisionId =
       division: divisionId || 'no aplica',
       student: studentId || 'no aplica'
     });
+
+    // Verificar si el usuario ya tiene una asociación activa
+    const existingActiveAssociation = await ActiveAssociation.getActiveAssociation(userId);
+    
+    if (!existingActiveAssociation) {
+      // Si no tiene asociación activa, establecer esta como activa automáticamente
+      try {
+        await ActiveAssociation.setActiveAssociation(userId, association._id);
+        console.log(`🎯 [AUTO-ACTIVE] Asociación automáticamente establecida como activa para usuario ${userId}`);
+      } catch (error) {
+        console.error('❌ [AUTO-ACTIVE] Error estableciendo asociación activa automáticamente:', error);
+        // No lanzar error, solo loggear - la asociación se creó correctamente
+      }
+    } else {
+      console.log(`ℹ️ [AUTO-ACTIVE] Usuario ${userId} ya tiene una asociación activa, no se cambia automáticamente`);
+    }
 
     return association;
   } catch (error) {
@@ -277,6 +321,18 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+// Middleware para redirigir rutas con /api duplicado
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    // Remover el /api duplicado del inicio
+    const newPath = req.path.replace(/^\/api/, '');
+    console.log(`🔄 [REDIRECT] Redirigiendo ${req.method} ${req.path} -> ${newPath}`);
+    req.url = newPath;
+    req.path = newPath;
+  }
+  next();
+});
+
 // Servir archivos estáticos
 app.use('/uploads', express.static('uploads'));
 
@@ -417,7 +473,7 @@ app.get('/api', (req, res) => {
 // ===== RUTAS DE AUTENTICACIÓN =====
 
 // Login
-app.post('/api/users/login', async (req, res) => {
+app.post('/users/login', async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -444,6 +500,7 @@ app.post('/api/users/login', async (req, res) => {
     console.log('✅ Usuario encontrado:', user.email);
     console.log('📊 Status:', user.status);
     console.log('🎭 Rol:', user.role?.nombre);
+    console.log('🔑 isFirstLogin:', user.isFirstLogin);
 
     // Verificar si el usuario está activo
     if (user.status !== 'approved') {
@@ -506,8 +563,31 @@ app.post('/api/users/login', async (req, res) => {
       }
     }
 
+    // Buscar la asociación activa del usuario
+    console.log('🎯 Buscando asociación activa del usuario...');
+    let activeAssociation = null;
+    try {
+      const ActiveAssociation = require('./shared/models/ActiveAssociation');
+      activeAssociation = await ActiveAssociation.getActiveAssociation(user._id);
+      
+      if (activeAssociation) {
+        console.log('✅ Asociación activa encontrada:', activeAssociation.account.nombre);
+        console.log('   - Rol activo:', activeAssociation.role.nombre);
+        console.log('   - División:', activeAssociation.division?.nombre || 'Sin división');
+      } else {
+        console.log('ℹ️ No hay asociación activa para este usuario');
+      }
+    } catch (error) {
+      console.error('❌ Error obteniendo asociación activa:', error);
+    }
+
     // Generar token JWT
     const token = user.generateToken();
+
+    // Determinar qué rol mostrar (priorizar el de la asociación activa)
+    const displayRole = activeAssociation?.role || user.role;
+    const displayAccount = activeAssociation?.account || null;
+    const displayDivision = activeAssociation?.division || null;
 
     res.json({
       success: true,
@@ -518,12 +598,22 @@ app.post('/api/users/login', async (req, res) => {
           _id: user._id,
           email: user.email,
           nombre: user.name,
-          role: user.role,
+          role: displayRole, // Usar el rol de la asociación activa si existe
           avatar: avatarUrl,
           activo: user.status === 'approved',
+          isFirstLogin: user.isFirstLogin,
           createdAt: user.createdAt,
           updatedAt: user.updatedAt
         },
+        activeAssociation: activeAssociation ? {
+          _id: activeAssociation._id.toString(),
+          activeShared: activeAssociation.activeShared._id.toString(),
+          account: activeAssociation.account,
+          role: activeAssociation.role,
+          division: activeAssociation.division,
+          student: activeAssociation.student,
+          activatedAt: activeAssociation.activatedAt
+        } : null,
         associations: userAssociations.map(shared => ({
           _id: shared._id,
           account: {
@@ -552,9 +642,197 @@ app.post('/api/users/login', async (req, res) => {
   }
 });
 
-// Registro
-app.post('/api/users/register', async (req, res) => {
+// Cambiar contraseña
+app.post('/users/change-password', authenticateToken, async (req, res) => {
   try {
+    const { currentPassword, newPassword, isFirstLogin } = req.body;
+    const userId = req.user.userId;
+
+    console.log('🔑 [CHANGE PASSWORD] Usuario:', userId);
+    console.log('🔑 [CHANGE PASSWORD] Es primer login:', isFirstLogin);
+    console.log('🔑 [CHANGE PASSWORD] Usuario autenticado - no se requiere contraseña actual');
+
+    if (!newPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'La nueva contraseña es requerida'
+      });
+    }
+
+    // Validar requisitos de contraseña
+    const passwordValidation = {
+      minLength: newPassword.length >= 8,
+      hasUpperCase: /[A-Z]/.test(newPassword),
+      hasLowerCase: /[a-z]/.test(newPassword),
+      hasNumbers: /\d/.test(newPassword),
+      hasSpecialChar: /[!@#$%^&*(),.?":{}|<>]/.test(newPassword)
+    };
+
+    const isValidPassword = Object.values(passwordValidation).every(requirement => requirement);
+    
+    if (!isValidPassword) {
+      return res.status(400).json({
+        success: false,
+        message: 'La nueva contraseña no cumple con los requisitos de seguridad'
+      });
+    }
+
+    // Buscar usuario
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+
+    // Ya no verificamos contraseña actual - el usuario ya está autenticado
+
+    // Actualizar contraseña
+    user.password = newPassword;
+    user.isFirstLogin = false; // Marcar que ya no es primer login
+    await user.save();
+
+    console.log('✅ [CHANGE PASSWORD] Contraseña actualizada exitosamente para usuario:', userId);
+
+    res.json({
+      success: true,
+      message: 'Contraseña actualizada exitosamente'
+    });
+
+  } catch (error) {
+    console.error('❌ [CHANGE PASSWORD] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Crear usuario desde backoffice - DESACTIVADO
+app.post('/users', authenticateToken, async (req, res) => {
+  try {
+    console.log('👤 [CREATE USER] Intento de creación de usuario desde backoffice - DESACTIVADO');
+    
+    return res.status(403).json({
+      success: false,
+      message: 'La creación de usuarios desde el backoffice está desactivada. Los usuarios se crean mediante carga de Excel o desde la app móvil.'
+    });
+    
+    // Código desactivado - Los usuarios se crean por Excel o app móvil
+    /*
+    const { name, email, role, status, avatar } = req.body;
+    const { userId } = req.user;
+
+    if (!name || !email || !role) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nombre, email y rol son requeridos'
+      });
+    }
+
+    // Verificar que el usuario que crea es admin
+    const currentUser = await User.findById(userId).populate('role');
+    if (!currentUser || !['superadmin', 'adminaccount'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo administradores pueden crear usuarios'
+      });
+    }
+
+    // Verificar que el email no exista
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'Ya existe un usuario con este email'
+      });
+    }
+
+    // Buscar el rol
+    const roleDoc = await Role.findOne({ nombre: role });
+    if (!roleDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rol no válido'
+      });
+    }
+
+    // Generar contraseña aleatoria
+    const generateRandomPassword = () => {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+      let password = '';
+      for (let i = 0; i < 8; i++) {
+        password += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return password;
+    };
+
+    const randomPassword = generateRandomPassword();
+    console.log('🔑 [CREATE USER] Contraseña generada para:', email);
+
+    // Crear el usuario
+    const newUser = new User({
+      name: name,
+      email: email.toLowerCase(),
+      password: randomPassword,
+      role: roleDoc._id,
+      status: status === 'active' ? 'approved' : 'pending',
+      activo: status === 'active',
+      isFirstLogin: true // Marcar como primer login
+    });
+
+    await newUser.save();
+    console.log('✅ [CREATE USER] Usuario creado exitosamente:', newUser._id);
+
+    // Enviar email de bienvenida con la contraseña (asíncrono)
+    sendEmailAsync(sendWelcomeEmail, newUser.email, newUser.name);
+    console.log('📧 [CREATE USER] Email de bienvenida programado para envío asíncrono a:', email);
+
+    // Populate para la respuesta
+    const populatedUser = await User.findById(newUser._id)
+      .populate('role', 'nombre descripcion nivel');
+
+    res.status(201).json({
+      success: true,
+      message: 'Usuario creado exitosamente. Se enviará un email con la contraseña.',
+      data: {
+        user: {
+          _id: populatedUser._id,
+          name: populatedUser.name,
+          email: populatedUser.email,
+          role: populatedUser.role,
+          status: populatedUser.status,
+          activo: populatedUser.activo,
+          createdAt: populatedUser.createdAt,
+          updatedAt: populatedUser.updatedAt
+        },
+        password: randomPassword // Temporalmente incluir la contraseña en la respuesta para testing
+      }
+    });
+    */
+    
+  } catch (error) {
+    console.error('❌ [CREATE USER] Error interno:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Registro - DESACTIVADO
+app.post('/users/register', async (req, res) => {
+  try {
+    console.log('👤 [REGISTER] Intento de registro general - DESACTIVADO');
+    
+    return res.status(403).json({
+      success: false,
+      message: 'El registro general está desactivado. Los usuarios se crean mediante carga de Excel o desde la app móvil.'
+    });
+    
+    // Código desactivado - Los usuarios se crean por Excel o app móvil
+    /*
     const { email, password, nombre } = req.body;
 
     if (!email || !password || !nombre) {
@@ -586,6 +864,8 @@ app.post('/api/users/register', async (req, res) => {
         }
       }
     });
+    */
+    
   } catch (error) {
     console.error('Error en registro:', error);
     res.status(500).json({
@@ -596,7 +876,7 @@ app.post('/api/users/register', async (req, res) => {
 });
 
 // Verificar token
-app.get('/api/auth/verify', authenticateToken, async (req, res) => {
+app.get('/auth/verify', authenticateToken, async (req, res) => {
   try {
     // Buscar el usuario completo para obtener el avatar
     const user = await User.findById(req.user._id);
@@ -644,7 +924,7 @@ app.get('/api/auth/verify', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para verificar configuración JWT (solo para debugging)
-app.get('/api/auth/config', (req, res) => {
+app.get('/auth/config', (req, res) => {
   res.json({
     success: true,
     jwt_secret_length: config.JWT_SECRET.length,
@@ -654,10 +934,10 @@ app.get('/api/auth/config', (req, res) => {
 });
 
 // Obtener perfil
-app.get('/api/users/profile', authenticateToken, async (req, res) => {
+app.get('/users/profile', authenticateToken, async (req, res) => {
   try {
-    // Buscar el usuario completo para obtener el avatar
-    const user = await User.findById(req.user._id);
+    // Buscar el usuario completo con el rol populado
+    const user = await User.findById(req.user._id).populate('role', 'nombre descripcion nivel');
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -701,7 +981,7 @@ app.get('/api/users/profile', authenticateToken, async (req, res) => {
 });
 
 // Actualizar perfil
-app.put('/api/users/profile', authenticateToken, async (req, res) => {
+app.put('/users/profile', authenticateToken, async (req, res) => {
   try {
     const { name, email, phone, telefono } = req.body;
     const userId = req.user._id;
@@ -793,7 +1073,7 @@ app.put('/api/users/profile', authenticateToken, async (req, res) => {
 });
 
 // Actualizar avatar del usuario
-app.put('/api/users/avatar', authenticateToken, upload.single('avatar'), async (req, res) => {
+app.put('/users/avatar', authenticateToken, upload.single('avatar'), async (req, res) => {
   console.log('🖼️ [AVATAR ENDPOINT] Petición recibida');
   console.log('🖼️ [AVATAR ENDPOINT] Headers:', req.headers);
   console.log('🖼️ [AVATAR ENDPOINT] Body:', req.body);
@@ -900,7 +1180,7 @@ app.put('/api/users/avatar', authenticateToken, upload.single('avatar'), async (
 });
 
 // Actualizar avatar del estudiante (solo familyadmin)
-app.put('/api/students/:studentId/avatar', authenticateToken, uploadStudentAvatarToS3.single('avatar'), async (req, res) => {
+app.put('/students/:studentId/avatar', authenticateToken, uploadStudentAvatarToS3.single('avatar'), async (req, res) => {
   console.log('🖼️ [STUDENT AVATAR ENDPOINT] Petición recibida');
   console.log('🖼️ [STUDENT AVATAR ENDPOINT] Student ID:', req.params.studentId);
   console.log('🖼️ [STUDENT AVATAR ENDPOINT] File:', req.file);
@@ -1014,7 +1294,7 @@ app.put('/api/students/:studentId/avatar', authenticateToken, uploadStudentAvata
 });
 
 // Endpoint de prueba para verificar configuración de S3 para avatares de estudiantes
-app.get('/api/test-student-avatar-s3', async (req, res) => {
+app.get('/test-student-avatar-s3', async (req, res) => {
   try {
     console.log('🧪 [TEST STUDENT AVATAR S3] Probando configuración...');
     
@@ -1061,7 +1341,7 @@ app.get('/api/test-student-avatar-s3', async (req, res) => {
 // ===== RUTAS DE USUARIOS =====
 
 // Endpoint de prueba para S3
-app.get('/api/test-s3', async (req, res) => {
+app.get('/test-s3', async (req, res) => {
   try {
     console.log('🧪 [TEST S3] Probando configuración de S3...');
     console.log('🧪 [TEST S3] Configuración:', {
@@ -1100,7 +1380,7 @@ app.get('/api/test-s3', async (req, res) => {
 });
 
 // Aprobar asociación pendiente
-app.put('/api/users/approve-association/:associationId', authenticateToken, async (req, res) => {
+app.put('/users/approve-association/:associationId', authenticateToken, async (req, res) => {
   try {
     const { associationId } = req.params;
     const currentUser = req.user;
@@ -1201,7 +1481,7 @@ app.put('/api/users/approve-association/:associationId', authenticateToken, asyn
 });
 
 // Rechazar asociación pendiente
-app.put('/api/users/reject-association/:associationId', authenticateToken, async (req, res) => {
+app.put('/users/reject-association/:associationId', authenticateToken, async (req, res) => {
   try {
     const { associationId } = req.params;
     const currentUser = req.user;
@@ -1302,7 +1582,7 @@ app.put('/api/users/reject-association/:associationId', authenticateToken, async
 });
 
 // Obtener asociaciones pendientes
-app.get('/api/users/pending-associations', authenticateToken, async (req, res) => {
+app.get('/users/pending-associations', authenticateToken, async (req, res) => {
   try {
     const currentUser = req.user;
 
@@ -1381,7 +1661,7 @@ app.get('/api/users/pending-associations', authenticateToken, async (req, res) =
 });
 
 // Registro desde app mobile (solo familyview)
-app.post('/api/users/register-mobile', async (req, res) => {
+app.post('/users/register-mobile', async (req, res) => {
   try {
     console.log('🎯 [REGISTER MOBILE] Iniciando registro desde app móvil');
     console.log('📦 [REGISTER MOBILE] Body recibido:', JSON.stringify(req.body, null, 2));
@@ -1488,6 +1768,21 @@ app.post('/api/users/register-mobile', async (req, res) => {
           
           await requestedShared.save();
           
+          // Verificar si el usuario ya tiene una asociación activa
+          const existingActiveAssociation = await ActiveAssociation.getActiveAssociation(user._id);
+          
+          if (!existingActiveAssociation) {
+            // Si no tiene asociación activa, establecer esta como activa automáticamente
+            try {
+              await ActiveAssociation.setActiveAssociation(user._id, requestedShared._id);
+              console.log(`🎯 [AUTO-ACTIVE] Asociación automáticamente establecida como activa para usuario ${user._id}`);
+            } catch (error) {
+              console.error('❌ [AUTO-ACTIVE] Error estableciendo asociación activa automáticamente:', error);
+            }
+          } else {
+            console.log(`ℹ️ [AUTO-ACTIVE] Usuario ${user._id} ya tiene una asociación activa, no se cambia automáticamente`);
+          }
+          
           // Marcar la solicitud como completada
           await RequestedShared.markAsCompleted(request._id, user._id);
           
@@ -1538,7 +1833,7 @@ app.post('/api/users/register-mobile', async (req, res) => {
 });
 
 // Listar usuarios
-app.get('/api/users', authenticateToken, async (req, res) => {
+app.get('/users', authenticateToken, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -1640,7 +1935,7 @@ app.get('/api/users', authenticateToken, async (req, res) => {
 // ===== RUTAS DE GRUPOS (DIVISIONES) =====
 
 // Listar grupos con filtros por cuenta
-app.get('/api/grupos', authenticateToken, async (req, res) => {
+app.get('/grupos', authenticateToken, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -1738,7 +2033,7 @@ app.get('/api/grupos', authenticateToken, async (req, res) => {
 });
 
 // Crear nuevo grupo
-app.post('/api/grupos', authenticateToken, async (req, res) => {
+app.post('/grupos', authenticateToken, async (req, res) => {
   try {
     const { nombre, descripcion, cuentaId } = req.body;
 
@@ -1845,7 +2140,7 @@ app.post('/api/grupos', authenticateToken, async (req, res) => {
 });
 
 // Obtener divisiones por cuenta para registro mobile
-app.get('/api/grupos/mobile/:cuentaId', async (req, res) => {
+app.get('/grupos/mobile/:cuentaId', async (req, res) => {
   try {
     const { cuentaId } = req.params;
 
@@ -1888,7 +2183,7 @@ app.get('/api/grupos/mobile/:cuentaId', async (req, res) => {
 });
 
 // Obtener grupo por ID
-app.get('/api/grupos/:id', authenticateToken, async (req, res) => {
+app.get('/grupos/:id', authenticateToken, async (req, res) => {
   try {
     const grupo = await Grupo.findById(req.params.id)
       .populate('cuenta', 'nombre razonSocial')
@@ -1951,7 +2246,7 @@ app.get('/api/grupos/:id', authenticateToken, async (req, res) => {
 });
 
 // Actualizar grupo
-app.put('/api/grupos/:id', authenticateToken, async (req, res) => {
+app.put('/grupos/:id', authenticateToken, async (req, res) => {
   try {
     const { nombre, descripcion, activo } = req.body;
 
@@ -2026,7 +2321,7 @@ app.put('/api/grupos/:id', authenticateToken, async (req, res) => {
 });
 
 // Eliminar grupo
-app.delete('/api/grupos/:id', authenticateToken, async (req, res) => {
+app.delete('/grupos/:id', authenticateToken, async (req, res) => {
   try {
     const grupo = await Grupo.findById(req.params.id)
       .populate('cuenta', 'nombre razonSocial');
@@ -2081,7 +2376,7 @@ app.delete('/api/grupos/:id', authenticateToken, async (req, res) => {
 // ===== RUTAS DE CUENTAS =====
 
 // Obtener cuentas para registro mobile (solo cuentas activas)
-app.get('/api/accounts/mobile', async (req, res) => {
+app.get('/accounts/mobile', async (req, res) => {
   try {
     const accounts = await Account.find({ activo: { $ne: false } })
       .select('nombre razonSocial _id')
@@ -2106,7 +2401,7 @@ app.get('/api/accounts/mobile', async (req, res) => {
 
 
 // Listar cuentas
-app.get('/api/accounts', authenticateToken, async (req, res) => {
+app.get('/accounts', authenticateToken, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -2179,7 +2474,7 @@ app.get('/api/accounts', authenticateToken, async (req, res) => {
 });
 
 // Crear cuenta
-app.post('/api/accounts', authenticateToken, async (req, res) => {
+app.post('/accounts', authenticateToken, async (req, res) => {
   try {
     const { nombre, razonSocial, address, emailAdmin, nombreAdmin, logo } = req.body;
 
@@ -2217,11 +2512,15 @@ app.post('/api/accounts', authenticateToken, async (req, res) => {
       });
     }
 
+    // Generar contraseña aleatoria segura
+    const randomPassword = generateRandomPassword(12);
+    console.log('🔑 [CREATE ACCOUNT] Contraseña generada para administrador:', randomPassword);
+
     // Crear usuario administrador primero
     const adminUser = new User({
       name: nombreAdmin,
       email: emailAdmin,
-      password: 'admin123', // Contraseña genérica
+      password: randomPassword, // Contraseña aleatoria segura
       role: adminRole._id,
       status: 'approved'
     });
@@ -2256,6 +2555,10 @@ app.post('/api/accounts', authenticateToken, async (req, res) => {
       req.user._id
     );
 
+    // Enviar email de bienvenida con credenciales al administrador (asíncrono)
+    sendEmailAsync(sendInstitutionWelcomeEmail, adminUser.email, adminUser.name, account.nombre, randomPassword);
+    console.log('📧 [CREATE ACCOUNT] Email de bienvenida programado para envío asíncrono al administrador:', adminUser.email);
+
     // Populate el usuario administrador
     await account.populate('usuarioAdministrador');
 
@@ -2282,8 +2585,137 @@ app.post('/api/accounts', authenticateToken, async (req, res) => {
   }
 });
 
+// Endpoint para crear usuario adminaccount adicional para una cuenta existente (solo superadmin)
+app.post('/accounts/:accountId/admin-users', authenticateToken, async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const { nombre, apellido, email } = req.body;
+    const { userId } = req.user;
+
+    console.log('👤 [CREATE ADMIN USER] Iniciando creación de usuario adminaccount...');
+    console.log('👤 [CREATE ADMIN USER] Usuario solicitante ID:', userId);
+    console.log('🏫 [CREATE ADMIN USER] Cuenta ID:', accountId);
+    console.log('📋 [CREATE ADMIN USER] Datos recibidos:', { nombre, apellido, email });
+
+    // Verificar que el usuario sea superadmin
+    const currentUser = await User.findById(userId).populate('role');
+    if (!currentUser || currentUser.role?.nombre !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los superadministradores pueden crear usuarios adminaccount'
+      });
+    }
+
+    // Validar campos requeridos
+    if (!nombre || !apellido || !email) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nombre, apellido y email son requeridos'
+      });
+    }
+
+    // Verificar que la cuenta existe
+    const account = await Account.findById(accountId);
+    if (!account) {
+      return res.status(404).json({
+        success: false,
+        message: 'Cuenta no encontrada'
+      });
+    }
+
+    // Verificar si ya existe un usuario con ese email
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'Ya existe un usuario con ese email'
+      });
+    }
+
+    // Obtener el rol de adminaccount
+    const adminRole = await Role.findOne({ nombre: 'adminaccount' });
+    if (!adminRole) {
+      return res.status(500).json({
+        success: false,
+        message: 'Rol de adminaccount no encontrado'
+      });
+    }
+
+    // Generar contraseña aleatoria segura
+    const randomPassword = generateRandomPassword(12);
+    console.log('🔑 [CREATE ADMIN USER] Contraseña generada:', randomPassword);
+
+    // Crear el usuario adminaccount
+    const adminUser = new User({
+      name: `${nombre} ${apellido}`,
+      email: email.toLowerCase(),
+      password: randomPassword,
+      role: adminRole._id,
+      status: 'approved',
+      account: accountId
+    });
+
+    await adminUser.save();
+    console.log('✅ [CREATE ADMIN USER] Usuario adminaccount creado:', adminUser.email);
+
+    // Crear asociación del admin con la cuenta
+    await createAssociationByRole(
+      adminUser._id,
+      accountId,
+      'adminaccount',
+      null,
+      null,
+      userId
+    );
+    console.log('✅ [CREATE ADMIN USER] Asociación creada');
+
+    // Enviar email de bienvenida (asíncrono)
+    sendEmailAsync(
+      emailService.sendNewUserCreatedEmail,
+      emailService,
+      {
+        name: adminUser.name,
+        email: adminUser.email
+      },
+      randomPassword,
+      account.nombre,
+      'Administrador de Institución'
+    );
+    console.log('📧 [CREATE ADMIN USER] Email de bienvenida programado para envío asíncrono a:', adminUser.email);
+
+    // Populate el rol del usuario
+    await adminUser.populate('role', 'nombre descripcion');
+
+    res.status(201).json({
+      success: true,
+      message: 'Usuario adminaccount creado exitosamente',
+      data: {
+        user: {
+          _id: adminUser._id,
+          name: adminUser.name,
+          email: adminUser.email,
+          role: adminUser.role,
+          status: adminUser.status,
+          account: accountId
+        },
+        account: {
+          _id: account._id,
+          nombre: account.nombre
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [CREATE ADMIN USER] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
 // Obtener cuenta por ID
-app.get('/api/accounts/:id', async (req, res) => {
+app.get('/accounts/:id', async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -2323,7 +2755,7 @@ app.get('/api/accounts/:id', async (req, res) => {
 });
 
 // Actualizar cuenta
-app.put('/api/accounts/:id', authenticateToken, async (req, res) => {
+app.put('/accounts/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { nombre, razonSocial, address, emailAdmin, nombreAdmin, logo, activo } = req.body;
@@ -2417,7 +2849,7 @@ app.put('/api/accounts/:id', authenticateToken, async (req, res) => {
 });
 
 // Eliminar cuenta
-app.delete('/api/accounts/:id', authenticateToken, async (req, res) => {
+app.delete('/accounts/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -2446,7 +2878,7 @@ app.delete('/api/accounts/:id', authenticateToken, async (req, res) => {
 });
 
 // Estadísticas de cuentas
-app.get('/api/accounts/stats', async (req, res) => {
+app.get('/accounts/stats', async (req, res) => {
   try {
     const total = await Account.countDocuments();
     const activas = await Account.countDocuments({ activo: true });
@@ -2473,7 +2905,7 @@ app.get('/api/accounts/stats', async (req, res) => {
 // ===== RUTAS DE IMÁGENES =====
 
 // Renovar URL firmada de imagen
-app.post('/api/images/refresh-signed-url', authenticateToken, async (req, res) => {
+app.post('/images/refresh-signed-url', authenticateToken, async (req, res) => {
   try {
     const { imageKey } = req.body;
     
@@ -2512,7 +2944,7 @@ app.post('/api/images/refresh-signed-url', authenticateToken, async (req, res) =
 // ===== RUTAS DE GRUPOS =====
 
 // Listar grupos
-app.get('/api/groups', async (req, res) => {
+app.get('/groups', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -2553,7 +2985,7 @@ app.get('/api/groups', async (req, res) => {
 });
 
 // Obtener grupos por cuenta
-app.get('/api/groups/account/:accountId', authenticateToken, async (req, res) => {
+app.get('/groups/account/:accountId', authenticateToken, async (req, res) => {
   try {
     const { accountId } = req.params;
     const { userId } = req.user;
@@ -2619,7 +3051,7 @@ app.get('/api/groups/account/:accountId', authenticateToken, async (req, res) =>
 // ===== RUTAS DE EVENTOS =====
 
 // Listar eventos
-app.get('/api/events', authenticateToken, async (req, res) => {
+app.get('/events', authenticateToken, async (req, res) => {
   try {
     const { accountId, search, page = 1, limit = 20 } = req.query;
     const currentUser = req.user;
@@ -2726,7 +3158,7 @@ app.get('/api/events', authenticateToken, async (req, res) => {
 // ===== RUTAS DE ROLES =====
 
 // Listar roles
-app.get('/api/roles', async (req, res) => {
+app.get('/roles', async (req, res) => {
   try {
     // Simular datos de roles
     const roles = [
@@ -2768,7 +3200,7 @@ app.get('/api/roles', async (req, res) => {
 });
 
 // Jerarquía de roles
-app.get('/api/roles/hierarchy', async (req, res) => {
+app.get('/roles/hierarchy', async (req, res) => {
   try {
     const hierarchy = {
       1: 'superadmin',
@@ -2794,7 +3226,7 @@ app.get('/api/roles/hierarchy', async (req, res) => {
 // ===== RUTAS DE ASISTENCIAS =====
 
 // Listar asistencias por cuenta
-app.get('/api/asistencias', authenticateToken, async (req, res) => {
+app.get('/asistencias', authenticateToken, async (req, res) => {
   try {
     const { accountId, grupoId, alumnoId, fechaInicio, fechaFin, page = 1, limit = 20 } = req.query;
     const currentUser = req.user;
@@ -2902,7 +3334,7 @@ app.get('/api/asistencias', authenticateToken, async (req, res) => {
 });
 
 // Registrar nueva asistencia
-app.post('/api/asistencias', authenticateToken, async (req, res) => {
+app.post('/asistencias', authenticateToken, async (req, res) => {
   try {
     const { alumnoId, accountId, grupoId, fecha, estado, horaLlegada, horaSalida, observaciones } = req.body;
     const currentUser = req.user;
@@ -3032,7 +3464,7 @@ app.post('/api/asistencias', authenticateToken, async (req, res) => {
 });
 
 // Actualizar asistencia
-app.put('/api/asistencias/:asistenciaId', authenticateToken, async (req, res) => {
+app.put('/asistencias/:asistenciaId', authenticateToken, async (req, res) => {
   try {
     const { asistenciaId } = req.params;
     const { estado, horaLlegada, horaSalida, observaciones } = req.body;
@@ -3102,7 +3534,7 @@ app.put('/api/asistencias/:asistenciaId', authenticateToken, async (req, res) =>
 });
 
 // Eliminar asistencia (marcar como inactiva)
-app.delete('/api/asistencias/:asistenciaId', authenticateToken, async (req, res) => {
+app.delete('/asistencias/:asistenciaId', authenticateToken, async (req, res) => {
   try {
     const { asistenciaId } = req.params;
     const currentUser = req.user;
@@ -3167,7 +3599,7 @@ app.delete('/api/asistencias/:asistenciaId', authenticateToken, async (req, res)
 // ===== RUTAS DE ACTIVITY =====
 
 // Listar actividades
-app.get('/api/activities', authenticateToken, async (req, res) => {
+app.get('/activities', authenticateToken, async (req, res) => {
   try {
     const { accountId, userId, tipo, entidad, fechaInicio, fechaFin, page = 1, limit = 50 } = req.query;
     const currentUser = req.user;
@@ -3295,7 +3727,7 @@ const registrarActividad = async (data) => {
 };
 
 // Endpoint para eliminar una actividad
-app.delete('/api/activities/:id', authenticateToken, async (req, res) => {
+app.delete('/activities/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const userId = req.user._id;
@@ -3361,9 +3793,9 @@ app.delete('/api/activities/:id', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para obtener actividades filtradas por institución y división (para mobile)
-app.get('/api/activities/mobile', authenticateToken, async (req, res) => {
+app.get('/activities/mobile', authenticateToken, async (req, res) => {
   try {
-    const { accountId, divisionId } = req.query;
+    const { accountId, divisionId, selectedDate } = req.query;
     const userId = req.user._id;
 
     console.log('🎯 [ACTIVITIES MOBILE] Iniciando búsqueda de actividades');
@@ -3410,14 +3842,31 @@ app.get('/api/activities/mobile', authenticateToken, async (req, res) => {
       activo: true
     };
 
-    // Filtrar por fecha: solo actividades del día actual
-    const today = new Date();
-    const startOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-    const endOfDay = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+    // Filtrar por fecha: actividades desde la fecha seleccionada hacia atrás por 30 días
+    let endDate, startDate;
+    
+    if (selectedDate) {
+      // Usar la fecha seleccionada como punto de referencia
+      const selected = new Date(selectedDate);
+      endDate = new Date(selected.getFullYear(), selected.getMonth(), selected.getDate(), 23, 59, 59, 999);
+      startDate = new Date(selected.getFullYear(), selected.getMonth(), selected.getDate() - 30, 0, 0, 0, 0);
+      console.log('📅 [ACTIVITIES MOBILE] Usando fecha seleccionada:', selectedDate);
+    } else {
+      // Usar hoy como punto de referencia (comportamiento por defecto)
+      const today = new Date();
+      endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
+      startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 30, 0, 0, 0, 0);
+      console.log('📅 [ACTIVITIES MOBILE] Usando fecha por defecto (hoy)');
+    }
+    
+    console.log('📅 [ACTIVITIES MOBILE] Rango de fechas:', {
+      desde: startDate.toISOString(),
+      hasta: endDate.toISOString()
+    });
     
     query.createdAt = {
-      $gte: startOfDay,
-      $lte: endOfDay
+      $gte: startDate,
+      $lte: endDate
     };
 
     // Agregar filtro por división si se proporciona
@@ -3454,7 +3903,7 @@ app.get('/api/activities/mobile', authenticateToken, async (req, res) => {
       .populate('division', 'nombre descripcion')
       .populate('participantes', 'nombre apellido dni')
       .sort({ createdAt: -1 })
-      .limit(50); // Limitar a las últimas 50 actividades
+      .limit(100); // Limitar a las últimas 100 actividades (30 días de datos)
 
     console.log('📊 [ACTIVITIES MOBILE] Actividades encontradas:', activities.length);
     activities.forEach((activity, index) => {
@@ -3529,10 +3978,10 @@ app.get('/api/activities/mobile', authenticateToken, async (req, res) => {
 });
 
 // Rutas de upload
-app.use('/api/upload', uploadRoutes);
+app.use('/upload', uploadRoutes);
 
 // Endpoint para subir imágenes
-app.post('/api/upload-image', authenticateToken, upload.single('image'), async (req, res) => {
+app.post('/upload-image', authenticateToken, upload.single('image'), async (req, res) => {
   try {
     if (!req.file) {
       return res.status(400).json({
@@ -3558,7 +4007,7 @@ app.post('/api/upload-image', authenticateToken, upload.single('image'), async (
 });
 
 // Endpoint para crear actividades
-app.post('/api/activities', authenticateToken, async (req, res) => {
+app.post('/activities', authenticateToken, async (req, res) => {
   try {
     const { titulo, participantes, descripcion, imagenes, accountId, divisionId, userId } = req.body;
 
@@ -3622,7 +4071,7 @@ app.post('/api/activities', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para eliminar actividades
-app.delete('/api/activities/:id', authenticateToken, async (req, res) => {
+app.delete('/activities/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId } = req.user;
@@ -3666,7 +4115,7 @@ app.delete('/api/activities/:id', authenticateToken, async (req, res) => {
 // ==================== ENDPOINTS PARA ALUMNOS ====================
 
 // Endpoint para obtener alumnos por institución y división
-app.get('/api/students', authenticateToken, async (req, res) => {
+app.get('/students', authenticateToken, async (req, res) => {
   try {
     const { accountId, divisionId, year } = req.query;
     const { userId } = req.user;
@@ -3725,7 +4174,7 @@ app.get('/api/students', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para obtener alumnos por cuenta y división seleccionada
-app.get('/api/students/by-account-division', authenticateToken, async (req, res) => {
+app.get('/students/by-account-division', authenticateToken, async (req, res) => {
   try {
     const { accountId, divisionId, year } = req.query;
     const { userId } = req.user;
@@ -3814,7 +4263,7 @@ app.get('/api/students/by-account-division', authenticateToken, async (req, res)
 });
 
 // Endpoint para descargar plantilla de estudiantes
-app.get('/api/students/template', authenticateToken, async (req, res) => {
+app.get('/students/template', authenticateToken, async (req, res) => {
   try {
     // Crear datos de ejemplo para la plantilla
     const templateData = [
@@ -3864,7 +4313,7 @@ app.get('/api/students/template', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para cargar alumnos desde Excel
-app.post('/api/students/upload-excel', authenticateToken, uploadExcel.single('excel'), async (req, res) => {
+app.post('/students/upload-excel', authenticateToken, uploadExcel.single('excel'), async (req, res) => {
   try {
     console.log('📁 Archivo recibido:', req.file);
     console.log('📋 Body recibido:', req.body);
@@ -3972,26 +4421,15 @@ app.post('/api/students/upload-excel', authenticateToken, uploadExcel.single('ex
           }
         }
 
-        // Verificar si el alumno ya existe
-        const queryConditions = [{ dni: String(row.dni).trim() }];
-        
-        // Solo agregar email a la búsqueda si está presente
-        if (row.email) {
-          queryConditions.push({ email: String(row.email).toLowerCase().trim() });
-        }
-        
+        // Verificar si el alumno ya existe - SOLO por DNI
         const existingStudent = await Student.findOne({
-          $or: queryConditions
+          dni: String(row.dni).trim()
         });
 
         if (existingStudent) {
-          const errorMessage = row.email 
-            ? `Alumno ya existe con email ${String(row.email).trim()} o DNI ${String(row.dni).trim()}`
-            : `Alumno ya existe con DNI ${String(row.dni).trim()}`;
-          
           results.errors.push({
             row: rowNumber,
-            error: errorMessage
+            error: `Alumno ya existe con DNI ${String(row.dni).trim()}`
           });
           continue;
         }
@@ -4038,11 +4476,15 @@ app.post('/api/students/upload-excel', authenticateToken, uploadExcel.single('ex
             continue;
           }
 
+          // Generar contraseña aleatoria segura para el tutor
+          const tutorPassword = generateRandomPassword(12);
+          console.log('🔑 [STUDENTS UPLOAD] Contraseña generada para tutor:', tutorPassword);
+
           // Crear el usuario tutor
           const tutorData = {
             name: String(row.nombreTutor).trim(),
             email: String(row.emailTutor).toLowerCase().trim(),
-            password: 'tutor123', // Contraseña por defecto
+            password: tutorPassword, // Contraseña aleatoria segura
             role: tutorRole._id,
             status: 'approved', // Aprobado automáticamente
             dni: String(row.dniTutor).trim()
@@ -4051,6 +4493,20 @@ app.post('/api/students/upload-excel', authenticateToken, uploadExcel.single('ex
           tutorUser = new User(tutorData);
           await tutorUser.save();
           console.log(`✅ Tutor creado: ${tutorUser.email}`);
+
+          // Enviar email de bienvenida al nuevo tutor (asíncrono)
+          sendEmailAsync(
+            emailService.sendNewUserCreatedEmail,
+            emailService,
+            {
+              name: tutorUser.name,
+              email: tutorUser.email
+            },
+            tutorData.password,
+            account.nombre,
+            'Tutor/Padre'
+          );
+          console.log(`📧 [STUDENTS UPLOAD] Email de bienvenida programado para envío asíncrono a: ${tutorUser.email}`);
 
           // La asociación se creará después de crear el alumno
           console.log(`⏳ Asociación del tutor se creará después de crear el alumno...`);
@@ -4103,6 +4559,30 @@ app.post('/api/students/upload-excel', authenticateToken, uploadExcel.single('ex
             student._id, 
             userId
           );
+
+          // Enviar email de asociación a institución (solo si el tutor ya existía)
+          if (existingTutor) {
+            try {
+              await emailService.sendInstitutionAssociationEmail(
+                {
+                  name: tutorUser.name,
+                  email: tutorUser.email
+                },
+                account.nombre,
+                division.nombre,
+                'Tutor/Padre',
+                {
+                  nombre: student.nombre,
+                  apellido: student.apellido,
+                  dni: student.dni
+                }
+              );
+              console.log(`📧 Email de asociación enviado a: ${tutorUser.email}`);
+            } catch (emailError) {
+              console.error(`❌ Error enviando email de asociación a ${tutorUser.email}:`, emailError.message);
+              // No fallar la operación por error de email
+            }
+          }
         }
         
         results.success++;
@@ -4142,7 +4622,7 @@ app.post('/api/students/upload-excel', authenticateToken, uploadExcel.single('ex
 });
 
 // Endpoint de prueba para descargar plantilla de coordinadores (sin auth)
-app.get('/api/coordinators/template-test', async (req, res) => {
+app.get('/coordinators/template-test', async (req, res) => {
   try {
     console.log('📄 Generando plantilla de coordinadores (test)...');
     
@@ -4202,7 +4682,7 @@ app.get('/api/coordinators/template-test', async (req, res) => {
 });
 
 // Endpoint para descargar plantilla de coordinadores
-app.get('/api/coordinators/template', authenticateToken, async (req, res) => {
+app.get('/coordinators/template', authenticateToken, async (req, res) => {
   try {
     console.log('📄 Generando plantilla de coordinadores...');
     
@@ -4258,9 +4738,14 @@ app.get('/api/coordinators/template', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para cargar coordinadores desde Excel
-app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single('file'), async (req, res) => {
+app.post('/coordinators/upload-excel', authenticateToken, uploadExcel.single('file'), async (req, res) => {
   try {
+    console.log('📁 [COORDINATORS UPLOAD] Iniciando carga de coordinadores...');
+    console.log('📁 [COORDINATORS UPLOAD] Archivo recibido:', req.file ? 'Sí' : 'No');
+    console.log('📁 [COORDINATORS UPLOAD] Body recibido:', req.body);
+    
     if (!req.file) {
+      console.log('❌ [COORDINATORS UPLOAD] No se proporcionó archivo');
       return res.status(400).json({
         success: false,
         message: 'No se ha proporcionado ningún archivo'
@@ -4270,7 +4755,11 @@ app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single
     const { userId } = req.user;
     const { divisionId } = req.body; // ID de la división donde se cargarán los coordinadores
 
+    console.log('👤 [COORDINATORS UPLOAD] Usuario ID:', userId);
+    console.log('🏫 [COORDINATORS UPLOAD] División ID:', divisionId);
+
     if (!divisionId) {
+      console.log('❌ [COORDINATORS UPLOAD] No se proporcionó divisionId');
       return res.status(400).json({
         success: false,
         message: 'ID de división es requerido'
@@ -4320,13 +4809,21 @@ app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single
     }
 
     // Leer el archivo Excel
+    console.log('📖 [COORDINATORS UPLOAD] Leyendo archivo Excel:', req.file.path);
     const workbook = XLSX.readFile(req.file.path);
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
     const data = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
 
+    console.log('📊 [COORDINATORS UPLOAD] Datos extraídos:', data.length, 'filas');
+    console.log('📋 [COORDINATORS UPLOAD] Primera fila (encabezados):', data[0]);
+    if (data.length > 1) {
+      console.log('📋 [COORDINATORS UPLOAD] Segunda fila (primer dato):', data[1]);
+    }
+
     // Validar que hay datos
     if (data.length < 2) {
+      console.log('❌ [COORDINATORS UPLOAD] Archivo no tiene suficientes datos');
       return res.status(400).json({
         success: false,
         message: 'El archivo debe contener al menos una fila de datos (excluyendo encabezados)'
@@ -4348,15 +4845,18 @@ app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single
     }
 
     // Procesar cada fila (empezar desde la fila 2, saltando encabezados)
+    console.log('🔄 [COORDINATORS UPLOAD] Procesando filas...');
     for (let i = 1; i < data.length; i++) {
       const row = data[i];
       const rowNumber = i + 1;
+
+      console.log(`📝 [COORDINATORS UPLOAD] Procesando fila ${rowNumber}:`, row);
 
       try {
         // Verificar si la fila está vacía
         const isRowEmpty = !row[0] && !row[1] && !row[2];
         if (isRowEmpty) {
-          console.log(`⏭️ Fila ${rowNumber} está vacía, saltando...`);
+          console.log(`⏭️ [COORDINATORS UPLOAD] Fila ${rowNumber} está vacía, saltando...`);
           continue;
         }
 
@@ -4364,6 +4864,12 @@ app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single
         const nombre = String(row[0] || '').trim();
         const email = String(row[1] || '').toLowerCase().trim();
         const dni = String(row[2] || '').trim();
+
+        console.log(`📋 [COORDINATORS UPLOAD] Fila ${rowNumber} - Datos extraídos:`, {
+          nombre,
+          email,
+          dni
+        });
 
         // Validar campos requeridos
         if (!nombre || !email || !dni) {
@@ -4390,6 +4896,7 @@ app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single
         }
 
         // Verificar si el coordinador ya existe
+        console.log(`🔍 [COORDINATORS UPLOAD] Fila ${rowNumber} - Buscando coordinador existente...`);
         const existingCoordinator = await User.findOne({
           $or: [
             { email: email },
@@ -4401,16 +4908,20 @@ app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single
 
         if (existingCoordinator) {
           coordinatorUser = existingCoordinator;
-          console.log(`✅ Coordinador encontrado: ${existingCoordinator.email}`);
+          console.log(`✅ [COORDINATORS UPLOAD] Fila ${rowNumber} - Coordinador encontrado: ${existingCoordinator.email} (ID: ${existingCoordinator._id})`);
         } else {
           // Crear nuevo coordinador
           console.log(`🆕 Creando nuevo coordinador: ${email}`);
           
+          // Generar contraseña aleatoria segura para el coordinador
+          const coordinatorPassword = generateRandomPassword(12);
+          console.log('🔑 [COORDINATORS UPLOAD] Contraseña generada para coordinador:', coordinatorPassword);
+
           // Crear el usuario coordinador
           const coordinatorData = {
             name: nombre,
             email: email,
-            password: 'coordinador123', // Contraseña por defecto
+            password: coordinatorPassword, // Contraseña aleatoria segura
             role: coordinadorRole._id,
             status: 'approved', // Aprobado automáticamente
             dni: dni
@@ -4419,36 +4930,94 @@ app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single
           coordinatorUser = new User(coordinatorData);
           await coordinatorUser.save();
           console.log(`✅ Coordinador creado: ${coordinatorUser.email}`);
+
+          // Enviar email de bienvenida al nuevo coordinador (asíncrono)
+          const institutionName = division.cuenta ? (await Account.findById(division.cuenta)).nombre : 'Institución';
+          sendEmailAsync(
+            emailService.sendNewUserCreatedEmail,
+            emailService,
+            {
+              name: coordinatorUser.name,
+              email: coordinatorUser.email
+            },
+            coordinatorData.password,
+            institutionName,
+            'Coordinador'
+          );
+          console.log(`📧 [COORDINATORS UPLOAD] Email de bienvenida programado para envío asíncrono a: ${coordinatorUser.email}`);
         }
 
-        // Verificar si ya existe una asociación para este coordinador con esta división
-        const existingAssociation = await Shared.findOne({
+        // Verificar qué asociaciones tiene el usuario en esta división
+        console.log(`🔍 [COORDINATORS UPLOAD] Fila ${rowNumber} - Verificando asociaciones existentes en esta división...`);
+        const allUserAssociations = await Shared.find({
           user: coordinatorUser._id,
           account: division.cuenta,
           division: divisionId,
           status: 'active'
+        }).populate('role', 'nombre');
+
+        console.log(`📋 [COORDINATORS UPLOAD] Fila ${rowNumber} - Asociaciones existentes:`, allUserAssociations.map(assoc => ({
+          id: assoc._id,
+          role: assoc.role?.nombre,
+          status: assoc.status
+        })));
+
+        // Verificar si ya existe una asociación específicamente como coordinador
+        const existingCoordinatorAssociation = await Shared.findOne({
+          user: coordinatorUser._id,
+          account: division.cuenta,
+          division: divisionId,
+          role: coordinadorRole._id,
+          status: 'active'
         });
 
-        if (existingAssociation) {
-          console.log(`ℹ️ Coordinador ya tiene asociación con esta división`);
+        if (existingCoordinatorAssociation) {
+          console.log(`ℹ️ [COORDINATORS UPLOAD] Fila ${rowNumber} - Coordinador ya tiene asociación como coordinador con esta división (ID: ${existingCoordinatorAssociation._id})`);
         } else {
           // Crear asociación del coordinador con institución + división
-          console.log(`🔗 Creando asociación del coordinador...`);
-          await createAssociationByRole(
-            coordinatorUser._id,
-            division.cuenta,
-            'coordinador',
-            divisionId,
-            null,
-            userId
-          );
+          console.log(`🔗 [COORDINATORS UPLOAD] Fila ${rowNumber} - Creando asociación del coordinador...`);
+          try {
+            await createAssociationByRole(
+              coordinatorUser._id,
+              division.cuenta,
+              'coordinador',
+              divisionId,
+              null,
+              userId
+            );
+            console.log(`✅ [COORDINATORS UPLOAD] Fila ${rowNumber} - Asociación creada exitosamente`);
+          } catch (associationError) {
+            console.error(`❌ [COORDINATORS UPLOAD] Fila ${rowNumber} - Error creando asociación:`, associationError);
+            throw associationError;
+          }
+
+          // Enviar email de asociación a institución (solo si el coordinador ya existía)
+          if (existingCoordinator) {
+            try {
+              const account = await Account.findById(division.cuenta);
+              await emailService.sendInstitutionAssociationEmail(
+                {
+                  name: coordinatorUser.name,
+                  email: coordinatorUser.email
+                },
+                account.nombre,
+                division.nombre,
+                'Coordinador'
+              );
+              console.log(`📧 Email de asociación enviado a: ${coordinatorUser.email}`);
+            } catch (emailError) {
+              console.error(`❌ Error enviando email de asociación a ${coordinatorUser.email}:`, emailError.message);
+              // No fallar la operación por error de email
+            }
+          }
         }
 
         results.success++;
+        console.log(`✅ [COORDINATORS UPLOAD] Fila ${rowNumber} - Procesada exitosamente`);
 
       } catch (error) {
-        console.log(`❌ Error en fila ${rowNumber}:`, error.message);
-        console.log(`❌ Stack trace:`, error.stack);
+        console.log(`❌ [COORDINATORS UPLOAD] Error en fila ${rowNumber}:`, error.message);
+        console.log(`❌ [COORDINATORS UPLOAD] Stack trace:`, error.stack);
         results.errors.push({
           row: rowNumber,
           error: error.message
@@ -4456,8 +5025,21 @@ app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single
       }
     }
 
+    console.log(`📊 [COORDINATORS UPLOAD] Procesamiento completado:`, {
+      success: results.success,
+      errors: results.errors.length,
+      total: data.length - 1
+    });
+
     // Eliminar el archivo temporal
+    console.log('🗑️ [COORDINATORS UPLOAD] Eliminando archivo temporal...');
     fs.unlinkSync(req.file.path);
+
+    console.log('✅ [COORDINATORS UPLOAD] Respuesta enviada:', {
+      success: true,
+      message: `Carga completada. ${results.success} coordinadores cargados exitosamente.`,
+      data: results
+    });
 
     res.json({
       success: true,
@@ -4481,7 +5063,7 @@ app.post('/api/coordinators/upload-excel', authenticateToken, uploadExcel.single
 });
 
 // Endpoint para obtener coordinadores por división
-app.get('/api/coordinators/by-division/:divisionId', authenticateToken, async (req, res) => {
+app.get('/coordinators/by-division/:divisionId', authenticateToken, async (req, res) => {
   try {
     const { divisionId } = req.params;
     const { userId } = req.user;
@@ -4581,7 +5163,7 @@ app.get('/api/coordinators/by-division/:divisionId', authenticateToken, async (r
 });
 
 // Endpoint para obtener todos los coordinadores
-app.get('/api/coordinators', authenticateToken, async (req, res) => {
+app.get('/coordinators', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
 
@@ -4680,7 +5262,7 @@ app.get('/api/coordinators', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para obtener todos los tutores
-app.get('/api/tutors', authenticateToken, async (req, res) => {
+app.get('/tutors', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.user;
 
@@ -4788,7 +5370,7 @@ app.get('/api/tutors', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para obtener tutores por división
-app.get('/api/tutors/by-division/:divisionId', authenticateToken, async (req, res) => {
+app.get('/tutors/by-division/:divisionId', authenticateToken, async (req, res) => {
   try {
     const { divisionId } = req.params;
     const { userId } = req.user;
@@ -4897,7 +5479,7 @@ app.get('/api/tutors/by-division/:divisionId', authenticateToken, async (req, re
 });
 
 // Endpoint para eliminar alumno
-app.delete('/api/students/:id', authenticateToken, async (req, res) => {
+app.delete('/students/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     const { userId } = req.user;
@@ -4944,19 +5526,20 @@ app.delete('/api/students/:id', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para guardar asistencia
-app.post('/api/asistencia', authenticateToken, async (req, res) => {
+app.post('/asistencia', authenticateToken, async (req, res) => {
   try {
     console.log('🚀 [ASISTENCIA] Iniciando endpoint de asistencia...');
     console.log('📥 Datos recibidos en /api/asistencia:', JSON.stringify(req.body, null, 2));
     console.log('👤 Usuario:', req.user);
     
-    const { accountId, divisionId, estudiantes } = req.body;
+    const { accountId, divisionId, estudiantes, retiradas } = req.body;
     const { userId } = req.user;
 
     console.log('🔍 [ASISTENCIA] Validando datos básicos...');
     console.log('🔍 [ASISTENCIA] accountId:', accountId);
     console.log('🔍 [ASISTENCIA] divisionId:', divisionId);
     console.log('🔍 [ASISTENCIA] estudiantes:', estudiantes);
+    console.log('🔍 [ASISTENCIA] retiradas:', retiradas);
 
     // Validaciones básicas
     console.log('🔍 [ASISTENCIA] Validaciones básicas...');
@@ -5054,10 +5637,23 @@ app.post('/api/asistencia', authenticateToken, async (req, res) => {
 
     if (existingAsistencia) {
       // Actualizar la asistencia existente
-      existingAsistencia.estudiantes = estudiantes.map(e => ({
-        student: e.studentId,
-        presente: e.presente
-      }));
+      existingAsistencia.estudiantes = estudiantes.map(e => {
+        const studentData = {
+          student: e.studentId,
+          presente: e.presente
+        };
+        
+        // Agregar información de retirada si existe
+        if (retiradas && retiradas[e.studentId]) {
+          const retirada = retiradas[e.studentId];
+          studentData.retirado = true;
+          studentData.retiradoPor = retirada.withdrawnBy;
+          studentData.retiradoPorNombre = retirada.withdrawnByName;
+          studentData.retiradoEn = new Date();
+        }
+        
+        return studentData;
+      });
       
       await existingAsistencia.save();
       
@@ -5082,10 +5678,23 @@ app.post('/api/asistencia', authenticateToken, async (req, res) => {
       account: accountId,
       division: divisionId,
       fecha: fechaStr,
-      estudiantes: estudiantes.map(e => ({
-        student: e.studentId,
-        presente: e.presente
-      })),
+      estudiantes: estudiantes.map(e => {
+        const studentData = {
+          student: e.studentId,
+          presente: e.presente
+        };
+        
+        // Agregar información de retirada si existe
+        if (retiradas && retiradas[e.studentId]) {
+          const retirada = retiradas[e.studentId];
+          studentData.retirado = true;
+          studentData.retiradoPor = retirada.withdrawnBy;
+          studentData.retiradoPorNombre = retirada.withdrawnByName;
+          studentData.retiradoEn = new Date();
+        }
+        
+        return studentData;
+      }),
       creadoPor: userId
     };
 
@@ -5126,7 +5735,7 @@ app.use((err, req, res, next) => {
 });
 
 // Obtener asistencia por cuenta, división y fecha
-app.get('/api/asistencia/by-date', authenticateToken, async (req, res) => {
+app.get('/asistencia/by-date', authenticateToken, async (req, res) => {
   try {
     const { accountId, divisionId, date } = req.query;
     if (!accountId || !divisionId) {
@@ -5160,10 +5769,526 @@ app.get('/api/asistencia/by-date', authenticateToken, async (req, res) => {
   }
 });
 
+// ==================== ENDPOINTS DE RETIRADAS ====================
+
+// Guardar retirada individual
+app.post('/asistencia/retirada', authenticateToken, async (req, res) => {
+  try {
+    console.log('🚀 [RETIRADA] Iniciando endpoint de retirada...');
+    console.log('📥 Datos recibidos en /api/asistencia/retirada:', JSON.stringify(req.body, null, 2));
+    
+    const { accountId, divisionId, studentId, withdrawnBy, withdrawnByName } = req.body;
+    const { userId } = req.user;
+
+    console.log('🔍 [RETIRADA] Validando datos básicos...');
+    console.log('🔍 [RETIRADA] accountId:', accountId);
+    console.log('🔍 [RETIRADA] divisionId:', divisionId);
+    console.log('🔍 [RETIRADA] studentId:', studentId);
+    console.log('🔍 [RETIRADA] withdrawnBy:', withdrawnBy);
+    console.log('🔍 [RETIRADA] withdrawnByName:', withdrawnByName);
+
+    // Validaciones básicas
+    if (!accountId || !divisionId || !studentId || !withdrawnBy || !withdrawnByName) {
+      return res.status(400).json({
+        success: false,
+        message: 'accountId, divisionId, studentId, withdrawnBy y withdrawnByName son requeridos'
+      });
+    }
+
+    // Verificar que la cuenta existe
+    const account = await Account.findById(accountId);
+    if (!account) {
+      return res.status(400).json({
+        success: false,
+        message: 'La cuenta especificada no existe'
+      });
+    }
+
+    // Verificar que la división existe
+    const division = await Grupo.findById(divisionId);
+    if (!division) {
+      return res.status(400).json({
+        success: false,
+        message: 'La división especificada no existe'
+      });
+    }
+
+    // Verificar que el estudiante existe y pertenece a la división
+    const student = await Student.findOne({
+      _id: studentId,
+      account: accountId,
+      division: divisionId
+    });
+
+    if (!student) {
+      return res.status(400).json({
+        success: false,
+        message: 'El estudiante no existe o no pertenece a la división especificada'
+      });
+    }
+
+    // Verificar permisos del usuario
+    const userAssociation = await Shared.findOne({
+      user: userId,
+      account: accountId,
+      status: 'active'
+    });
+
+    if (!userAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para registrar retiradas en esta cuenta'
+      });
+    }
+
+    // Crear fecha para el día actual
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    const fechaStr = `${yyyy}-${mm}-${dd}`;
+
+    // Buscar o crear asistencia para hoy
+    let asistencia = await Asistencia.findOne({
+      account: accountId,
+      division: divisionId,
+      fecha: fechaStr
+    });
+
+    if (!asistencia) {
+      // Crear nueva asistencia
+      asistencia = new Asistencia({
+        account: accountId,
+        division: divisionId,
+        fecha: fechaStr,
+        estudiantes: [],
+        creadoPor: userId
+      });
+    }
+
+    // Buscar el estudiante en la asistencia
+    let studentIndex = asistencia.estudiantes.findIndex(
+      e => e.student.toString() === studentId
+    );
+
+    if (studentIndex === -1) {
+      // Agregar el estudiante a la asistencia
+      asistencia.estudiantes.push({
+        student: studentId,
+        presente: true, // Asumimos que está presente si se está retirando
+        retirado: true,
+        retiradoPor: withdrawnBy,
+        retiradoPorNombre: withdrawnByName,
+        retiradoEn: new Date()
+      });
+    } else {
+      // Actualizar el estudiante existente
+      asistencia.estudiantes[studentIndex].retirado = true;
+      asistencia.estudiantes[studentIndex].retiradoPor = withdrawnBy;
+      asistencia.estudiantes[studentIndex].retiradoPorNombre = withdrawnByName;
+      asistencia.estudiantes[studentIndex].retiradoEn = new Date();
+    }
+
+    await asistencia.save();
+
+    console.log('✅ [RETIRADA] Retirada guardada exitosamente');
+
+    res.json({
+      success: true,
+      message: 'Retirada registrada exitosamente',
+      data: {
+        studentId,
+        withdrawnBy,
+        withdrawnByName,
+        retiradoEn: new Date()
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [RETIRADA] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// ==================== ENDPOINTS DE ASISTENCIAS PARA FAMILIARES ====================
+
+// Obtener asistencias de un alumno específico para familiares
+app.get('/asistencia/student-attendance', authenticateToken, async (req, res) => {
+  try {
+    console.log('🚀 [STUDENT ATTENDANCE] Iniciando endpoint...');
+    console.log('📥 Parámetros recibidos:', req.query);
+    
+    const { studentId, accountId, startDate, endDate } = req.query;
+    const { userId } = req.user;
+
+    // Validaciones básicas
+    if (!studentId || !accountId || !startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'studentId, accountId, startDate y endDate son requeridos'
+      });
+    }
+
+    // Verificar que el usuario tiene permisos para ver este alumno
+    const userAssociation = await Shared.findOne({
+      user: userId,
+      student: studentId,
+      account: accountId,
+      status: 'active'
+    });
+
+    if (!userAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver las asistencias de este alumno'
+      });
+    }
+
+    // Buscar asistencias en el rango de fechas
+    const asistencias = await Asistencia.find({
+      account: accountId,
+      fecha: {
+        $gte: startDate,
+        $lte: endDate
+      }
+    }).populate('estudiantes.student', 'nombre apellido');
+
+    // Filtrar solo las asistencias del alumno específico
+    const studentAttendances = [];
+    
+    asistencias.forEach(asistencia => {
+      const studentAttendance = asistencia.estudiantes.find(
+        e => e.student._id.toString() === studentId
+      );
+      
+      if (studentAttendance) {
+        studentAttendances.push({
+          _id: asistencia._id,
+          fecha: asistencia.fecha,
+          presente: studentAttendance.presente,
+          retirado: studentAttendance.retirado || false,
+          retiradoPor: studentAttendance.retiradoPor || null,
+          retiradoPorNombre: studentAttendance.retiradoPorNombre || null,
+          retiradoEn: studentAttendance.retiradoEn || null,
+          ingresoEn: studentAttendance.ingresoEn || asistencia.createdAt || null
+        });
+      }
+    });
+
+    // Obtener información del alumno
+    const student = await Student.findById(studentId)
+      .populate('account', 'nombre')
+      .populate('division', 'nombre');
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Alumno no encontrado'
+      });
+    }
+
+    console.log('✅ [STUDENT ATTENDANCE] Asistencias encontradas:', studentAttendances.length);
+
+    res.json({
+      success: true,
+      data: {
+        student: {
+          _id: student._id,
+          nombre: student.nombre,
+          apellido: student.apellido
+        },
+        attendances: studentAttendances
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [STUDENT ATTENDANCE] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// ==================== ENDPOINTS DE CÓDIGOS QR ====================
+
+// Generar códigos QR para estudiantes que no los tengan
+app.post('/students/generate-qr-codes', authenticateToken, async (req, res) => {
+  try {
+    const { accountId, divisionId } = req.body;
+    
+    if (!accountId || !divisionId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'accountId y divisionId son requeridos' 
+      });
+    }
+
+    // Buscar estudiantes sin código QR
+    const studentsWithoutQR = await Student.find({
+      account: accountId,
+      division: divisionId,
+      $or: [
+        { qrCode: { $exists: false } },
+        { qrCode: null },
+        { qrCode: '' }
+      ]
+    });
+
+    console.log(`🔍 [QR GENERATION] Estudiantes sin QR encontrados: ${studentsWithoutQR.length}`);
+
+    let generatedCount = 0;
+    const results = [];
+
+    for (const student of studentsWithoutQR) {
+      try {
+        // Generar código QR único
+        let qrCode;
+        let attempts = 0;
+        const maxAttempts = 10;
+
+        do {
+          qrCode = student.generateQRCode();
+          attempts++;
+          
+          // Verificar que no exista otro estudiante con el mismo código
+          const existingStudent = await Student.findOne({ qrCode });
+          if (!existingStudent) {
+            break;
+          }
+        } while (attempts < maxAttempts);
+
+        if (attempts >= maxAttempts) {
+          console.error(`❌ [QR GENERATION] No se pudo generar código único para estudiante ${student._id}`);
+          results.push({
+            studentId: student._id,
+            studentName: student.getFullName(),
+            success: false,
+            error: 'No se pudo generar código único'
+          });
+          continue;
+        }
+
+        // Actualizar el estudiante con el código QR
+        student.qrCode = qrCode;
+        await student.save();
+
+        generatedCount++;
+        results.push({
+          studentId: student._id,
+          studentName: student.getFullName(),
+          qrCode: qrCode,
+          success: true
+        });
+
+        console.log(`✅ [QR GENERATION] Código generado para ${student.getFullName()}: ${qrCode}`);
+
+      } catch (error) {
+        console.error(`❌ [QR GENERATION] Error generando QR para estudiante ${student._id}:`, error);
+        results.push({
+          studentId: student._id,
+          studentName: student.getFullName(),
+          success: false,
+          error: error.message
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        totalProcessed: studentsWithoutQR.length,
+        generatedCount: generatedCount,
+        results: results
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [QR GENERATION] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// Buscar estudiante por código QR
+app.get('/students/by-qr/:qrCode', authenticateToken, async (req, res) => {
+  try {
+    const { qrCode } = req.params;
+    
+    if (!qrCode) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Código QR es requerido' 
+      });
+    }
+
+    const student = await Student.findOne({ qrCode })
+      .populate('account', 'nombre razonSocial')
+      .populate('division', 'nombre descripcion');
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Estudiante no encontrado'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        _id: student._id,
+        nombre: student.nombre,
+        apellido: student.apellido,
+        dni: student.dni,
+        email: student.email,
+        account: student.account,
+        division: student.division,
+        qrCode: student.qrCode
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [QR SEARCH] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// Obtener contactos autorizados para retirada de un estudiante
+app.get('/pickups/by-student/:studentId', authenticateToken, async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    
+    if (!studentId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'ID del estudiante es requerido' 
+      });
+    }
+
+    // Buscar contactos autorizados para el estudiante
+    const pickups = await Pickup.find({ student: studentId })
+      .select('nombre telefono relacion activo')
+      .sort({ nombre: 1 });
+
+    // Filtrar solo los activos
+    const activePickups = pickups.filter(pickup => pickup.activo !== false);
+
+    res.json({
+      success: true,
+      data: activePickups.map(pickup => ({
+        _id: pickup._id,
+        nombre: pickup.nombre,
+        telefono: pickup.telefono,
+        relacion: pickup.relacion
+      }))
+    });
+
+  } catch (error) {
+    console.error('❌ [PICKUPS BY STUDENT] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// Obtener un estudiante específico con información de tutores
+app.get('/students/:studentId', authenticateToken, async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    
+    if (!studentId) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'ID del estudiante es requerido' 
+      });
+    }
+
+    const student = await Student.findById(studentId)
+      .populate('account', 'nombre razonSocial')
+      .populate('division', 'nombre descripcion');
+
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Estudiante no encontrado'
+      });
+    }
+
+    // Buscar tutores asociados al estudiante
+    const tutors = await Shared.find({
+      student: studentId,
+      status: 'active'
+    })
+    .populate('user', 'name email')
+    .populate('role', 'nombre descripcion');
+
+    // Organizar tutores por rol
+    const tutorInfo = {
+      familyadmin: null,
+      familyviewer: null
+    };
+
+    tutors.forEach(tutor => {
+      if (tutor.role && tutor.user) {
+        if (tutor.role.nombre === 'familyadmin') {
+          tutorInfo.familyadmin = {
+            _id: tutor.user._id,
+            name: tutor.user.name,
+            email: tutor.user.email
+          };
+        } else if (tutor.role.nombre === 'familyviewer') {
+          tutorInfo.familyviewer = {
+            _id: tutor.user._id,
+            name: tutor.user.name,
+            email: tutor.user.email
+          };
+        }
+      }
+    });
+
+    res.json({
+      success: true,
+      data: {
+        _id: student._id,
+        nombre: student.nombre,
+        apellido: student.apellido,
+        dni: student.dni,
+        email: student.email,
+        account: student.account,
+        division: student.division,
+        tutor: tutorInfo,
+        qrCode: student.qrCode
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [STUDENT BY ID] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
 // ==================== ENDPOINTS DE NOTIFICACIONES ====================
 
-// Obtener notificaciones del usuario
-app.get('/api/notifications', authenticateToken, async (req, res) => {
+// Obtener notificaciones del usuario (endpoint general)
+app.get('/notifications', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { 
@@ -5218,8 +6343,331 @@ app.get('/api/notifications', authenticateToken, async (req, res) => {
   }
 });
 
+// Obtener notificaciones para usuarios familia (familyadmin/familyviewer)
+app.get('/notifications/family', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { 
+      limit = 20, 
+      skip = 0, 
+      unreadOnly = false,
+      accountId,
+      divisionId
+    } = req.query;
+    
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] Usuario:', userId);
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] Parámetros:', { accountId, divisionId, unreadOnly });
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Obtener la asociación activa del usuario
+    const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] Buscando ActiveAssociation para userId:', userId);
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] ActiveAssociation encontrada:', activeAssociation ? {
+      id: activeAssociation._id,
+      activeShared: activeAssociation.activeShared,
+      role: activeAssociation.role?.nombre
+    } : null);
+    
+    if (!activeAssociation) {
+      console.log('❌ [GET FAMILY NOTIFICATIONS] No se encontró ActiveAssociation para userId:', userId);
+      return res.status(404).json({
+        success: false,
+        message: 'No se encontró asociación activa'
+      });
+    }
+    
+    // Verificar que el rol activo sea familyadmin o familyviewer
+    if (!['familyadmin', 'familyviewer'].includes(activeAssociation.role?.nombre)) {
+      console.log('❌ [GET FAMILY NOTIFICATIONS] Rol activo no es familyadmin/familyviewer:', activeAssociation.role?.nombre);
+      return res.status(403).json({
+        success: false,
+        message: 'Este endpoint es solo para usuarios familia'
+      });
+    }
+    
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] Rol del usuario base:', user.role?.nombre);
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] Rol activo:', activeAssociation.role?.nombre);
+    
+    // Buscar estudiantes asociados al usuario
+    const associations = await Shared.find({
+      user: userId,
+      account: accountId,
+      status: 'active'
+    }).populate('student', 'nombre apellido');
+    
+    if (associations.length === 0) {
+      console.log('🔔 [GET FAMILY NOTIFICATIONS] No se encontraron estudiantes asociados');
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+    
+    // Obtener IDs de estudiantes asociados
+    const studentIds = associations
+      .map(assoc => assoc.student?._id)
+      .filter(id => id);
+    
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] Estudiantes asociados:', studentIds.length);
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] IDs de estudiantes:', studentIds);
+    
+    if (studentIds.length === 0) {
+      console.log('🔔 [GET FAMILY NOTIFICATIONS] No hay estudiantes válidos asociados');
+      return res.json({
+        success: true,
+        data: []
+      });
+    }
+    
+    // Construir query para buscar notificaciones
+    let query = {
+      account: accountId,
+      recipients: { $in: studentIds }
+    };
+    
+    if (divisionId) {
+      query.division = divisionId;
+    }
+    
+    // Filtrar por no leídas si se solicita
+    if (unreadOnly === 'true') {
+      query['readBy.user'] = { $ne: userId };
+    }
+    
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] Query final:', JSON.stringify(query, null, 2));
+    
+    // Buscar notificaciones
+    const notifications = await Notification.find(query)
+      .populate('sender', 'name email')
+      .populate('account', 'nombre')
+      .populate('division', 'nombre')
+      .sort({ sentAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
+    
+    console.log('🔔 [GET FAMILY NOTIFICATIONS] Notificaciones encontradas:', notifications.length);
+    
+    res.json({
+      success: true,
+      data: notifications
+    });
+    
+  } catch (error) {
+    console.error('❌ [GET FAMILY NOTIFICATIONS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener notificaciones familia'
+    });
+  }
+});
+
+// Obtener detalles completos de una notificación específica
+app.get('/notifications/:id/details', authenticateToken, async (req, res) => {
+  try {
+    const notificationId = req.params.id;
+    const userId = req.user.userId;
+    
+    console.log('🔔 [GET NOTIFICATION DETAILS] ID:', notificationId);
+    console.log('🔔 [GET NOTIFICATION DETAILS] Usuario:', userId);
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Buscar la notificación con detalles básicos
+    const notification = await Notification.findById(notificationId)
+      .populate('sender', 'name email')
+      .populate('account', 'nombre')
+      .populate('division', 'nombre')
+      .populate('readBy.user', 'name email');
+    
+    if (!notification) {
+      return res.status(404).json({
+        success: false,
+        message: 'Notificación no encontrada'
+      });
+    }
+    
+    // Verificar que el usuario tenga acceso a esta notificación
+    const isCoordinador = user.role?.nombre === 'coordinador';
+    const hasAccess = isCoordinador || 
+                     notification.recipients.some(recipient => recipient.toString() === userId);
+    
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver esta notificación'
+      });
+    }
+    
+    // Poblar destinatarios manualmente (usuarios y estudiantes)
+    let notificationObj = notification.toObject();
+    
+    if (notification.recipients && notification.recipients.length > 0) {
+      const populatedRecipients = [];
+      
+      for (let recipientId of notification.recipients) {
+        // Intentar buscar como usuario
+        let recipient = await User.findById(recipientId).select('name email');
+        
+        // Si no es usuario, buscar como estudiante
+        if (!recipient) {
+          recipient = await Student.findById(recipientId).select('nombre apellido email');
+        }
+        
+        if (recipient) {
+          // Normalizar el nombre para usuarios y estudiantes
+          const recipientObj = recipient.toObject();
+          if (recipientObj.name) {
+            // Es un usuario, usar 'name' como 'nombre'
+            recipientObj.nombre = recipientObj.name;
+          } else if (recipientObj.nombre && recipientObj.apellido) {
+            // Es un estudiante, combinar nombre y apellido
+            recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
+          }
+          populatedRecipients.push(recipientObj);
+        }
+      }
+      
+      notificationObj.recipients = populatedRecipients;
+    }
+
+    // Poblar readBy.user manualmente para asegurar que tenga el campo nombre
+    if (notificationObj.readBy && notificationObj.readBy.length > 0) {
+      const populatedReadBy = [];
+      
+      for (let readEntry of notificationObj.readBy) {
+        if (readEntry.user && readEntry.user._id) {
+          // Buscar el usuario completo
+          const user = await User.findById(readEntry.user._id).select('name email');
+          if (user) {
+            populatedReadBy.push({
+              user: {
+                _id: user._id,
+                nombre: user.name, // User model usa 'name', no 'nombre'
+                email: user.email
+              },
+              readAt: readEntry.readAt,
+              _id: readEntry._id
+            });
+          } else {
+            // Si no se encuentra el usuario, mantener la entrada original
+            populatedReadBy.push(readEntry);
+          }
+        } else {
+          populatedReadBy.push(readEntry);
+        }
+      }
+      
+      notificationObj.readBy = populatedReadBy;
+    }
+    
+    // Calcular estadísticas corregidas
+    const totalRecipients = notificationObj.recipients?.length || 0;
+    
+    // Filtrar readBy para excluir coordinadores
+    const readByParents = notificationObj.readBy?.filter(readEntry => {
+      if (!readEntry.user) return false;
+      // Verificar si el usuario que leyó es coordinador
+      return readEntry.user.role?.nombre !== 'coordinador';
+    }) || [];
+    
+    // Para la lista de pendientes, necesitamos encontrar qué estudiantes tienen padres que ya leyeron
+    const studentsWithParentsRead = new Set();
+    
+    if (readByParents.length > 0) {
+      // Buscar asociaciones de los usuarios que leyeron para encontrar sus estudiantes
+      for (let readEntry of readByParents) {
+        const associations = await Shared.find({
+          user: readEntry.user._id,
+          status: 'active'
+        }).populate('student', '_id');
+        
+        associations.forEach(assoc => {
+          if (assoc.student) {
+            studentsWithParentsRead.add(assoc.student._id.toString());
+          }
+        });
+      }
+    }
+    
+    // Filtrar destinatarios pendientes (estudiantes cuyos padres NO han leído)
+    const pendingRecipients = [];
+    
+    if (notificationObj.recipients && notificationObj.recipients.length > 0) {
+      for (let recipient of notificationObj.recipients) {
+        // Si es un estudiante, verificar si sus padres ya leyeron
+        if (recipient._id && !studentsWithParentsRead.has(recipient._id.toString())) {
+          // Buscar el tutor (familyadmin) de este estudiante
+          const tutorAssociation = await Shared.findOne({
+            student: recipient._id,
+            status: 'active'
+          }).populate('user', 'name email').populate('role', 'nombre');
+          
+          // Solo incluir si el tutor es familyadmin
+          if (tutorAssociation && tutorAssociation.role?.nombre === 'familyadmin') {
+            pendingRecipients.push({
+              ...recipient,
+              tutor: {
+                name: tutorAssociation.user?.name,
+                email: tutorAssociation.user?.email
+              }
+            });
+          } else {
+            // Si no tiene tutor familyadmin, incluir sin tutor
+            pendingRecipients.push({
+              ...recipient,
+              tutor: null
+            });
+          }
+        }
+      }
+    }
+    
+    // Agregar estadísticas corregidas al objeto de respuesta
+    notificationObj.stats = {
+      totalRecipients,
+      readByParents: readByParents.length,
+      pendingRecipients: pendingRecipients.length
+    };
+    
+    // Agregar lista de pendientes corregida
+    notificationObj.pendingRecipients = pendingRecipients;
+    
+    console.log('🔔 [GET NOTIFICATION DETAILS] Notificación encontrada:', notification.title);
+    console.log('🔔 [GET NOTIFICATION DETAILS] Total destinatarios:', totalRecipients);
+    console.log('🔔 [GET NOTIFICATION DETAILS] Leídas por padres:', readByParents.length);
+    console.log('🔔 [GET NOTIFICATION DETAILS] Pendientes:', pendingRecipients.length);
+    
+    res.json({
+      success: true,
+      data: notificationObj
+    });
+    
+  } catch (error) {
+    console.error('❌ [GET NOTIFICATION DETAILS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener detalles de la notificación'
+    });
+  }
+});
+
 // Marcar notificación como leída
-app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
+app.put('/notifications/:id/read', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const notificationId = req.params.id;
@@ -5254,7 +6702,7 @@ app.put('/api/notifications/:id/read', authenticateToken, async (req, res) => {
 });
 
 // Eliminar notificación
-app.delete('/api/notifications/:id', authenticateToken, async (req, res) => {
+app.delete('/notifications/:id', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const notificationId = req.params.id;
@@ -5270,13 +6718,24 @@ app.delete('/api/notifications/:id', authenticateToken, async (req, res) => {
       });
     }
     
-    // Verificar permisos: remitente, superadmin o coordinador puede eliminar
+    // Verificar permisos: remitente, superadmin, coordinador o adminaccount puede eliminar
     const user = await User.findById(userId).populate('role');
     const isSuperAdmin = user?.role?.nombre === 'superadmin';
     const isCoordinador = user?.role?.nombre === 'coordinador';
+    const isAdminAccount = user?.role?.nombre === 'adminaccount';
     const isSender = notification.sender.toString() === userId;
     
-    if (!isSuperAdmin && !isCoordinador && !isSender) {
+    console.log('🔔 [DELETE] Verificando permisos:', {
+      userId,
+      userRole: user?.role?.nombre,
+      isSuperAdmin,
+      isCoordinador,
+      isAdminAccount,
+      isSender,
+      notificationSender: notification.sender.toString()
+    });
+    
+    if (!isSuperAdmin && !isCoordinador && !isAdminAccount && !isSender) {
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para eliminar esta notificación'
@@ -5302,7 +6761,7 @@ app.delete('/api/notifications/:id', authenticateToken, async (req, res) => {
 });
 
 // Endpoint de prueba para verificar que el servidor funciona
-app.get('/api/test', (req, res) => {
+app.get('/test', (req, res) => {
   res.json({
     success: true,
     message: 'Servidor funcionando correctamente',
@@ -5311,7 +6770,7 @@ app.get('/api/test', (req, res) => {
 });
 
 // Endpoint para obtener datos de ejemplo del usuario (sin autenticación)
-app.get('/api/users/example', (req, res) => {
+app.get('/users/example', (req, res) => {
   const exampleUser = {
     _id: 'juan-perez-id',
     name: 'Juan Pérez',
@@ -5329,7 +6788,7 @@ app.get('/api/users/example', (req, res) => {
 });
 
 // Endpoint para obtener datos del usuario actual
-app.get('/api/users/me', authenticateToken, async (req, res) => {
+app.get('/users/me', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const user = await User.findById(userId).select('-password');
@@ -5348,8 +6807,40 @@ app.get('/api/users/me', authenticateToken, async (req, res) => {
   }
 });
 
+// Endpoint para obtener un usuario por ID
+app.get('/users/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    console.log('🔍 [GET USER BY ID] Obteniendo usuario con ID:', id);
+    
+    // Buscar el usuario por ID
+    const user = await User.findById(id).select('-password').populate('role');
+    
+    if (!user) {
+      console.log('❌ [GET USER BY ID] Usuario no encontrado:', id);
+      return res.status(404).json({ 
+        success: false, 
+        message: 'Usuario no encontrado' 
+      });
+    }
+
+    console.log('✅ [GET USER BY ID] Usuario encontrado:', user.name);
+    
+    res.json({
+      success: true,
+      data: user
+    });
+  } catch (error) {
+    console.error('❌ [GET USER BY ID] Error al obtener usuario:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error interno del servidor' 
+    });
+  }
+});
+
 // Endpoint para actualizar datos del usuario (sin autenticación para testing)
-app.put('/api/users/:userId', async (req, res) => {
+app.put('/users/:userId', async (req, res) => {
   try {
     const { userId } = req.params;
     const { name, phone, telefono } = req.body;
@@ -5387,7 +6878,7 @@ app.put('/api/users/:userId', async (req, res) => {
 });
 
 // Endpoint para subir avatar del usuario (sin autenticación para testing)
-app.post('/api/users/:userId/avatar', upload.single('avatar'), async (req, res) => {
+app.post('/users/:userId/avatar', upload.single('avatar'), async (req, res) => {
   try {
     const { userId } = req.params;
     
@@ -5412,7 +6903,7 @@ app.post('/api/users/:userId/avatar', upload.single('avatar'), async (req, res) 
 });
 
 // Endpoint para eliminar avatar del usuario
-app.delete('/api/users/:userId/avatar', authenticateToken, async (req, res) => {
+app.delete('/users/:userId/avatar', authenticateToken, async (req, res) => {
   try {
     const { userId } = req.params;
 
@@ -5453,8 +6944,190 @@ app.delete('/api/users/:userId/avatar', authenticateToken, async (req, res) => {
   }
 });
 
+// Obtener conteo de notificaciones sin leer
+app.get('/notifications/unread-count', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    
+    console.log('🔔 [UNREAD COUNT] Usuario:', userId);
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Solo familyadmin y familyviewer pueden ver notificaciones
+    if (!['familyadmin', 'familyviewer'].includes(user.role?.nombre)) {
+      return res.json({
+        success: true,
+        data: { count: 0 }
+      });
+    }
+    
+    console.log('🔔 [UNREAD COUNT] Rol del usuario:', user.role?.nombre);
+    
+    // Para familyadmin/familyviewer: buscar estudiantes asociados y obtener sus notificaciones
+    console.log('🔔 [UNREAD COUNT] Usuario es familyadmin/familyviewer - buscando notificaciones de estudiantes asociados');
+    
+    // Obtener todas las asociaciones del usuario
+    const userAssociations = await Shared.find({ 
+      user: userId, 
+      status: 'active' 
+    }).populate('account division student');
+    
+    if (userAssociations.length === 0) {
+      console.log('🔔 [UNREAD COUNT] No se encontraron asociaciones activas');
+      return res.json({
+        success: true,
+        data: { count: 0 }
+      });
+    }
+    
+    // Obtener IDs de estudiantes asociados
+    const studentIds = userAssociations
+      .map(assoc => assoc.student?._id)
+      .filter(id => id); // Filtrar IDs válidos
+    
+    console.log('🔔 [UNREAD COUNT] Estudiantes asociados:', studentIds);
+    
+    if (studentIds.length === 0) {
+      console.log('🔔 [UNREAD COUNT] No hay estudiantes válidos asociados');
+      return res.json({
+        success: true,
+        data: { count: 0 }
+      });
+    }
+    
+    // Obtener IDs de cuentas del usuario
+    const accountIds = userAssociations.map(assoc => assoc.account._id);
+    
+    console.log('🔔 [UNREAD COUNT] Cuentas del usuario:', accountIds);
+    
+    // Construir query para notificaciones
+    const query = {
+      account: { $in: accountIds },
+      recipients: { $in: studentIds }, // Notificaciones dirigidas a los estudiantes asociados
+      'readBy.user': { $ne: userId } // Excluir las que ya fueron leídas por este usuario
+    };
+    
+    console.log('🔔 [UNREAD COUNT] Query:', JSON.stringify(query, null, 2));
+    
+    // Contar notificaciones sin leer
+    const unreadCount = await Notification.countDocuments(query);
+    
+    console.log('🔔 [UNREAD COUNT] Conteo sin leer:', unreadCount);
+    
+    res.json({
+      success: true,
+      data: { count: unreadCount }
+    });
+    
+  } catch (error) {
+    console.error('❌ [UNREAD COUNT] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Obtener conteo de notificaciones sin leer para usuarios familia (endpoint específico)
+app.get('/notifications/family/unread-count', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { accountId } = req.query;
+    
+    console.log('🔔 [FAMILY UNREAD COUNT] Usuario:', userId);
+    console.log('🔔 [FAMILY UNREAD COUNT] AccountId:', accountId);
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Obtener la asociación activa del usuario
+    const activeAssociation = await ActiveAssociation.findOne({ user: userId });
+    if (!activeAssociation) {
+      return res.status(404).json({
+        success: false,
+        message: 'No se encontró asociación activa'
+      });
+    }
+    
+    // Verificar que el rol activo sea familyadmin o familyviewer
+    if (!['familyadmin', 'familyviewer'].includes(activeAssociation.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Este endpoint es solo para usuarios familia'
+      });
+    }
+    
+    console.log('🔔 [FAMILY UNREAD COUNT] Rol del usuario:', user.role?.nombre);
+    
+    // Buscar estudiantes asociados al usuario en la cuenta específica
+    const associations = await Shared.find({
+      user: userId,
+      account: accountId,
+      status: 'active'
+    }).populate('student', 'nombre apellido');
+    
+    if (associations.length === 0) {
+      console.log('🔔 [FAMILY UNREAD COUNT] No se encontraron estudiantes asociados');
+      return res.json({
+        success: true,
+        data: { count: 0 }
+      });
+    }
+    
+    // Obtener IDs de estudiantes asociados
+    const studentIds = associations
+      .map(assoc => assoc.student?._id)
+      .filter(id => id);
+    
+    console.log('🔔 [FAMILY UNREAD COUNT] Estudiantes asociados:', studentIds.length);
+    console.log('🔔 [FAMILY UNREAD COUNT] IDs de estudiantes:', studentIds);
+    
+    if (studentIds.length === 0) {
+      console.log('🔔 [FAMILY UNREAD COUNT] No hay estudiantes válidos asociados');
+      return res.json({
+        success: true,
+        data: { count: 0 }
+      });
+    }
+    
+    // Buscar notificaciones no leídas para estos estudiantes
+    const unreadCount = await Notification.countDocuments({
+      account: accountId,
+      recipients: { $in: studentIds },
+      'readBy.user': { $ne: userId }
+    });
+    
+    console.log('🔔 [FAMILY UNREAD COUNT] Notificaciones no leídas:', unreadCount);
+    
+    res.json({
+      success: true,
+      data: { count: unreadCount }
+    });
+    
+  } catch (error) {
+    console.error('❌ [FAMILY UNREAD COUNT] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener conteo de notificaciones familia'
+    });
+  }
+});
+
 // Obtener notificaciones para el backoffice (servicio específico)
-app.get('/api/backoffice/notifications', authenticateToken, async (req, res) => {
+app.get('/backoffice/notifications', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { 
@@ -5542,15 +7215,24 @@ app.get('/api/backoffice/notifications', authenticateToken, async (req, res) => 
         
         for (let recipientId of notification.recipients) {
           // Intentar buscar como usuario
-          let recipient = await User.findById(recipientId).select('nombre email');
+          let recipient = await User.findById(recipientId).select('name email');
           
           // Si no es usuario, buscar como estudiante
           if (!recipient) {
-            recipient = await Student.findById(recipientId).select('nombre email');
+            recipient = await Student.findById(recipientId).select('nombre apellido email');
           }
           
           if (recipient) {
-            populatedRecipients.push(recipient.toObject());
+            // Normalizar el nombre para usuarios y estudiantes
+            const recipientObj = recipient.toObject();
+            if (recipientObj.name) {
+              // Es un usuario, usar 'name' como 'nombre'
+              recipientObj.nombre = recipientObj.name;
+            } else if (recipientObj.nombre && recipientObj.apellido) {
+              // Es un estudiante, combinar nombre y apellido
+              recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
+            }
+            populatedRecipients.push(recipientObj);
           }
         }
         
@@ -5592,7 +7274,7 @@ app.get('/api/backoffice/notifications', authenticateToken, async (req, res) => 
 });
 
 // Enviar nueva notificación
-app.post('/api/notifications', authenticateToken, async (req, res) => {
+app.post('/notifications', authenticateToken, async (req, res) => {
   try {
     console.log('🔔 [SEND NOTIFICATION] Iniciando...');
     const { title, message, type, accountId, divisionId, recipients = [] } = req.body;
@@ -5610,11 +7292,11 @@ app.post('/api/notifications', authenticateToken, async (req, res) => {
     }
 
     // Validar tipo de notificación
-    if (!['informacion', 'comunicacion'].includes(type)) {
+    if (!['informacion', 'comunicacion', 'institucion'].includes(type)) {
       console.log('❌ [SEND NOTIFICATION] Tipo inválido:', type);
       return res.status(400).json({
         success: false,
-        message: 'Tipo de notificación inválido. Debe ser "informacion" o "comunicacion"'
+        message: 'Tipo de notificación inválido. Debe ser "informacion", "comunicacion" o "institucion"'
       });
     }
 
@@ -5678,7 +7360,7 @@ app.post('/api/notifications', authenticateToken, async (req, res) => {
 });
 
 // Obtener usuarios disponibles para enviar notificaciones
-app.get('/api/notifications/recipients', authenticateToken, async (req, res) => {
+app.get('/notifications/recipients', authenticateToken, async (req, res) => {
   try {
     const { accountId, divisionId } = req.query;
     
@@ -5701,12 +7383,16 @@ app.get('/api/notifications/recipients', authenticateToken, async (req, res) => 
     const associations = await Shared.find(query)
       .populate('user', 'nombre email')
       .populate('account', 'nombre')
-      .populate('division', 'nombre');
+      .populate('division', 'nombre')
+      .populate('role', 'nombre');
     
     const recipients = associations.map(assoc => ({
-      id: assoc.user._id,
+      _id: assoc.user._id,
       nombre: assoc.user.nombre,
       email: assoc.user.email,
+      role: {
+        nombre: assoc.role.nombre
+      },
       account: assoc.account.nombre,
       division: assoc.division?.nombre || 'Sin división'
     }));
@@ -5730,12 +7416,12 @@ app.get('/api/notifications/recipients', authenticateToken, async (req, res) => 
 // ===== NUEVOS ENDPOINTS DE EVENTOS =====
 
 // Crear evento (solo coordinadores)
-app.post('/api/events/create', authenticateToken, async (req, res) => {
+app.post('/events/create', authenticateToken, async (req, res) => {
   try {
-    const { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId } = req.body;
+    const { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId, requiereAutorizacion } = req.body;
     const currentUser = req.user;
 
-    console.log('📅 [CREATE EVENT] Datos recibidos:', { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId });
+    console.log('📅 [CREATE EVENT] Datos recibidos:', { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId, requiereAutorizacion });
     console.log('👤 [CREATE EVENT] Usuario:', currentUser._id, currentUser.role?.nombre);
 
     // Verificar que el usuario es coordinador
@@ -5787,20 +7473,71 @@ app.post('/api/events/create', authenticateToken, async (req, res) => {
       creador: currentUser._id,
       institucion: userAssociation.account._id,
       division: userAssociation.division?._id || null,
-      estado: 'activo'
+      estado: 'activo',
+      requiereAutorizacion: requiereAutorizacion || false
     });
 
     await newEvent.save();
     console.log('📅 [CREATE EVENT] Evento creado:', newEvent._id);
+
+    // Si el evento requiere autorización, generar notificaciones para todos los estudiantes de la división
+    if (newEvent.requiereAutorizacion && userAssociation.division) {
+      try {
+        console.log('📢 [CREATE EVENT] Generando notificaciones para evento que requiere autorización');
+        
+        // Obtener todos los estudiantes de la división
+        const students = await Student.find({
+          division: userAssociation.division._id,
+          activo: true
+        });
+
+        console.log('📢 [CREATE EVENT] Estudiantes encontrados para notificar:', students.length);
+
+        // Crear notificaciones para cada estudiante
+        const notifications = [];
+        for (const student of students) {
+          const notification = new Notification({
+            title: `Nuevo evento: ${newEvent.titulo}`,
+            message: `${newEvent.descripcion}\n\n📅 Fecha: ${new Date(newEvent.fecha).toLocaleDateString('es-ES', { 
+              weekday: 'long', 
+              day: 'numeric', 
+              month: 'long' 
+            })} a las ${newEvent.hora}${newEvent.lugar ? `\n📍 Lugar: ${newEvent.lugar}` : ''}\n\n⚠️ Este evento requiere tu autorización. Por favor, autoriza o rechaza la participación de tu hijo.`,
+            type: 'informacion',
+            sender: currentUser._id,
+            account: newEvent.institucion,
+            division: newEvent.division,
+            recipients: [student._id],
+            status: 'sent',
+            priority: 'high'
+          });
+          notifications.push(notification);
+        }
+
+        // Guardar todas las notificaciones
+        if (notifications.length > 0) {
+          await Notification.insertMany(notifications);
+          console.log('📢 [CREATE EVENT] Notificaciones creadas:', notifications.length);
+        }
+
+      } catch (notificationError) {
+        console.error('❌ [CREATE EVENT] Error creando notificaciones:', notificationError);
+        // No fallar la creación del evento si fallan las notificaciones
+      }
+    }
 
     // Populate para la respuesta
     await newEvent.populate('creador', 'name email');
     await newEvent.populate('institucion', 'nombre');
     await newEvent.populate('division', 'nombre');
 
+    const responseMessage = newEvent.requiereAutorizacion 
+      ? 'Evento creado exitosamente. Se han enviado notificaciones a los padres para autorización.'
+      : 'Evento creado exitosamente';
+
     res.status(201).json({
       success: true,
-      message: 'Evento creado exitosamente',
+      message: responseMessage,
       data: {
         _id: newEvent._id,
         titulo: newEvent.titulo,
@@ -5809,6 +7546,7 @@ app.post('/api/events/create', authenticateToken, async (req, res) => {
         hora: newEvent.hora,
         lugar: newEvent.lugar,
         estado: newEvent.estado,
+        requiereAutorizacion: newEvent.requiereAutorizacion,
         creador: newEvent.creador,
         institucion: newEvent.institucion,
         division: newEvent.division,
@@ -5826,7 +7564,7 @@ app.post('/api/events/create', authenticateToken, async (req, res) => {
 });
 
 // Obtener eventos por institución (para todos los roles)
-app.get('/api/events/institution/:institutionId', authenticateToken, async (req, res) => {
+app.get('/events/institution/:institutionId', authenticateToken, async (req, res) => {
   try {
     const { institutionId } = req.params;
     const { page = 1, limit = 20, divisionId } = req.query;
@@ -5889,6 +7627,7 @@ app.get('/api/events/institution/:institutionId', authenticateToken, async (req,
           hora: event.hora,
           lugar: event.lugar,
           estado: event.estado,
+          requiereAutorizacion: event.requiereAutorizacion,
           creador: event.creador,
           institucion: event.institucion,
           division: event.division,
@@ -5909,10 +7648,336 @@ app.get('/api/events/institution/:institutionId', authenticateToken, async (req,
   }
 });
 
+// ===== ENDPOINTS DE AUTORIZACIÓN DE EVENTOS =====
+
+// Autorizar evento (solo familyadmin)
+app.post('/events/:eventId/authorize', authenticateToken, async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const { studentId, autorizado, comentarios } = req.body;
+    const currentUser = req.user;
+
+    console.log('✅ [AUTHORIZE EVENT] Evento:', eventId);
+    console.log('👤 [AUTHORIZE EVENT] Usuario:', currentUser._id, currentUser.role?.nombre);
+    console.log('👨‍🎓 [AUTHORIZE EVENT] Estudiante:', studentId);
+    console.log('✅ [AUTHORIZE EVENT] Autorizado:', autorizado);
+
+    // Verificar que el usuario es familyadmin
+    if (currentUser.role?.nombre !== 'familyadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los tutores principales pueden autorizar eventos'
+      });
+    }
+
+    // Verificar que el evento existe y requiere autorización
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: 'Evento no encontrado'
+      });
+    }
+
+    if (!event.requiereAutorizacion) {
+      return res.status(400).json({
+        success: false,
+        message: 'Este evento no requiere autorización'
+      });
+    }
+
+    // Verificar que el usuario tiene acceso al estudiante
+    const studentAssociation = await Shared.findOne({
+      user: currentUser._id,
+      student: studentId,
+      status: 'active'
+    });
+
+    if (!studentAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes acceso a este estudiante'
+      });
+    }
+
+    // Buscar o crear la autorización
+    let authorization = await EventAuthorization.findOne({
+      event: eventId,
+      student: studentId
+    });
+
+    if (authorization) {
+      // Actualizar autorización existente
+      authorization.autorizado = autorizado;
+      authorization.fechaAutorizacion = autorizado ? new Date() : null;
+      authorization.comentarios = comentarios || '';
+    } else {
+      // Crear nueva autorización
+      authorization = new EventAuthorization({
+        event: eventId,
+        student: studentId,
+        familyadmin: currentUser._id,
+        autorizado: autorizado,
+        fechaAutorizacion: autorizado ? new Date() : null,
+        comentarios: comentarios || ''
+      });
+    }
+
+    await authorization.save();
+
+    console.log('✅ [AUTHORIZE EVENT] Autorización guardada:', authorization._id);
+
+    res.json({
+      success: true,
+      message: autorizado ? 'Evento autorizado exitosamente' : 'Autorización revocada exitosamente',
+      data: {
+        _id: authorization._id,
+        event: eventId,
+        student: studentId,
+        autorizado: authorization.autorizado,
+        fechaAutorizacion: authorization.fechaAutorizacion,
+        comentarios: authorization.comentarios
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [AUTHORIZE EVENT] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor al autorizar evento'
+    });
+  }
+});
+
+// Obtener autorizaciones de un evento (solo coordinadores)
+app.get('/events/:eventId/authorizations', authenticateToken, async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const currentUser = req.user;
+
+    console.log('📋 [GET AUTHORIZATIONS] Evento:', eventId);
+    console.log('👤 [GET AUTHORIZATIONS] Usuario:', currentUser._id, currentUser.role?.nombre);
+
+    // Verificar que el usuario es coordinador
+    if (currentUser.role?.nombre !== 'coordinador') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los coordinadores pueden ver las autorizaciones'
+      });
+    }
+
+    // Verificar que el evento existe
+    const event = await Event.findById(eventId).populate('institucion division');
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: 'Evento no encontrado'
+      });
+    }
+
+    // Verificar que el usuario tiene acceso al evento
+    const userAssociation = await Shared.findOne({
+      user: currentUser._id,
+      account: event.institucion._id,
+      status: { $in: ['active', 'pending'] }
+    }).populate('division');
+
+    if (!userAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes acceso a este evento'
+      });
+    }
+
+    console.log('📋 [GET AUTHORIZATIONS] Asociación del coordinador:', {
+      account: userAssociation.account,
+      division: userAssociation.division?._id,
+      divisionName: userAssociation.division?.nombre
+    });
+
+    // Obtener todas las autorizaciones del evento
+    const authorizations = await EventAuthorization.find({ event: eventId })
+      .populate('student', 'nombre apellido')
+      .populate('familyadmin', 'name email')
+      .sort({ createdAt: 1 });
+
+    // Obtener todos los estudiantes de la división del coordinador
+    let allStudents = [];
+    if (userAssociation.division) {
+      allStudents = await Student.find({ 
+        division: userAssociation.division._id,
+        activo: true 
+      }).select('nombre apellido');
+      console.log('📋 [GET AUTHORIZATIONS] División del coordinador:', userAssociation.division._id);
+      console.log('📋 [GET AUTHORIZATIONS] Estudiantes encontrados en división del coordinador:', allStudents.length);
+    } else {
+      console.log('📋 [GET AUTHORIZATIONS] Coordinador sin división específica');
+    }
+
+    // Separar estudiantes con y sin autorización
+    const studentsWithAuth = authorizations.map(auth => auth.student._id.toString());
+    const studentsWithoutAuth = allStudents.filter(student => 
+      !studentsWithAuth.includes(student._id.toString())
+    );
+
+    // Crear lista completa de estudiantes pendientes (todos los de la división)
+    const allStudentsForPending = allStudents.map(student => {
+      const existingAuth = authorizations.find(auth => 
+        auth.student._id.toString() === student._id.toString()
+      );
+      
+      return {
+        _id: student._id,
+        nombre: student.nombre,
+        apellido: student.apellido,
+        hasResponse: !!existingAuth,
+        autorizado: existingAuth?.autorizado || false
+      };
+    });
+
+    const autorizados = authorizations.filter(auth => auth.autorizado).length;
+    const rechazados = authorizations.filter(auth => !auth.autorizado).length;
+    const sinRespuesta = allStudents.length - authorizations.length;
+    const pendientes = allStudents.length - autorizados;
+
+    console.log('📋 [GET AUTHORIZATIONS] Autorizaciones encontradas:', authorizations.length);
+    console.log('📋 [GET AUTHORIZATIONS] Estudiantes sin autorización:', studentsWithoutAuth.length);
+    console.log('📋 [GET AUTHORIZATIONS] Total estudiantes en división:', allStudents.length);
+    console.log('📋 [GET AUTHORIZATIONS] Autorizaciones aprobadas:', autorizados);
+    console.log('📋 [GET AUTHORIZATIONS] Autorizaciones rechazadas:', rechazados);
+    console.log('📋 [GET AUTHORIZATIONS] Sin respuesta:', sinRespuesta);
+    console.log('📋 [GET AUTHORIZATIONS] Pendientes (total - autorizados):', pendientes);
+    console.log('📋 [GET AUTHORIZATIONS] Verificación: autorizados + rechazados + sinRespuesta =', autorizados + rechazados + sinRespuesta, 'vs total =', allStudents.length);
+
+    res.json({
+      success: true,
+      data: {
+        event: {
+          _id: event._id,
+          titulo: event.titulo,
+          fecha: event.fecha,
+          hora: event.hora,
+          institucion: event.institucion,
+          division: event.division
+        },
+        authorizations: authorizations.map(auth => ({
+          _id: auth._id,
+          student: {
+            _id: auth.student._id,
+            nombre: auth.student.nombre,
+            apellido: auth.student.apellido
+          },
+          familyadmin: {
+            _id: auth.familyadmin._id,
+            name: auth.familyadmin.name,
+            email: auth.familyadmin.email
+          },
+          autorizado: auth.autorizado,
+          fechaAutorizacion: auth.fechaAutorizacion,
+          comentarios: auth.comentarios
+        })),
+        studentsWithoutAuth: studentsWithoutAuth.map(student => ({
+          _id: student._id,
+          nombre: student.nombre,
+          apellido: student.apellido
+        })),
+        allStudentsPending: allStudentsForPending,
+        summary: {
+          total: allStudents.length,
+          autorizados: autorizados,
+          rechazados: rechazados,
+          sinRespuesta: sinRespuesta,
+          pendientes: pendientes
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [GET AUTHORIZATIONS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor al obtener autorizaciones'
+    });
+  }
+});
+
+// Verificar autorización de un evento para un estudiante (para familyadmin)
+app.get('/events/:eventId/authorization/:studentId', authenticateToken, async (req, res) => {
+  try {
+    const { eventId, studentId } = req.params;
+    const currentUser = req.user;
+
+    console.log('🔍 [CHECK AUTHORIZATION] Evento:', eventId);
+    console.log('👨‍🎓 [CHECK AUTHORIZATION] Estudiante:', studentId);
+    console.log('👤 [CHECK AUTHORIZATION] Usuario:', currentUser._id, currentUser.role?.nombre);
+
+    // Verificar que el usuario es familyadmin
+    if (currentUser.role?.nombre !== 'familyadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los tutores principales pueden verificar autorizaciones'
+      });
+    }
+
+    // Verificar que el evento existe
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: 'Evento no encontrado'
+      });
+    }
+
+    // Verificar que el usuario tiene acceso al estudiante
+    const studentAssociation = await Shared.findOne({
+      user: currentUser._id,
+      student: studentId,
+      status: 'active'
+    });
+
+    if (!studentAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes acceso a este estudiante'
+      });
+    }
+
+    // Buscar la autorización
+    const authorization = await EventAuthorization.findOne({
+      event: eventId,
+      student: studentId
+    });
+
+    res.json({
+      success: true,
+      data: {
+        event: {
+          _id: event._id,
+          titulo: event.titulo,
+          requiereAutorizacion: event.requiereAutorizacion
+        },
+        authorization: authorization ? {
+          _id: authorization._id,
+          autorizado: authorization.autorizado,
+          fechaAutorizacion: authorization.fechaAutorizacion,
+          comentarios: authorization.comentarios
+        } : null
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [CHECK AUTHORIZATION] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor al verificar autorización'
+    });
+  }
+});
+
 // ===== ENDPOINTS PARA LOGOS DE CUENTAS =====
 
 // Actualizar logo de una cuenta
-app.put('/api/accounts/:accountId/logo', authenticateToken, async (req, res) => {
+app.put('/accounts/:accountId/logo', authenticateToken, async (req, res) => {
   try {
     const { accountId } = req.params;
     const { imageKey } = req.body;
@@ -5981,7 +8046,7 @@ app.put('/api/accounts/:accountId/logo', authenticateToken, async (req, res) => 
 });
 
 // Obtener logo de una cuenta
-app.get('/api/accounts/:accountId/logo', authenticateToken, async (req, res) => {
+app.get('/accounts/:accountId/logo', authenticateToken, async (req, res) => {
   try {
     const { accountId } = req.params;
     const currentUser = req.user;
@@ -6037,7 +8102,7 @@ app.get('/api/accounts/:accountId/logo', authenticateToken, async (req, res) => 
 // ===== ENDPOINTS DE ASISTENCIAS PARA BACKOFFICE =====
 
 // Obtener asistencias del backoffice con paginación
-app.get('/api/backoffice/asistencias', authenticateToken, async (req, res) => {
+app.get('/backoffice/asistencias', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { 
@@ -6173,7 +8238,7 @@ app.get('/api/backoffice/asistencias', authenticateToken, async (req, res) => {
 });
 
 // Crear asistencia desde el backoffice
-app.post('/api/backoffice/asistencias', authenticateToken, async (req, res) => {
+app.post('/backoffice/asistencias', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { alumnoId, accountId, grupoId, fecha, estado, horaLlegada, horaSalida, observaciones } = req.body;
@@ -6264,7 +8329,7 @@ app.post('/api/backoffice/asistencias', authenticateToken, async (req, res) => {
 });
 
 // Actualizar asistencia desde el backoffice
-app.put('/api/backoffice/asistencias/:asistenciaId', authenticateToken, async (req, res) => {
+app.put('/backoffice/asistencias/:asistenciaId', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { asistenciaId } = req.params;
@@ -6343,7 +8408,7 @@ app.put('/api/backoffice/asistencias/:asistenciaId', authenticateToken, async (r
 });
 
 // Eliminar asistencia desde el backoffice
-app.delete('/api/backoffice/asistencias/:asistenciaId', authenticateToken, async (req, res) => {
+app.delete('/backoffice/asistencias/:asistenciaId', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { asistenciaId } = req.params;
@@ -6405,7 +8470,7 @@ app.delete('/api/backoffice/asistencias/:asistenciaId', authenticateToken, async
 });
 
 // Obtener estadísticas de asistencias
-app.get('/api/backoffice/asistencias/stats', authenticateToken, async (req, res) => {
+app.get('/backoffice/asistencias/stats', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { accountId, fechaInicio, fechaFin } = req.query;
@@ -6500,7 +8565,7 @@ app.get('/api/backoffice/asistencias/stats', authenticateToken, async (req, res)
 });
 
 // Exportar asistencias a CSV
-app.get('/api/backoffice/asistencias/export', authenticateToken, async (req, res) => {
+app.get('/backoffice/asistencias/export', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { accountId, grupoId, fechaInicio, fechaFin, estado } = req.query;
@@ -6605,7 +8670,7 @@ app.get('/api/backoffice/asistencias/export', authenticateToken, async (req, res
 // ========================================
 
 // Obtener todas las personas autorizadas por cuenta (para backoffice)
-app.get('/api/pickup/account/:accountId', async (req, res) => {
+app.get('/pickup/account/:accountId', async (req, res) => {
   try {
     const { accountId } = req.params;
     const { page = 1, limit = 20, division, student } = req.query;
@@ -6649,7 +8714,7 @@ app.get('/api/pickup/account/:accountId', async (req, res) => {
 });
 
 // Obtener personas autorizadas por estudiante (para mobile)
-app.get('/api/pickup/student/:studentId', async (req, res) => {
+app.get('/pickup/student/:studentId', async (req, res) => {
   try {
     const { studentId } = req.params;
     
@@ -6671,7 +8736,7 @@ app.get('/api/pickup/student/:studentId', async (req, res) => {
 });
 
 // Crear nueva persona autorizada
-app.post('/api/pickup', async (req, res) => {
+app.post('/pickup', async (req, res) => {
   try {
     const { account, division, student, nombre, apellido, dni, createdBy } = req.body;
     
@@ -6719,7 +8784,7 @@ app.post('/api/pickup', async (req, res) => {
 });
 
 // Actualizar persona autorizada
-app.put('/api/pickup/:pickupId', async (req, res) => {
+app.put('/pickup/:pickupId', async (req, res) => {
   try {
     const { pickupId } = req.params;
     const { nombre, apellido, dni } = req.body;
@@ -6770,7 +8835,7 @@ app.put('/api/pickup/:pickupId', async (req, res) => {
 });
 
 // Eliminar persona autorizada (soft delete)
-app.delete('/api/pickup/:pickupId', async (req, res) => {
+app.delete('/pickup/:pickupId', async (req, res) => {
   try {
     const { pickupId } = req.params;
     
@@ -6848,7 +8913,7 @@ app.get('/students/division/:divisionId', async (req, res) => {
 // ========================================
 
 // Obtener pickups para familyadmin por institución + división
-app.get('/api/pickups/familyadmin', authenticateToken, async (req, res) => {
+app.get('/pickups/familyadmin', authenticateToken, async (req, res) => {
   try {
     console.log('🎯 [PICKUP FAMILYADMIN GET] Obteniendo pickups');
     const { userId } = req.user;
@@ -6857,20 +8922,17 @@ app.get('/api/pickups/familyadmin', authenticateToken, async (req, res) => {
     console.log('👤 [PICKUP FAMILYADMIN GET] Usuario:', userId);
     console.log('📋 [PICKUP FAMILYADMIN GET] Query params:', { division, student, page, limit });
     
-    // Verificar que el usuario es familyadmin
-    const user = await User.findById(userId).populate('role');
-    if (user.role?.nombre !== 'familyadmin') {
+    // Verificar que el usuario tiene una asociación activa con rol familyadmin
+    const activeAssociation = await ActiveAssociation.getActiveAssociation(userId);
+    if (!activeAssociation || activeAssociation.role.nombre !== 'familyadmin') {
       return res.status(403).json({
         success: false,
         message: 'Solo los administradores familiares pueden acceder a esta información'
       });
     }
     
-    // Obtener las asociaciones del usuario
-    const userAssociations = await Shared.find({
-      user: userId,
-      status: 'active'
-    }).populate('account division student');
+    // Usar la asociación activa
+    const userAssociations = [activeAssociation.activeShared];
     
     console.log('🔍 [PICKUP FAMILYADMIN GET] Asociaciones encontradas:', userAssociations.length);
     console.log('👥 [PICKUP FAMILYADMIN GET] Asociaciones:', userAssociations.map(assoc => ({
@@ -6947,7 +9009,7 @@ app.get('/api/pickups/familyadmin', authenticateToken, async (req, res) => {
 });
 
 // Crear pickup para familyadmin
-app.post('/api/pickups/familyadmin', authenticateToken, async (req, res) => {
+app.post('/pickups/familyadmin', authenticateToken, async (req, res) => {
   try {
     console.log('🎯 [PICKUP FAMILYADMIN] Iniciando creación de pickup');
     const { userId } = req.user;
@@ -7045,7 +9107,7 @@ app.post('/api/pickups/familyadmin', authenticateToken, async (req, res) => {
 });
 
 // Eliminar pickup
-app.delete('/api/pickup/:id', authenticateToken, async (req, res) => {
+app.delete('/pickup/:id', authenticateToken, async (req, res) => {
   try {
     console.log('🗑️ [PICKUP DELETE] Eliminando pickup:', req.params.id);
     const { userId } = req.user;
@@ -7100,7 +9162,7 @@ app.delete('/api/pickup/:id', authenticateToken, async (req, res) => {
 });
 
 // Obtener asociaciones del usuario
-app.get('/api/shared/user', authenticateToken, async (req, res) => {
+app.get('/shared/user', authenticateToken, async (req, res) => {
   try {
     console.log('🎯 [SHARED GET] Obteniendo asociaciones del usuario');
     const { userId } = req.user;
@@ -7178,7 +9240,7 @@ app.get('/api/shared/user', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para obtener asociaciones de un estudiante específico
-app.get('/api/shared/student/:studentId', authenticateToken, async (req, res) => {
+app.get('/shared/student/:studentId', authenticateToken, async (req, res) => {
   try {
     const { studentId } = req.params;
     const { userId } = req.user;
@@ -7224,7 +9286,7 @@ app.get('/api/shared/student/:studentId', authenticateToken, async (req, res) =>
 });
 
 // Crear nueva asociación (solo familyadmin)
-app.post('/api/shared', authenticateToken, async (req, res) => {
+app.post('/shared', authenticateToken, async (req, res) => {
   try {
     console.log('🎯 [SHARED POST] Creando nueva asociación');
     const { userId } = req.user;
@@ -7297,6 +9359,40 @@ app.post('/api/shared', authenticateToken, async (req, res) => {
     
     await association.save();
     
+    // Verificar si el usuario ya tiene una asociación activa
+    const existingActiveAssociation = await ActiveAssociation.getActiveAssociation(userId);
+    
+    if (!existingActiveAssociation) {
+      // Si no tiene asociación activa, establecer esta como activa automáticamente
+      try {
+        await ActiveAssociation.setActiveAssociation(userId, association._id);
+        console.log(`🎯 [AUTO-ACTIVE] Asociación automáticamente establecida como activa para usuario ${userId}`);
+      } catch (error) {
+        console.error('❌ [AUTO-ACTIVE] Error estableciendo asociación activa automáticamente:', error);
+      }
+    } else {
+      console.log(`ℹ️ [AUTO-ACTIVE] Usuario ${userId} ya tiene una asociación activa, no se cambia automáticamente`);
+    }
+    
+    // Enviar email de notificación de asociación
+    try {
+      const user = await User.findById(userId);
+      const account = await Account.findById(accountId);
+      const role = await Role.findById(role._id);
+      
+      if (user && account) {
+        await sendNotificationEmail(
+          user.email,
+          'Asociación a Institución',
+          `Has sido asociado a la institución <strong>${account.nombre}</strong> con el rol <strong>${role.nombre}</strong>. Ya puedes acceder a la aplicación con tus credenciales.`
+        );
+        console.log('✅ [SHARED POST] Email de notificación enviado exitosamente a:', user.email);
+      }
+    } catch (emailError) {
+      console.error('❌ [SHARED POST] Error enviando email de notificación:', emailError);
+      // No fallar la operación si el email falla, solo loguear el error
+    }
+    
     // Populate para la respuesta
     const populatedAssociation = await Shared.findById(association._id)
       .populate('account', 'nombre')
@@ -7332,7 +9428,7 @@ app.post('/api/shared', authenticateToken, async (req, res) => {
 });
 
 // Eliminar asociación (solo familyadmin)
-app.delete('/api/shared/:id', authenticateToken, async (req, res) => {
+app.delete('/shared/:id', authenticateToken, async (req, res) => {
   try {
     console.log('🗑️ [SHARED DELETE] Eliminando asociación:', req.params.id);
     const { userId } = req.user;
@@ -7381,34 +9477,45 @@ app.delete('/api/shared/:id', authenticateToken, async (req, res) => {
 });
 
 // Solicitar asociación por email
-app.post('/api/shared/request', authenticateToken, async (req, res) => {
+app.post('/shared/request', authenticateToken, async (req, res) => {
   try {
-    console.log('🎯 [SHARED REQUEST] Solicitando asociación por email');
+    console.log('🎯 [SHARED REQUEST] Agregando familiar al estudiante');
     const { userId } = req.user;
-    const { email } = req.body;
+    const { email, nombre, apellido, studentId } = req.body;
     
     console.log('👤 [SHARED REQUEST] Usuario solicitante:', userId);
-    console.log('📧 [SHARED REQUEST] Email solicitado:', email);
+    console.log('📧 [SHARED REQUEST] Email:', email);
+    console.log('👤 [SHARED REQUEST] Nombre:', nombre);
+    console.log('👤 [SHARED REQUEST] Apellido:', apellido);
+    console.log('🎓 [SHARED REQUEST] Student ID:', studentId);
+    console.log('🔍 [SHARED REQUEST] Body completo:', JSON.stringify(req.body, null, 2));
     
-    // Verificar que el usuario es familyadmin
-    const user = await User.findById(userId).populate('role');
-    if (user.role?.nombre !== 'familyadmin') {
+    // Verificar que el usuario tiene una asociación activa como familyadmin
+    const activeAssociation = await ActiveAssociation.getActiveAssociation(userId);
+    if (!activeAssociation) {
       return res.status(403).json({
         success: false,
-        message: 'Solo los administradores familiares pueden solicitar asociaciones'
+        message: 'No tienes una asociación activa'
       });
     }
     
-    // Obtener la asociación activa del usuario para usar sus datos
-    const userAssociation = await Shared.findOne({
-      user: userId,
-      status: 'active'
-    }).populate('account division student role');
-    
-    if (!userAssociation) {
-      return res.status(404).json({
+    const activeShared = await Shared.findById(activeAssociation.activeShared).populate('role');
+    if (activeShared.role?.nombre !== 'familyadmin') {
+      return res.status(403).json({
         success: false,
-        message: 'No tienes una asociación activa para usar como referencia'
+        message: 'Solo los administradores familiares pueden agregar familiares'
+      });
+    }
+    
+    // Usar la asociación activa ya obtenida
+    const userAssociation = await Shared.findById(activeAssociation.activeShared)
+      .populate('account division student role');
+    
+    // Verificar que el estudiante pertenece al familyadmin
+    if (userAssociation.student?._id.toString() !== studentId) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para agregar familiares a este estudiante'
       });
     }
     
@@ -7432,18 +9539,42 @@ app.post('/api/shared/request', authenticateToken, async (req, res) => {
         });
       }
       
+      // Obtener el rol familyviewer
+      const familyviewerRole = await Role.findOne({ nombre: 'familyviewer' });
+      if (!familyviewerRole) {
+        return res.status(500).json({
+          success: false,
+          message: 'Rol familyviewer no encontrado'
+        });
+      }
+      
       // Crear la asociación directamente
       const newShared = new Shared({
         user: existingUser._id,
         account: userAssociation.account._id,
         division: userAssociation.division?._id,
-        student: userAssociation.student?._id,
-        role: userAssociation.role._id,
+        student: studentId,
+        role: familyviewerRole._id,
         status: 'active',
         createdBy: userId
       });
       
       await newShared.save();
+      
+      // Verificar si el usuario ya tiene una asociación activa
+      const existingActiveAssociation = await ActiveAssociation.getActiveAssociation(existingUser._id);
+      
+      if (!existingActiveAssociation) {
+        // Si no tiene asociación activa, establecer esta como activa automáticamente
+        try {
+          await ActiveAssociation.setActiveAssociation(existingUser._id, newShared._id);
+          console.log(`🎯 [AUTO-ACTIVE] Asociación automáticamente establecida como activa para usuario ${existingUser._id}`);
+        } catch (error) {
+          console.error('❌ [AUTO-ACTIVE] Error estableciendo asociación activa automáticamente:', error);
+        }
+      } else {
+        console.log(`ℹ️ [AUTO-ACTIVE] Usuario ${existingUser._id} ya tiene una asociación activa, no se cambia automáticamente`);
+      }
       
       console.log('✅ [SHARED REQUEST] Asociación creada exitosamente');
       
@@ -7461,43 +9592,160 @@ app.post('/api/shared/request', authenticateToken, async (req, res) => {
       });
       
     } else {
-      console.log('⏳ [SHARED REQUEST] Usuario no encontrado, guardando solicitud pendiente');
+      console.log('⏳ [SHARED REQUEST] Usuario no encontrado');
       
-      // Verificar si ya existe una solicitud pendiente para este email
-      const existingRequest = await RequestedShared.findOne({
-        requestedEmail: email.toLowerCase(),
-        status: 'pending'
-      });
-      
-      if (existingRequest) {
-        return res.status(400).json({
-          success: false,
-          message: 'Ya existe una solicitud pendiente para este email'
+      // Si el rol activo es familyadmin, crear el usuario automáticamente
+      if (activeShared.role.nombre === 'familyadmin') {
+        console.log('🔧 [SHARED REQUEST] Rol activo es familyadmin, creando usuario automáticamente');
+        
+        try {
+          // Generar contraseña aleatoria de 8 caracteres
+          const generateRandomPassword = () => {
+            const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+            let password = '';
+            for (let i = 0; i < 8; i++) {
+              password += chars.charAt(Math.floor(Math.random() * chars.length));
+            }
+            return password;
+          };
+          
+          const randomPassword = generateRandomPassword();
+          console.log('🔑 [SHARED REQUEST] Contraseña generada:', randomPassword);
+          
+          // Obtener el rol familyviewer
+          const familyviewerRole = await Role.findOne({ nombre: 'familyviewer' });
+          if (!familyviewerRole) {
+            return res.status(500).json({
+              success: false,
+              message: 'Rol familyviewer no encontrado'
+            });
+          }
+          
+          // Crear el nuevo usuario
+          const newUser = new User({
+            name: `${nombre} ${apellido}`,
+            email: email.toLowerCase(),
+            password: randomPassword,
+            role: familyviewerRole._id,
+            status: 'approved', // Aprobar automáticamente usuarios familyviewer
+            isFirstLogin: true // Marcar como primer login
+          });
+          
+          await newUser.save();
+          console.log('✅ [SHARED REQUEST] Usuario creado exitosamente:', newUser._id);
+          
+          // Crear la asociación inmediatamente
+          const newShared = new Shared({
+            user: newUser._id,
+            account: userAssociation.account._id,
+            division: userAssociation.division?._id,
+            student: studentId,
+            role: familyviewerRole._id,
+            status: 'active',
+            createdBy: userId
+          });
+          
+          await newShared.save();
+          
+          // Verificar si el usuario ya tiene una asociación activa
+          const existingActiveAssociation = await ActiveAssociation.getActiveAssociation(newUser._id);
+          
+          if (!existingActiveAssociation) {
+            // Si no tiene asociación activa, establecer esta como activa automáticamente
+            try {
+              await ActiveAssociation.setActiveAssociation(newUser._id, newShared._id);
+              console.log(`🎯 [AUTO-ACTIVE] Asociación automáticamente establecida como activa para usuario ${newUser._id}`);
+            } catch (error) {
+              console.error('❌ [AUTO-ACTIVE] Error estableciendo asociación activa automáticamente:', error);
+            }
+          } else {
+            console.log(`ℹ️ [AUTO-ACTIVE] Usuario ${newUser._id} ya tiene una asociación activa, no se cambia automáticamente`);
+          }
+          
+          console.log('✅ [SHARED REQUEST] Asociación creada exitosamente');
+          
+          // Enviar email de invitación con las credenciales (asíncrono)
+          sendEmailAsync(sendFamilyInvitationEmail, newUser.email, newUser.name, randomPassword);
+          console.log('📧 [SHARED REQUEST] Email de invitación familiar programado para envío asíncrono a:', email);
+          
+          res.status(201).json({
+            success: true,
+            message: 'Familiar agregado exitosamente. Se envió un email con las credenciales de acceso.',
+            data: {
+              user: {
+                _id: newUser._id,
+                name: newUser.name,
+                email: newUser.email
+              },
+              association: newShared,
+              password: randomPassword // Temporalmente incluir la contraseña en la respuesta para testing
+            }
+          });
+          
+        } catch (userCreationError) {
+          console.error('❌ [SHARED REQUEST] Error creando usuario:', userCreationError);
+          
+          // Si falla la creación del usuario, guardar como solicitud pendiente
+          const requestedShared = new RequestedShared({
+            requestedBy: userId,
+            requestedEmail: email.toLowerCase(),
+            account: userAssociation.account._id,
+            division: userAssociation.division?._id,
+            student: userAssociation.student?._id,
+            role: userAssociation.role._id,
+            status: 'pending'
+          });
+          
+          await requestedShared.save();
+          
+          res.status(201).json({
+            success: true,
+            message: 'Error al crear usuario automáticamente. Se guardó como solicitud pendiente.',
+            data: {
+              request: requestedShared
+            }
+          });
+        }
+        
+      } else {
+        console.log('⏳ [SHARED REQUEST] Rol activo no es familyadmin, guardando solicitud pendiente');
+        
+        // Verificar si ya existe una solicitud pendiente para este email
+        const existingRequest = await RequestedShared.findOne({
+          requestedEmail: email.toLowerCase(),
+          status: 'pending'
+        });
+        
+        if (existingRequest) {
+          return res.status(400).json({
+            success: false,
+            message: 'Ya existe una solicitud pendiente para este email'
+          });
+        }
+        
+        // Crear solicitud pendiente
+        const requestedShared = new RequestedShared({
+          requestedBy: userId,
+          requestedEmail: email.toLowerCase(),
+          account: userAssociation.account._id,
+          division: userAssociation.division?._id,
+          student: userAssociation.student?._id,
+          role: userAssociation.role._id,
+          status: 'pending'
+        });
+        
+        await requestedShared.save();
+        
+        console.log('✅ [SHARED REQUEST] Solicitud pendiente guardada exitosamente');
+        
+        res.status(201).json({
+          success: true,
+          message: 'Solicitud enviada. La asociación se creará cuando el usuario se registre',
+          data: {
+            request: requestedShared
+          }
         });
       }
-      
-      // Crear solicitud pendiente
-      const requestedShared = new RequestedShared({
-        requestedBy: userId,
-        requestedEmail: email.toLowerCase(),
-        account: userAssociation.account._id,
-        division: userAssociation.division?._id,
-        student: userAssociation.student?._id,
-        role: userAssociation.role._id,
-        status: 'pending'
-      });
-      
-      await requestedShared.save();
-      
-      console.log('✅ [SHARED REQUEST] Solicitud pendiente guardada exitosamente');
-      
-      res.status(201).json({
-        success: true,
-        message: 'Solicitud enviada. La asociación se creará cuando el usuario se registre',
-        data: {
-          request: requestedShared
-        }
-      });
     }
     
   } catch (error) {
@@ -7518,12 +9766,294 @@ app.post('/api/shared/request', authenticateToken, async (req, res) => {
 });
 
 // ========================================
+// ENDPOINTS DE ASOCIACIÓN ACTIVA
+// ========================================
+
+// Obtener la asociación activa del usuario
+app.get('/active-association', authenticateToken, async (req, res) => {
+  try {
+    console.log('🎯 [ACTIVE ASSOCIATION GET] Obteniendo asociación activa del usuario');
+    const { userId } = req.user;
+
+    const activeAssociation = await ActiveAssociation.getActiveAssociation(userId);
+
+    if (!activeAssociation) {
+      return res.json({
+        success: true,
+        data: null,
+        message: 'No hay asociación activa'
+      });
+    }
+
+    // Debug: Log del avatar del estudiante en asociación activa
+    if (activeAssociation.student) {
+      console.log('🎓 [ACTIVE ASSOCIATION GET] Estudiante activo:', {
+        id: activeAssociation.student._id,
+        nombre: activeAssociation.student.nombre,
+        apellido: activeAssociation.student.apellido,
+        avatar: activeAssociation.student.avatar,
+        hasAvatar: !!activeAssociation.student.avatar
+      });
+    }
+
+    // Procesar avatar del estudiante para generar URL firmada
+    let studentWithSignedUrl = null;
+    if (activeAssociation.student) {
+      studentWithSignedUrl = {
+        _id: activeAssociation.student._id,
+        nombre: activeAssociation.student.nombre,
+        apellido: activeAssociation.student.apellido,
+        avatar: activeAssociation.student.avatar
+      };
+      
+      // Procesar avatar del estudiante para generar URL firmada
+      if (activeAssociation.student.avatar) {
+        try {
+          console.log('🎓 [ACTIVE ASSOCIATION GET] Procesando avatar del estudiante:', activeAssociation.student._id);
+          console.log('🎓 [ACTIVE ASSOCIATION GET] Avatar original:', activeAssociation.student.avatar);
+          
+          // Verificar si es una key de S3 o una URL local
+          if (activeAssociation.student.avatar.startsWith('http')) {
+            console.log('🎓 [ACTIVE ASSOCIATION GET] Es una URL completa, usando tal como está');
+            // Es una URL completa (puede ser local o S3), no hacer nada
+          } else if (activeAssociation.student.avatar.includes('students/')) {
+            // Es una key de S3 para estudiantes, generar URL firmada
+            console.log('🎓 [ACTIVE ASSOCIATION GET] Es una key de S3 para estudiantes, generando URL firmada');
+            const { generateSignedUrl } = require('./config/s3.config');
+            const signedUrl = await generateSignedUrl(activeAssociation.student.avatar, 3600); // 1 hora
+            console.log('🎓 [ACTIVE ASSOCIATION GET] URL firmada generada:', signedUrl);
+            studentWithSignedUrl.avatar = signedUrl;
+          } else {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${activeAssociation.student.avatar.split('/').pop()}`;
+            console.log('🎓 [ACTIVE ASSOCIATION GET] URL local generada:', localUrl);
+            studentWithSignedUrl.avatar = localUrl;
+          }
+        } catch (error) {
+          console.error('🎓 [ACTIVE ASSOCIATION GET] Error procesando avatar del estudiante:', activeAssociation.student._id, error);
+          // En caso de error, mantener el avatar original
+        }
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        _id: activeAssociation._id,
+        activeShared: activeAssociation.activeShared,
+        account: activeAssociation.account,
+        role: activeAssociation.role,
+        division: activeAssociation.division,
+        student: studentWithSignedUrl,
+        activatedAt: activeAssociation.activatedAt
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [ACTIVE ASSOCIATION GET] Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener asociación activa' 
+    });
+  }
+});
+
+// Obtener todas las asociaciones disponibles del usuario
+app.get('/active-association/available', authenticateToken, async (req, res) => {
+  try {
+    console.log('🎯 [ACTIVE ASSOCIATION AVAILABLE] Obteniendo asociaciones disponibles');
+    const { userId } = req.user;
+
+    // Obtener la asociación activa actual para comparar
+    const currentActive = await ActiveAssociation.findOne({ user: userId });
+    console.log('🎯 [ACTIVE ASSOCIATION AVAILABLE] Asociación activa actual:', currentActive ? {
+      id: currentActive._id,
+      activeShared: currentActive.activeShared,
+      account: currentActive.account?.nombre,
+      role: currentActive.role?.nombre
+    } : null);
+
+    const associations = await ActiveAssociation.getUserAvailableAssociations(userId);
+    console.log('🎯 [ACTIVE ASSOCIATION AVAILABLE] Asociaciones disponibles:', associations.length);
+
+    // Procesar URLs de avatares para cada asociación
+    const formattedAssociations = await Promise.all(associations.map(async (assoc) => {
+      const isActive = currentActive ? assoc._id.toString() === currentActive.activeShared.toString() : false;
+      
+      // Debug: Log del avatar del estudiante
+      if (assoc.student) {
+        console.log('🎓 [ACTIVE ASSOCIATION AVAILABLE] Estudiante:', {
+          id: assoc.student._id,
+          nombre: assoc.student.nombre,
+          apellido: assoc.student.apellido,
+          avatar: assoc.student.avatar,
+          hasAvatar: !!assoc.student.avatar
+        });
+      }
+      
+      let studentWithSignedUrl = null;
+      if (assoc.student) {
+        studentWithSignedUrl = {
+          _id: assoc.student._id,
+          nombre: assoc.student.nombre,
+          apellido: assoc.student.apellido,
+          avatar: assoc.student.avatar
+        };
+        
+        // Procesar avatar del estudiante para generar URL firmada
+        if (assoc.student.avatar) {
+          try {
+            console.log('🎓 [ACTIVE ASSOCIATION AVAILABLE] Procesando avatar del estudiante:', assoc.student._id);
+            console.log('🎓 [ACTIVE ASSOCIATION AVAILABLE] Avatar original:', assoc.student.avatar);
+            
+            // Verificar si es una key de S3 o una URL local
+            if (assoc.student.avatar.startsWith('http')) {
+              console.log('🎓 [ACTIVE ASSOCIATION AVAILABLE] Es una URL completa, usando tal como está');
+              // Es una URL completa (puede ser local o S3), no hacer nada
+            } else if (assoc.student.avatar.includes('students/')) {
+              // Es una key de S3 para estudiantes, generar URL firmada
+              console.log('🎓 [ACTIVE ASSOCIATION AVAILABLE] Es una key de S3 para estudiantes, generando URL firmada');
+              const { generateSignedUrl } = require('./config/s3.config');
+              const signedUrl = await generateSignedUrl(assoc.student.avatar, 3600); // 1 hora
+              console.log('🎓 [ACTIVE ASSOCIATION AVAILABLE] URL firmada generada:', signedUrl);
+              studentWithSignedUrl.avatar = signedUrl;
+            } else {
+              // Es una key local, generar URL local
+              const localUrl = `${req.protocol}://${req.get('host')}/uploads/${assoc.student.avatar.split('/').pop()}`;
+              console.log('🎓 [ACTIVE ASSOCIATION AVAILABLE] URL local generada:', localUrl);
+              studentWithSignedUrl.avatar = localUrl;
+            }
+          } catch (error) {
+            console.error('🎓 [ACTIVE ASSOCIATION AVAILABLE] Error procesando avatar del estudiante:', assoc.student._id, error);
+            // En caso de error, mantener el avatar original
+          }
+        }
+      }
+      
+      return {
+        _id: assoc._id,
+        account: {
+          _id: assoc.account._id,
+          nombre: assoc.account.nombre,
+          razonSocial: assoc.account.razonSocial
+        },
+        role: {
+          _id: assoc.role._id,
+          nombre: assoc.role.nombre,
+          descripcion: assoc.role.descripcion
+        },
+        division: assoc.division ? {
+          _id: assoc.division._id,
+          nombre: assoc.division.nombre,
+          descripcion: assoc.division.descripcion
+        } : null,
+        student: studentWithSignedUrl,
+        createdAt: assoc.createdAt,
+        isActive: isActive
+      };
+    }));
+
+    res.json({
+      success: true,
+      data: formattedAssociations
+    });
+
+  } catch (error) {
+    console.error('❌ [ACTIVE ASSOCIATION AVAILABLE] Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al obtener asociaciones disponibles' 
+    });
+  }
+});
+
+// Establecer una asociación como activa
+app.post('/active-association/set', authenticateToken, async (req, res) => {
+  try {
+    console.log('🎯 [ACTIVE ASSOCIATION SET] Estableciendo asociación activa');
+    const { userId } = req.user;
+    const { sharedId } = req.body;
+
+    if (!sharedId) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID de asociación es requerido'
+      });
+    }
+
+    const activeAssociation = await ActiveAssociation.setActiveAssociation(userId, sharedId);
+
+    res.json({
+      success: true,
+      message: 'Asociación activa establecida exitosamente',
+      data: {
+        _id: activeAssociation._id,
+        activeShared: activeAssociation.activeShared,
+        account: activeAssociation.account,
+        role: activeAssociation.role,
+        division: activeAssociation.division,
+        student: activeAssociation.student,
+        activatedAt: activeAssociation.activatedAt
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [ACTIVE ASSOCIATION SET] Error:', error);
+    
+    if (error.message.includes('no encontrada') || 
+        error.message.includes('no está activa') || 
+        error.message.includes('no pertenece')) {
+      return res.status(400).json({
+        success: false,
+        message: error.message
+      });
+    }
+
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al establecer asociación activa' 
+    });
+  }
+});
+
+// Limpiar asociaciones activas inválidas (endpoint administrativo)
+app.post('/active-association/cleanup', authenticateToken, async (req, res) => {
+  try {
+    console.log('🎯 [ACTIVE ASSOCIATION CLEANUP] Limpiando asociaciones activas inválidas');
+    
+    // Verificar que el usuario sea admin o superadmin
+    const user = await User.findById(req.user.userId).populate('role');
+    if (!user || !['admin', 'superadmin'].includes(user.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para realizar esta acción'
+      });
+    }
+
+    await ActiveAssociation.cleanupInvalidAssociations();
+
+    res.json({
+      success: true,
+      message: 'Limpieza de asociaciones activas completada'
+    });
+
+  } catch (error) {
+    console.error('❌ [ACTIVE ASSOCIATION CLEANUP] Error:', error);
+    res.status(500).json({ 
+      success: false, 
+      message: 'Error al limpiar asociaciones activas' 
+    });
+  }
+});
+
+// ========================================
 // ENDPOINTS DE RECUPERACIÓN DE CONTRASEÑA
 // ========================================
 
 // Generar código de recuperación y enviar email
-app.post('/api/users/forgot-password', async (req, res) => {
+app.post('/users/forgot-password', async (req, res) => {
   try {
+    console.log('🎯 [FORGOT PASSWORD] Solicitando recuperación de contraseña');
     const { email } = req.body;
 
     if (!email) {
@@ -7533,23 +10063,37 @@ app.post('/api/users/forgot-password', async (req, res) => {
       });
     }
 
+    console.log('📧 [FORGOT PASSWORD] Email solicitado:', email);
+
     // Verificar si el usuario existe
     const user = await User.findOne({ email: email.toLowerCase() });
+    console.log('🔍 [FORGOT PASSWORD] Usuario encontrado:', user ? 'Sí' : 'No');
+    
     if (!user) {
+      console.log('❌ [FORGOT PASSWORD] Usuario no encontrado para email:', email);
       return res.status(404).json({
         success: false,
         message: 'No se encontró un usuario con ese email'
       });
     }
 
+    console.log('✅ [FORGOT PASSWORD] Usuario encontrado:', {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      status: user.status
+    });
+
     // Generar código de 6 dígitos
     const code = Math.floor(100000 + Math.random() * 900000).toString();
+    console.log('🔑 [FORGOT PASSWORD] Código generado:', code);
     
     // El código expira en 10 minutos
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
+    
     // Eliminar códigos anteriores para este email
     await PasswordReset.deleteMany({ email: email.toLowerCase() });
+    console.log('🗑️ [FORGOT PASSWORD] Códigos anteriores eliminados');
 
     // Crear nuevo código de recuperación
     const passwordReset = new PasswordReset({
@@ -7559,10 +10103,12 @@ app.post('/api/users/forgot-password', async (req, res) => {
     });
 
     await passwordReset.save();
+    console.log('💾 [FORGOT PASSWORD] Nuevo código guardado en base de datos');
 
+    // Enviar email con el código usando el servicio existente
     try {
-      // Enviar email con el código
-      await sendPasswordResetEmail(email, code, user.nombre);
+      await sendPasswordResetEmail(email, code, user.name);
+      console.log('✅ [FORGOT PASSWORD] Email enviado exitosamente a:', email);
       
       res.json({
         success: true,
@@ -7572,10 +10118,11 @@ app.post('/api/users/forgot-password', async (req, res) => {
         }
       });
     } catch (emailError) {
-      console.error('Error enviando email:', emailError);
+      console.error('❌ [FORGOT PASSWORD] Error enviando email:', emailError);
       
       // Si falla el envío de email, eliminar el código y devolver error
       await PasswordReset.deleteOne({ email: email.toLowerCase() });
+      console.log('🗑️ [FORGOT PASSWORD] Código eliminado por fallo en email');
       
       res.status(500).json({
         success: false,
@@ -7584,7 +10131,7 @@ app.post('/api/users/forgot-password', async (req, res) => {
     }
 
   } catch (error) {
-    console.error('Error en forgot-password:', error);
+    console.error('❌ [FORGOT PASSWORD] Error interno:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor'
@@ -7593,7 +10140,7 @@ app.post('/api/users/forgot-password', async (req, res) => {
 });
 
 // Verificar código de recuperación
-app.post('/api/users/verify-reset-code', async (req, res) => {
+app.post('/users/verify-reset-code', async (req, res) => {
   try {
     const { email, code } = req.body;
 
@@ -7640,7 +10187,7 @@ app.post('/api/users/verify-reset-code', async (req, res) => {
 });
 
 // Resetear contraseña
-app.post('/api/users/reset-password', async (req, res) => {
+app.post('/users/reset-password', async (req, res) => {
   try {
     const { email, code, newPassword } = req.body;
 
@@ -7688,12 +10235,8 @@ app.post('/api/users/reset-password', async (req, res) => {
       });
     }
 
-    // Hashear la nueva contraseña
-    const saltRounds = 12;
-    const hashedPassword = await bcrypt.hash(newPassword, saltRounds);
-
-    // Actualizar la contraseña del usuario
-    user.password = hashedPassword;
+    // Actualizar la contraseña del usuario (el middleware pre-save se encargará del hashing)
+    user.password = newPassword;
     await user.save();
 
     // Marcar el código como usado
@@ -7715,15 +10258,229 @@ app.post('/api/users/reset-password', async (req, res) => {
   }
 });
 
-// Middleware para rutas no encontradas
-app.use('*', (req, res) => {
+const PORT = config.GATEWAY_PORT || 3000;
+
+// ===== SERVICIOS DE FAVORITOS =====
+
+// Endpoint para agregar/quitar favorito de actividad
+app.post('/activities/:activityId/favorite', authenticateToken, async (req, res) => {
+  try {
+    console.log('❤️ [FAVORITE] Agregando/quitando favorito');
+    const { activityId } = req.params;
+    const { userId } = req.user;
+    const { studentId, isFavorite } = req.body;
+
+    if (!studentId) {
+      return res.status(400).json({
+        success: false,
+        message: 'ID del estudiante es requerido'
+      });
+    }
+
+    // Verificar que la actividad existe
+    const activity = await Activity.findById(activityId);
+    if (!activity) {
+      return res.status(404).json({
+        success: false,
+        message: 'Actividad no encontrada'
+      });
+    }
+
+    // Verificar que el estudiante existe
+    const student = await Student.findById(studentId);
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        message: 'Estudiante no encontrado'
+      });
+    }
+
+    // Verificar que el usuario tiene acceso al estudiante
+    // Para usuarios familiares, verificar a través de la asociación en Shared
+    const userAssociation = await Shared.findOne({
+      user: userId,
+      student: studentId,
+      status: 'active'
+    });
+
+    if (!userAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes acceso a este estudiante'
+      });
+    }
+
+    if (isFavorite) {
+      // Agregar a favoritos
+      const existingFavorite = await ActivityFavorite.findOne({
+        user: userId,
+        student: studentId,
+        activity: activityId
+      });
+
+      if (!existingFavorite) {
+        await ActivityFavorite.create({
+          user: userId,
+          student: studentId,
+          activity: activityId,
+          addedAt: new Date()
+        });
+        console.log('✅ [FAVORITE] Favorito agregado');
+      }
+    } else {
+      // Quitar de favoritos
+      await ActivityFavorite.deleteOne({
+        user: userId,
+        student: studentId,
+        activity: activityId
+      });
+      console.log('✅ [FAVORITE] Favorito eliminado');
+    }
+
+    res.json({
+      success: true,
+      message: isFavorite ? 'Agregado a favoritos' : 'Eliminado de favoritos'
+    });
+
+  } catch (error) {
+    console.error('❌ [FAVORITE] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// Endpoint para obtener favoritos de un estudiante
+app.get('/students/:studentId/favorites', authenticateToken, async (req, res) => {
+  try {
+    console.log('❤️ [FAVORITES] Obteniendo favoritos del estudiante');
+    const { studentId } = req.params;
+    const { userId } = req.user;
+
+    // Verificar que el usuario tiene acceso al estudiante
+    const userAssociation = await Shared.findOne({
+      user: userId,
+      student: studentId,
+      status: 'active'
+    });
+
+    if (!userAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes acceso a este estudiante'
+      });
+    }
+
+    // Obtener favoritos con detalles de la actividad
+    const favorites = await ActivityFavorite.find({
+      user: userId,
+      student: studentId
+    })
+    .populate({
+      path: 'activity',
+      populate: [
+        { path: 'account', select: 'nombre' },
+        { path: 'division', select: 'nombre' },
+        { path: 'usuario', select: 'name email' }
+      ]
+    })
+    .sort({ addedAt: -1 });
+
+    console.log('🔍 [FAVORITES] Favoritos encontrados:', favorites.length);
+    if (favorites.length > 0) {
+      console.log('🔍 [FAVORITES] Primer favorito:', JSON.stringify(favorites[0], null, 2));
+      console.log('🔍 [FAVORITES] Fecha de la actividad (createdAt):', favorites[0].activity?.createdAt);
+      console.log('🔍 [FAVORITES] Tipo de fecha:', typeof favorites[0].activity?.createdAt);
+    }
+
+    // Generar URLs firmadas para las imágenes de las actividades
+    const favoritesWithSignedUrls = await Promise.all(favorites.map(async (favorite) => {
+      const favoriteObj = favorite.toObject();
+      
+      // Si la actividad tiene imágenes, generar URLs firmadas
+      if (favoriteObj.activity && favoriteObj.activity.imagenes && Array.isArray(favoriteObj.activity.imagenes)) {
+        try {
+          const imagenesSignedUrls = await Promise.all(favoriteObj.activity.imagenes.map(async (imageKey) => {
+            // Generar URL firmada usando la key directamente
+            const signedUrl = await generateSignedUrl(imageKey);
+            return signedUrl;
+          }));
+          favoriteObj.activity.imagenes = imagenesSignedUrls;
+        } catch (error) {
+          console.error('Error generando URLs firmadas para actividad favorita:', favoriteObj.activity._id, error);
+          favoriteObj.activity.imagenes = []; // No devolver URLs si falla
+        }
+      }
+      
+      return favoriteObj;
+    }));
+
+    res.json({
+      success: true,
+      data: favoritesWithSignedUrls
+    });
+
+  } catch (error) {
+    console.error('❌ [FAVORITES] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// Endpoint para verificar si una actividad es favorita
+app.get('/activities/:activityId/favorite/:studentId', authenticateToken, async (req, res) => {
+  try {
+    const { activityId, studentId } = req.params;
+    const { userId } = req.user;
+
+    // Verificar que el usuario tiene acceso al estudiante
+    const userAssociation = await Shared.findOne({
+      user: userId,
+      student: studentId,
+      status: 'active'
+    });
+
+    if (!userAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes acceso a este estudiante'
+      });
+    }
+
+    const favorite = await ActivityFavorite.findOne({
+      user: userId,
+      student: studentId,
+      activity: activityId
+    });
+
+    res.json({
+      success: true,
+      isFavorite: !!favorite
+    });
+
+  } catch (error) {
+    console.error('❌ [FAVORITE CHECK] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// Middleware para rutas no encontradas (debe ir al final)
+app.use('/*', (req, res) => {
+  console.log(`❌ [404] Ruta no encontrada: ${req.method} ${req.originalUrl}`);
   res.status(404).json({
     success: false,
     message: 'Endpoint no encontrado'
   });
 });
-
-const PORT = config.GATEWAY_PORT || 3000;
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 API de Kiki corriendo en puerto ${PORT}`);
