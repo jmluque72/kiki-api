@@ -105,6 +105,13 @@ const activitySchema = new mongoose.Schema({
   activo: {
     type: Boolean,
     default: true
+  },
+  
+  // Estado de publicación de la actividad
+  estado: {
+    type: String,
+    enum: ['borrador', 'publicada'],
+    default: 'borrador'
   }
 }, {
   timestamps: true

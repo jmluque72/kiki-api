@@ -1,0 +1,83 @@
+# Plantilla Excel para Cargar Alumnos - Email Opcional
+
+## Estructura del archivo Excel
+
+El archivo debe tener las siguientes columnas en la primera fila (headers):
+
+| Columna | Campo | Descripción | Requerido | Ejemplo |
+|---------|-------|-------------|-----------|---------|
+| A | nombre | Nombre del alumno | ✅ Sí | "Juan" |
+| B | apellido | Apellido del alumno | ✅ Sí | "Pérez" |
+| C | dni | DNI del alumno | ✅ Sí | "12345678" |
+| D | email | Email del alumno | ❌ No | "juan.perez@email.com" |
+| E | dniTutor | DNI del tutor | ✅ Sí | "87654321" |
+| F | nombreTutor | Nombre completo del tutor | ✅ Sí | "María González" |
+| G | emailTutor | Email del tutor | ✅ Sí | "maria.gonzalez@email.com" |
+
+## Ejemplos de datos
+
+### Caso 1: Alumno CON email
+```
+nombre,apellido,dni,email,dniTutor,nombreTutor,emailTutor
+Juan,Pérez,12345678,juan.perez@email.com,87654321,María González,maria.gonzalez@email.com
+```
+
+### Caso 2: Alumno SIN email (campo vacío)
+```
+nombre,apellido,dni,email,dniTutor,nombreTutor,emailTutor
+Ana,García,23456789,,76543210,Carlos García,carlos.garcia@email.com
+```
+
+### Caso 3: Alumno SIN email (campo omitido)
+```
+nombre,apellido,dni,dniTutor,nombreTutor,emailTutor
+Luis,López,34567890,65432109,Sofía López,sofia.lopez@email.com
+```
+
+## Notas importantes
+
+1. **Primera fila**: Debe contener los encabezados exactos
+2. **DNI**: Debe ser único para cada alumno y tutor
+3. **Email del alumno**: 
+   - ❌ NO es obligatorio
+   - ✅ Puede estar vacío
+   - ✅ Puede omitirse completamente
+   - ✅ Si se proporciona, debe ser único y válido
+4. **Email del tutor**: ✅ Es obligatorio (necesario para login)
+5. **Filas vacías**: Se ignoran automáticamente
+
+## Proceso de carga
+
+1. El sistema creará automáticamente usuarios para los tutores
+2. Se asignará el rol "familyadmin" a los tutores
+3. Se crearán las asociaciones necesarias entre tutores y alumnos
+4. Los alumnos se asignarán a la institución y división especificadas
+5. Los alumnos sin email se crearán correctamente (email = null)
+
+## Validaciones del sistema
+
+- ✅ **nombre**: Obligatorio
+- ✅ **apellido**: Obligatorio
+- ✅ **dni**: Obligatorio y único
+- ❌ **email**: Opcional (puede ser null)
+- ✅ **dniTutor**: Obligatorio
+- ✅ **nombreTutor**: Obligatorio
+- ✅ **emailTutor**: Obligatorio
+
+## Ejemplo completo de archivo
+
+```
+nombre,apellido,dni,email,dniTutor,nombreTutor,emailTutor
+Juan,Pérez,12345678,juan.perez@email.com,87654321,María González,maria.gonzalez@email.com
+Ana,García,23456789,,76543210,Carlos García,carlos.garcia@email.com
+Luis,López,34567890,luis.lopez@email.com,65432109,Sofía López,sofia.lopez@email.com
+María,Rodríguez,45678901,,54321098,Pedro Rodríguez,pedro.rodriguez@email.com
+Carlos,Martínez,56789012,carlos.martinez@email.com,43210987,Laura Martínez,laura.martinez@email.com
+```
+
+## Resultado esperado
+
+- **Alumnos con email**: Se crearán con email válido
+- **Alumnos sin email**: Se crearán con email = null
+- **Todos los tutores**: Se crearán con email obligatorio
+- **Asociaciones**: Se crearán correctamente para todos los casos

@@ -86,7 +86,7 @@ const createAccount = asyncHandler(async (req, res) => {
       // Generar URL firmada para el logo
       const accountObj = populatedAccount.toObject();
       if (accountObj.logo) {
-        accountObj.logoSignedUrl = generateSignedUrl(accountObj.logo, 3600); // 1 hora
+        accountObj.logoSignedUrl = generateSignedUrl(accountObj.logo, 172800); // 2 días
       }
 
       res.status(201).json({

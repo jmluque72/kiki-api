@@ -70,7 +70,7 @@ async function testS3Config() {
     const signedUrl = s3.getSignedUrl('getObject', {
       Bucket: process.env.AWS_S3_BUCKET_NAME,
       Key: testKey,
-      Expires: 3600
+      Expires: 172800 // 2 días
     });
 
     console.log('✅ URL firmada generada');

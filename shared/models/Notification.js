@@ -16,7 +16,7 @@ const notificationSchema = new mongoose.Schema({
   },
   type: {
     type: String,
-    enum: ['informacion', 'comunicacion', 'institucion'],
+    enum: ['informacion', 'comunicacion', 'institucion', 'coordinador'],
     default: 'informacion',
     required: [true, 'El tipo es obligatorio']
   },

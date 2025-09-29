@@ -58,6 +58,8 @@ const eventSchema = new mongoose.Schema({
     type: Date,
     default: Date.now
   }
+}, {
+  strictPopulate: false
 });
 
 // Middleware para actualizar updatedAt

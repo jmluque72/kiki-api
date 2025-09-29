@@ -32,24 +32,46 @@ const multerS3Config = {
 };
 
 // Función para generar URL firmada de S3
-const generateSignedUrl = async (key, expiresIn = 3600) => {
-  if (!key) return null;
+const generateSignedUrl = async (key, expiresIn = 172800) => { // 2 días = 172800 segundos
+  console.log('🔗 [S3 CONFIG] ===== GENERANDO URL FIRMADA =====');
+  console.log('🔗 [S3 CONFIG] Key recibida:', key);
+  console.log('🔗 [S3 CONFIG] Expires in:', expiresIn, 'segundos');
+  console.log('🔗 [S3 CONFIG] Bucket name:', s3Config.bucketName);
+  console.log('🔗 [S3 CONFIG] Region:', s3Config.region);
+  
+  if (!key) {
+    console.log('❌ [S3 CONFIG] Key es null o undefined');
+    return null;
+  }
   
   try {
+    console.log('🔗 [S3 CONFIG] Generando URL firmada...');
     const signedUrl = s3.getSignedUrl('getObject', {
       Bucket: s3Config.bucketName,
       Key: key,
       Expires: expiresIn
     });
+    
+    console.log('✅ [S3 CONFIG] URL firmada generada exitosamente');
+    console.log('🔗 [S3 CONFIG] URL firmada:', signedUrl);
+    console.log('🔗 [S3 CONFIG] Longitud de URL:', signedUrl ? signedUrl.length : 'null');
+    console.log('🔗 [S3 CONFIG] Tipo de URL:', typeof signedUrl);
+    
     return signedUrl;
   } catch (error) {
-    console.error('Error generando URL firmada:', error);
+    console.error('❌ [S3 CONFIG] Error generando URL firmada:', error);
+    console.error('❌ [S3 CONFIG] Error details:', {
+      message: error.message,
+      code: error.code,
+      statusCode: error.statusCode,
+      name: error.name
+    });
     return null;
   }
 };
 
 // Función para generar URL firmada para múltiples imágenes
-const generateSignedUrls = async (keys, expiresIn = 3600) => {
+const generateSignedUrls = async (keys, expiresIn = 172800) => { // 2 días = 172800 segundos
   if (!Array.isArray(keys)) return [];
   
   const results = [];

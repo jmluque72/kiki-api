@@ -284,7 +284,7 @@ app.use(cors({
     }
   },
   credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 
@@ -409,6 +409,17 @@ const authenticateToken = async (req, res, next) => {
 
 // Health check
 app.get('/health', (req, res) => {
+  res.json({
+    success: true,
+    message: 'API de Kiki está funcionando correctamente',
+    timestamp: new Date().toISOString(),
+    version: '1.0.0',
+    services: ['users', 'accounts', 'groups', 'events', 'roles']
+  });
+});
+
+// Health check en la raíz
+app.get('/', (req, res) => {
   res.json({
     success: true,
     message: 'API de Kiki está funcionando correctamente',
@@ -556,7 +567,7 @@ app.post('/users/login', async (req, res) => {
     let avatarUrl = null;
     if (user.avatar) {
       try {
-        avatarUrl = await generateSignedUrl(user.avatar, 3600); // 1 hora
+        avatarUrl = await generateSignedUrl(user.avatar, 172800); // 2 días
       } catch (error) {
         console.error('Error generando URL firmada para avatar:', error);
         // Si falla la URL firmada, usar la URL directa
@@ -580,6 +591,52 @@ app.post('/users/login', async (req, res) => {
       }
     } catch (error) {
       console.error('❌ Error obteniendo asociación activa:', error);
+    }
+
+    // Procesar avatar del estudiante en activeAssociation para generar URL firmada
+    let processedActiveAssociation = null;
+    if (activeAssociation) {
+      processedActiveAssociation = {
+        _id: activeAssociation._id.toString(),
+        activeShared: activeAssociation.activeShared._id.toString(),
+        account: activeAssociation.account,
+        role: activeAssociation.role,
+        division: activeAssociation.division,
+        student: activeAssociation.student,
+        activatedAt: activeAssociation.activatedAt
+      };
+      
+      // Procesar avatar del estudiante para generar URL firmada
+      if (activeAssociation.student && activeAssociation.student.avatar) {
+        try {
+          console.log('🎓 [LOGIN] Procesando avatar del estudiante en activeAssociation:', activeAssociation.student._id);
+          console.log('🎓 [LOGIN] Avatar original:', activeAssociation.student.avatar);
+          
+          // Verificar si es una key de S3 o una URL local
+          if (activeAssociation.student.avatar.startsWith('http')) {
+            console.log('🎓 [LOGIN] Es una URL completa, usando tal como está');
+            // Es una URL completa (puede ser local o S3), no hacer nada
+          } else if (activeAssociation.student.avatar.includes('students/')) {
+            // Es una key de S3 para estudiantes, generar URL firmada
+            console.log('🎓 [LOGIN] Es una key de S3 para estudiantes, generando URL firmada');
+            const { generateSignedUrl } = require('./config/s3.config');
+            const signedUrl = await generateSignedUrl(activeAssociation.student.avatar, 172800); // 2 días
+            console.log('🎓 [LOGIN] URL firmada generada:', signedUrl);
+            processedActiveAssociation.student.avatar = signedUrl;
+          } else {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${activeAssociation.student.avatar.split('/').pop()}`;
+            console.log('🎓 [LOGIN] URL local generada:', localUrl);
+            processedActiveAssociation.student.avatar = localUrl;
+          }
+        } catch (error) {
+          console.error('❌ [LOGIN] Error procesando avatar del estudiante:', error);
+          // Si falla, usar URL directa
+          const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${activeAssociation.student.avatar.split('/').pop()}`;
+          console.log('🎓 [LOGIN] Usando URL de fallback:', fallbackUrl);
+          processedActiveAssociation.student.avatar = fallbackUrl;
+        }
+      }
     }
 
     // Generar token JWT
@@ -606,15 +663,7 @@ app.post('/users/login', async (req, res) => {
           createdAt: user.createdAt,
           updatedAt: user.updatedAt
         },
-        activeAssociation: activeAssociation ? {
-          _id: activeAssociation._id.toString(),
-          activeShared: activeAssociation.activeShared._id.toString(),
-          account: activeAssociation.account,
-          role: activeAssociation.role,
-          division: activeAssociation.division,
-          student: activeAssociation.student,
-          activatedAt: activeAssociation.activatedAt
-        } : null,
+        activeAssociation: processedActiveAssociation,
         associations: userAssociations.map(shared => ({
           _id: shared._id,
           account: {
@@ -787,7 +836,7 @@ app.post('/users', authenticateToken, async (req, res) => {
     console.log('✅ [CREATE USER] Usuario creado exitosamente:', newUser._id);
 
     // Enviar email de bienvenida con la contraseña (asíncrono)
-    sendEmailAsync(sendWelcomeEmail, newUser.email, newUser.name);
+    sendEmailAsync(sendWelcomeEmail, null, newUser.email, newUser.name);
     console.log('📧 [CREATE USER] Email de bienvenida programado para envío asíncrono a:', email);
 
     // Populate para la respuesta
@@ -892,7 +941,7 @@ app.get('/auth/verify', authenticateToken, async (req, res) => {
     let avatarUrl = null;
     if (user.avatar) {
       try {
-        avatarUrl = await generateSignedUrl(user.avatar, 3600); // 1 hora
+        avatarUrl = await generateSignedUrl(user.avatar, 172800); // 2 días
       } catch (error) {
         console.error('Error generando URL firmada para avatar:', error);
         // Si falla la URL firmada, usar la URL directa
@@ -937,8 +986,8 @@ app.get('/auth/config', (req, res) => {
 // Obtener perfil
 app.get('/users/profile', authenticateToken, async (req, res) => {
   try {
-    // Buscar el usuario completo con el rol populado
-    const user = await User.findById(req.user._id).populate('role', 'nombre descripcion nivel');
+    // Buscar el usuario completo con el rol y cuenta populados
+    const user = await User.findById(req.user._id).populate('role', 'nombre descripcion nivel').populate('account', 'nombre razonSocial');
     if (!user) {
       return res.status(404).json({
         success: false,
@@ -946,11 +995,26 @@ app.get('/users/profile', authenticateToken, async (req, res) => {
       });
     }
 
+    // Para adminaccount, obtener la cuenta desde las asociaciones si no tiene cuenta asignada directamente
+    let userAccount = user.account;
+    if (user.role?.nombre === 'adminaccount' && !userAccount) {
+      console.log('🔍 [PROFILE] Adminaccount sin cuenta directa, obteniendo desde asociaciones...');
+      const userAssociation = await Shared.findOne({
+        user: user._id,
+        status: 'active'
+      }).populate('account', 'nombre razonSocial');
+      
+      if (userAssociation && userAssociation.account) {
+        userAccount = userAssociation.account;
+        console.log('🔍 [PROFILE] Cuenta obtenida desde asociación:', userAccount);
+      }
+    }
+
     // Generar URL firmada para el avatar si existe
     let avatarUrl = null;
     if (user.avatar) {
       try {
-        avatarUrl = await generateSignedUrl(user.avatar, 3600); // 1 hora
+        avatarUrl = await generateSignedUrl(user.avatar, 172800); // 2 días
       } catch (error) {
         console.error('Error generando URL firmada para avatar:', error);
         // Si falla la URL firmada, usar la URL directa
@@ -965,6 +1029,7 @@ app.get('/users/profile', authenticateToken, async (req, res) => {
         email: user.email,
         nombre: user.name,
         role: user.role,
+        account: userAccount,
         telefono: user.telefono,
         avatar: avatarUrl,
         activo: user.status === 'approved',
@@ -1041,7 +1106,7 @@ app.put('/users/profile', authenticateToken, async (req, res) => {
     let avatarUrl = null;
     if (user.avatar) {
       try {
-        avatarUrl = await generateSignedUrl(user.avatar, 3600); // 1 hora
+        avatarUrl = await generateSignedUrl(user.avatar, 172800); // 2 días
       } catch (error) {
         console.error('Error generando URL firmada para avatar:', error);
         // Si falla la URL firmada, usar la URL directa
@@ -1153,7 +1218,7 @@ app.put('/users/avatar', authenticateToken, upload.single('avatar'), async (req,
 
     // Generar URL firmada para la respuesta
     const { generateSignedUrl } = require('./config/s3.config');
-    const signedUrl = await generateSignedUrl(avatarKey, 3600); // 1 hora
+    const signedUrl = await generateSignedUrl(avatarKey, 172800); // 2 días
     
     console.log('🖼️ [UPDATE AVATAR] URL firmada generada:', signedUrl);
 
@@ -1268,7 +1333,7 @@ app.put('/students/:studentId/avatar', authenticateToken, uploadStudentAvatarToS
 
     // Generar URL firmada para la respuesta
     const { generateSignedUrl } = require('./config/s3.config');
-    const signedUrl = await generateSignedUrl(avatarKey, 3600); // 1 hora
+    const signedUrl = await generateSignedUrl(avatarKey, 172800); // 2 días
     
     console.log('🖼️ [UPDATE STUDENT AVATAR] URL firmada generada:', signedUrl);
 
@@ -1798,7 +1863,7 @@ app.post('/users/register-mobile', async (req, res) => {
     let avatarUrl = null;
     if (user.avatar) {
       try {
-        avatarUrl = await generateSignedUrl(user.avatar, 3600); // 1 hora
+        avatarUrl = await generateSignedUrl(user.avatar, 172800); // 2 días
       } catch (error) {
         console.error('Error generando URL firmada para avatar:', error);
         // Si falla la URL firmada, usar la URL directa
@@ -2474,7 +2539,7 @@ app.get('/accounts', authenticateToken, async (req, res) => {
     const accountsWithSignedUrls = accounts.map(account => {
       const accountObj = account.toObject();
       if (accountObj.logo) {
-        accountObj.logoSignedUrl = generateSignedUrl(accountObj.logo, 3600); // 1 hora
+        accountObj.logoSignedUrl = generateSignedUrl(accountObj.logo, 172800); // 2 días
       }
       return accountObj;
     });
@@ -2580,7 +2645,7 @@ app.post('/accounts', authenticateToken, async (req, res) => {
     );
 
     // Enviar email de bienvenida con credenciales al administrador (asíncrono)
-    sendEmailAsync(sendInstitutionWelcomeEmail, adminUser.email, adminUser.name, account.nombre, randomPassword);
+    sendEmailAsync(sendInstitutionWelcomeEmail, null, adminUser.email, adminUser.name, account.nombre, randomPassword);
     console.log('📧 [CREATE ACCOUNT] Email de bienvenida programado para envío asíncrono al administrador:', adminUser.email);
 
     // Populate el usuario administrador
@@ -3063,7 +3128,7 @@ app.post('/images/refresh-signed-url', authenticateToken, async (req, res) => {
       });
     }
 
-    const signedUrl = generateSignedUrl(imageKey, 3600); // 1 hora
+    const signedUrl = generateSignedUrl(imageKey, 172800); // 2 días
 
     if (!signedUrl) {
       return res.status(500).json({
@@ -3197,6 +3262,60 @@ app.get('/groups/account/:accountId', authenticateToken, async (req, res) => {
 
 // ===== RUTAS DE EVENTOS =====
 
+// Endpoint de debug para verificar eventos
+app.get('/debug/eventos', authenticateToken, async (req, res) => {
+  try {
+    const { divisionId, fechaInicio, fechaFin } = req.query;
+    
+    console.log('🔍 [DEBUG EVENTOS] Parámetros:', { divisionId, fechaInicio, fechaFin });
+    
+    // Query simple para ver todos los eventos
+    let query = {};
+    
+    if (divisionId) {
+      query.division = divisionId;
+    }
+    
+    if (fechaInicio && fechaFin) {
+      query.fecha = {
+        $gte: fechaInicio,
+        $lte: fechaFin
+      };
+    }
+    
+    console.log('🔍 [DEBUG EVENTOS] Query:', JSON.stringify(query, null, 2));
+    
+    const eventos = await Event.find(query)
+      .populate('institucion', 'nombre')
+      .populate('division', 'nombre')
+      .lean();
+    
+    console.log('🔍 [DEBUG EVENTOS] Total eventos encontrados:', eventos.length);
+    
+    res.json({
+      success: true,
+      data: {
+        total: eventos.length,
+        eventos: eventos.map(e => ({
+          _id: e._id,
+          titulo: e.titulo,
+          fecha: e.fecha,
+          fechaISO: e.fecha.toISOString(),
+          division: e.division?.nombre || 'Sin división',
+          institucion: e.institucion?.nombre || 'Sin institución'
+        }))
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ [DEBUG EVENTOS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener eventos de debug'
+    });
+  }
+});
+
 // Obtener datos del calendario de eventos
 app.get('/backoffice/eventos/calendar', authenticateToken, async (req, res) => {
   try {
@@ -3209,6 +3328,10 @@ app.get('/backoffice/eventos/calendar', authenticateToken, async (req, res) => {
     
     console.log('📅 [CALENDAR EVENTOS] Usuario:', userId);
     console.log('📅 [CALENDAR EVENTOS] Parámetros:', { divisionId, fechaInicio, fechaFin });
+    console.log('📅 [CALENDAR EVENTOS] Fechas convertidas:', { 
+      fechaInicioDate: new Date(fechaInicio), 
+      fechaFinDate: new Date(fechaFin) 
+    });
     
     // Obtener información del usuario para verificar su rol
     const user = await User.findById(userId).populate('role');
@@ -3227,7 +3350,12 @@ app.get('/backoffice/eventos/calendar', authenticateToken, async (req, res) => {
       // Superadmin ve todos los eventos
     } else if (user.role?.nombre === 'adminaccount') {
       // Adminaccount ve todos los eventos de su cuenta
-      query.account = user.account?._id;
+      if (user.account?._id) {
+        query.institucion = user.account._id;
+      } else {
+        // Si no tiene account, usar cuenta por defecto
+        query.institucion = '68d47433390104381d43c0ca';
+      }
     } else {
       return res.status(403).json({
         success: false,
@@ -3241,28 +3369,85 @@ app.get('/backoffice/eventos/calendar', authenticateToken, async (req, res) => {
     }
     
     if (fechaInicio && fechaFin) {
-      query.fechaInicio = {
-        $gte: fechaInicio,
-        $lte: fechaFin
+      // Crear fechas UTC para evitar problemas de zona horaria
+      const startDate = new Date(fechaInicio + 'T00:00:00.000Z');
+      const endDate = new Date(fechaFin + 'T23:59:59.999Z');
+      
+      query.fecha = {
+        $gte: startDate,
+        $lte: endDate
       };
+      
+      console.log('📅 [CALENDAR EVENTOS] Filtro de fechas:', {
+        fechaInicio: startDate.toISOString(),
+        fechaFin: endDate.toISOString()
+      });
     }
     
     console.log('📅 [CALENDAR EVENTOS] Query:', JSON.stringify(query, null, 2));
     
+    // DEBUG: Buscar TODOS los eventos de la división sin filtro de fecha
+    const allEvents = await Event.find({
+      institucion: query.institucion,
+      division: query.division
+    }).lean();
+    
+    console.log('📅 [CALENDAR EVENTOS] TODOS los eventos de la división:', allEvents.map(e => ({
+      id: e._id,
+      titulo: e.titulo,
+      fecha: e.fecha,
+      institucion: e.institucion,
+      division: e.division
+    })));
+    
     // Buscar eventos
     const eventos = await Event.find(query)
-      .populate('account', 'nombre')
+      .populate('institucion', 'nombre')
       .populate('division', 'nombre')
-      .populate('organizador', 'name email')
+      .populate('creador', 'name email')
       .lean();
     
     console.log('📅 [CALENDAR EVENTOS] Eventos encontrados:', eventos.length);
+    console.log('📅 [CALENDAR EVENTOS] Eventos detallados:', eventos.map(e => ({
+      id: e._id,
+      titulo: e.titulo,
+      fecha: e.fecha,
+      division: e.division?.nombre || 'Sin división'
+    })));
+    
+    // Buscar autorizaciones para cada evento
+    const eventosConAutorizaciones = await Promise.all(eventos.map(async (evento) => {
+      const autorizaciones = await EventAuthorization.find({ event: evento._id })
+        .populate('student', 'nombre email')
+        .populate('familyadmin', 'name email')
+        .lean();
+      
+      return {
+        ...evento,
+        autorizaciones: autorizaciones.map(auth => ({
+          _id: auth._id,
+          tipo: 'Autorización de evento',
+          estado: auth.autorizado ? 'aprobada' : 'pendiente',
+          estudiante: {
+            _id: auth.student?._id,
+            nombre: auth.student?.nombre,
+            email: auth.student?.email
+          },
+          autorizadoPor: {
+            _id: auth.familyadmin?._id,
+            nombre: auth.familyadmin?.name
+          },
+          fechaAutorizacion: auth.fechaAutorizacion,
+          observaciones: auth.comentarios
+        }))
+      };
+    }));
     
     // Agrupar eventos por fecha
     const calendarData = {};
     
-    eventos.forEach(evento => {
-      const fecha = evento.fechaInicio.split('T')[0]; // YYYY-MM-DD
+    eventosConAutorizaciones.forEach(evento => {
+      const fecha = evento.fecha.toISOString().split('T')[0]; // YYYY-MM-DD
       
       if (!calendarData[fecha]) {
         calendarData[fecha] = {
@@ -3275,16 +3460,16 @@ app.get('/backoffice/eventos/calendar', authenticateToken, async (req, res) => {
       calendarData[fecha].totalEventos++;
       calendarData[fecha].eventos.push({
         _id: evento._id,
-        nombre: evento.nombre,
+        titulo: evento.titulo,
         descripcion: evento.descripcion,
-        fechaInicio: evento.fechaInicio,
-        fechaFin: evento.fechaFin,
-        ubicacion: evento.ubicacion,
-        categoria: evento.categoria,
+        fecha: evento.fecha,
+        hora: evento.hora,
+        lugar: evento.lugar,
         estado: evento.estado,
         participantes: evento.participantes || [],
-        capacidadMaxima: evento.capacidadMaxima,
-        organizador: evento.organizador,
+        creador: evento.creador,
+        institucion: evento.institucion,
+        division: evento.division,
         autorizaciones: evento.autorizaciones || []
       });
     });
@@ -3311,6 +3496,9 @@ app.get('/events', authenticateToken, async (req, res) => {
     const { accountId, search, page = 1, limit = 20 } = req.query;
     const currentUser = req.user;
 
+    console.log('📅 [EVENTS] Usuario:', currentUser._id, currentUser.role?.nombre);
+    console.log('📅 [EVENTS] Query params:', { accountId, search, page, limit });
+
     // Verificar permisos
     if (!['adminaccount', 'superadmin', 'coordinador'].includes(currentUser.role?.nombre)) {
       return res.status(403).json({
@@ -3321,78 +3509,87 @@ app.get('/events', authenticateToken, async (req, res) => {
 
     let query = {};
 
-    // Filtro por cuenta según el rol del usuario
+    // Filtro por institución según el rol del usuario
     if (currentUser.role?.nombre === 'superadmin') {
       // Superadmin puede ver todos los eventos
       if (accountId) {
-        query.cuenta = accountId;
+        query.institucion = accountId;
       }
     } else if (currentUser.role?.nombre === 'adminaccount') {
       // Adminaccount solo puede ver eventos de sus cuentas
-      const userAccounts = await Shared.find({ 
-        user: currentUser._id, 
-        status: { $in: ['active', 'pending'] }
-      }).select('account');
-      
-      const accountIds = userAccounts.map(ah => ah.account);
-      query.cuenta = { $in: accountIds };
-      
-      if (accountId) {
-        // Verificar que la cuenta solicitada pertenece al usuario
-        if (!accountIds.includes(accountId)) {
-          return res.status(403).json({
-            success: false,
-            message: 'No tienes permisos para ver eventos de esta cuenta'
-          });
+      try {
+        const userAccounts = await Shared.find({ 
+          user: currentUser._id, 
+          status: { $in: ['active', 'pending'] }
+        }).select('account');
+        
+        const accountIds = userAccounts.map(ah => ah.account);
+        query.institucion = { $in: accountIds };
+        
+        if (accountId) {
+          // Verificar que la cuenta solicitada pertenece al usuario
+          if (!accountIds.includes(accountId)) {
+            return res.status(403).json({
+              success: false,
+              message: 'No tienes permisos para ver eventos de esta cuenta'
+            });
+          }
+          query.institucion = accountId;
         }
-        query.cuenta = accountId;
+      } catch (error) {
+        console.error('Error obteniendo cuentas del usuario:', error);
+        return res.status(500).json({
+          success: false,
+          message: 'Error interno del servidor'
+        });
       }
     } else if (currentUser.role?.nombre === 'coordinador') {
       // Coordinador puede ver eventos de sus cuentas
       if (accountId) {
-        query.cuenta = accountId;
+        query.institucion = accountId;
       }
     }
 
-    // Búsqueda por nombre o descripción
+    // Búsqueda por título o descripción
     if (search) {
       query.$or = [
-        { nombre: { $regex: search, $options: 'i' } },
+        { titulo: { $regex: search, $options: 'i' } },
         { descripcion: { $regex: search, $options: 'i' } }
       ];
     }
 
+    console.log('📅 [EVENTS] Query final:', JSON.stringify(query, null, 2));
+
     // Obtener datos reales de la base de datos
     const total = await Event.countDocuments(query);
+    console.log('📅 [EVENTS] Total eventos:', total);
+    
     const events = await Event.find(query)
-      .populate('organizador', 'name email')
-      .populate('cuenta', 'nombre razonSocial')
-      .populate('metadatos.creadoPor', 'name email')
+      .populate('creador', 'name email')
+      .populate('institucion', 'nombre razonSocial')
+      .populate('division', 'nombre descripcion')
       .skip((page - 1) * limit)
       .limit(limit)
-      .sort({ fechaInicio: 1 });
+      .sort({ fecha: 1 });
+
+    console.log('📅 [EVENTS] Eventos encontrados:', events.length);
 
     res.json({
       success: true,
       data: {
         events: events.map(event => ({
           _id: event._id,
-          nombre: event.nombre,
+          titulo: event.titulo,
           descripcion: event.descripcion,
-          categoria: event.categoria,
-          fechaInicio: event.fechaInicio,
-          fechaFin: event.fechaFin,
-          ubicacion: event.ubicacion,
-          organizador: event.organizador,
-          cuenta: event.cuenta,
-          capacidadMaxima: event.capacidadMaxima,
-          participantes: event.participantes,
+          fecha: event.fecha,
+          hora: event.hora,
+          lugar: event.lugar,
           estado: event.estado,
-          esPublico: event.esPublico,
-          requiereAprobacion: event.requiereAprobacion,
-          imagen: event.imagen,
-          tags: event.tags,
-          metadatos: event.metadatos,
+          requiereAutorizacion: event.requiereAutorizacion,
+          creador: event.creador,
+          institucion: event.institucion,
+          division: event.division,
+          participantes: event.participantes,
           createdAt: event.createdAt,
           updatedAt: event.updatedAt
         })),
@@ -3540,8 +3737,8 @@ app.get('/asistencias', authenticateToken, async (req, res) => {
     
     if (fechaInicio && fechaFin) {
       query.fecha = {
-        $gte: new Date(fechaInicio),
-        $lte: new Date(fechaFin)
+        $gte: fechaInicio,
+        $lte: fechaFin
       };
     }
 
@@ -3917,8 +4114,8 @@ app.get('/activities', authenticateToken, async (req, res) => {
     
     if (fechaInicio && fechaFin) {
       query.createdAt = {
-        $gte: new Date(fechaInicio),
-        $lte: new Date(fechaFin)
+        $gte: fechaInicio,
+        $lte: fechaFin
       };
     }
 
@@ -4094,39 +4291,34 @@ app.get('/activities/mobile', authenticateToken, async (req, res) => {
 
     let query = {
       account: accountId,
-      activo: true
+      activo: true,
+      $or: [
+        { estado: 'publicada' }, // Actividades explícitamente publicadas
+        { estado: { $exists: false } } // Actividades existentes sin campo estado (compatibilidad)
+      ]
     };
 
-    // Filtrar por fecha: actividades desde la fecha seleccionada hacia atrás por 30 días
-    let endDate, startDate;
-    
+    // Filtrar por fecha: usar solo como fecha límite superior (hasta la fecha seleccionada)
     if (selectedDate) {
-      // Usar la fecha seleccionada como punto de referencia
+      // Usar la fecha seleccionada como límite superior
       const selected = new Date(selectedDate);
-      endDate = new Date(selected.getFullYear(), selected.getMonth(), selected.getDate(), 23, 59, 59, 999);
-      startDate = new Date(selected.getFullYear(), selected.getMonth(), selected.getDate() - 30, 0, 0, 0, 0);
-      console.log('📅 [ACTIVITIES MOBILE] Usando fecha seleccionada:', selectedDate);
+      const endDate = new Date(selected.getFullYear(), selected.getMonth(), selected.getDate(), 23, 59, 59, 999);
+      query.createdAt = {
+        $lte: endDate
+      };
+      console.log('📅 [ACTIVITIES MOBILE] Usando fecha seleccionada como límite superior:', selectedDate);
+      console.log('📅 [ACTIVITIES MOBILE] Fecha límite calculada:', endDate.toISOString());
     } else {
-      // Usar hoy como punto de referencia (comportamiento por defecto)
-      const today = new Date();
-      endDate = new Date(today.getFullYear(), today.getMonth(), today.getDate(), 23, 59, 59, 999);
-      startDate = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 30, 0, 0, 0, 0);
-      console.log('📅 [ACTIVITIES MOBILE] Usando fecha por defecto (hoy)');
+      // Si no hay fecha seleccionada, no aplicar filtro de fecha (mostrar todas las actividades)
+      console.log('📅 [ACTIVITIES MOBILE] Sin filtro de fecha - mostrando todas las actividades');
     }
-    
-    console.log('📅 [ACTIVITIES MOBILE] Rango de fechas:', {
-      desde: startDate.toISOString(),
-      hasta: endDate.toISOString()
-    });
-    
-    query.createdAt = {
-      $gte: startDate,
-      $lte: endDate
-    };
 
     // Agregar filtro por división si se proporciona
     if (divisionId) {
       query.division = divisionId;
+      console.log('🏢 [ACTIVITIES MOBILE] Filtro por división aplicado:', divisionId);
+    } else {
+      console.log('🏢 [ACTIVITIES MOBILE] Sin filtro de división');
     }
 
     // Filtrar según el rol del usuario
@@ -4151,6 +4343,10 @@ app.get('/activities/mobile', authenticateToken, async (req, res) => {
 
     console.log('🔍 [ACTIVITIES MOBILE] Query final:', JSON.stringify(query, null, 2));
 
+    // DEBUG: Contar actividades totales antes del límite
+    const totalActivities = await Activity.countDocuments(query);
+    console.log('📊 [ACTIVITIES MOBILE] Total actividades en DB que coinciden con query:', totalActivities);
+
     // Obtener actividades
     const activities = await Activity.find(query)
       .populate('usuario', 'name email')
@@ -4158,9 +4354,10 @@ app.get('/activities/mobile', authenticateToken, async (req, res) => {
       .populate('division', 'nombre descripcion')
       .populate('participantes', 'nombre apellido dni')
       .sort({ createdAt: -1 })
-      .limit(100); // Limitar a las últimas 100 actividades (30 días de datos)
+      .limit(100); // Limitar a las últimas 100 actividades
 
-    console.log('📊 [ACTIVITIES MOBILE] Actividades encontradas:', activities.length);
+    console.log('📊 [ACTIVITIES MOBILE] Actividades encontradas:', activities.length, '(máximo 100 actividades)');
+    console.log('📊 [ACTIVITIES MOBILE] Total en DB vs encontradas:', `${totalActivities} vs ${activities.length}`);
     activities.forEach((activity, index) => {
       console.log(`📋 [ACTIVITIES MOBILE] Actividad ${index + 1}:`, {
         id: activity._id,
@@ -4306,7 +4503,8 @@ app.post('/activities', authenticateToken, async (req, res) => {
       createdBy: userId,
       usuario: userId,
       tipo: 'create',
-      entidad: 'event'
+      entidad: 'event',
+      estado: 'borrador' // Las actividades se crean en estado borrador
     });
 
     await activity.save();
@@ -4318,6 +4516,89 @@ app.post('/activities', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     console.error('Error creating activity:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Endpoint para cambiar estado de actividad
+app.patch('/activities/:id/estado', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { estado } = req.body;
+    const currentUser = req.user;
+
+    // Verificar que el estado sea válido
+    if (!['borrador', 'publicada'].includes(estado)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Estado inválido. Debe ser "borrador" o "publicada"'
+      });
+    }
+
+    // Verificar permisos
+    if (!['adminaccount', 'superadmin', 'coordinador'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para cambiar el estado de actividades'
+      });
+    }
+
+    // Buscar la actividad
+    const activity = await Activity.findById(id);
+    if (!activity) {
+      return res.status(404).json({
+        success: false,
+        message: 'Actividad no encontrada'
+      });
+    }
+
+    // Verificar que el usuario tenga acceso a esta actividad
+    if (currentUser.role?.nombre === 'adminaccount') {
+      console.log('🔍 [DEBUG] Verificando permisos para adminaccount');
+      console.log('🔍 [DEBUG] currentUser.userId:', currentUser.userId);
+      console.log('🔍 [DEBUG] activity.account:', activity.account);
+      
+      const userAccounts = await Shared.find({ 
+        user: currentUser.userId, 
+        status: { $in: ['active', 'pending'] }
+      }).select('account');
+      
+      console.log('🔍 [DEBUG] userAccounts encontradas:', userAccounts.length);
+      console.log('🔍 [DEBUG] userAccounts:', userAccounts);
+      
+      const accountIds = userAccounts.map(ah => ah.account);
+      console.log('🔍 [DEBUG] accountIds del usuario:', accountIds);
+      console.log('🔍 [DEBUG] activity.account:', activity.account);
+      console.log('🔍 [DEBUG] activity.account.toString():', activity.account.toString());
+      
+      // Verificar si alguna de las cuentas del usuario coincide con la cuenta de la actividad
+      const hasAccess = accountIds.some(accountId => accountId.equals(activity.account));
+      console.log('🔍 [DEBUG] ¿Usuario tiene acceso?', hasAccess);
+      
+      if (!hasAccess) {
+        console.log('❌ [DEBUG] Usuario no tiene acceso a esta actividad');
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes permisos para modificar esta actividad'
+        });
+      }
+      console.log('✅ [DEBUG] Usuario tiene acceso a la actividad');
+    }
+
+    // Actualizar el estado
+    activity.estado = estado;
+    await activity.save();
+
+    res.json({
+      success: true,
+      message: `Actividad ${estado === 'publicada' ? 'publicada' : 'marcada como borrador'} correctamente`,
+      activity: activity
+    });
+  } catch (error) {
+    console.error('Error changing activity status:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor'
@@ -4360,6 +4641,276 @@ app.delete('/activities/:id', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     console.error('Error deleting activity:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// ===== ENDPOINTS PARA BACKOFFICE - ACTIVIDADES =====
+
+// Endpoint para obtener datos del calendario de actividades
+app.get('/backoffice/actividades/calendar', authenticateToken, async (req, res) => {
+  try {
+    const { divisionId, fechaInicio, fechaFin } = req.query;
+    const currentUser = req.user;
+
+    console.log('📅 [BACKOFFICE ACTIVITIES] Obteniendo datos del calendario');
+    console.log('📅 [BACKOFFICE ACTIVITIES] DivisionId:', divisionId);
+    console.log('📅 [BACKOFFICE ACTIVITIES] FechaInicio:', fechaInicio);
+    console.log('📅 [BACKOFFICE ACTIVITIES] FechaFin:', fechaFin);
+
+    // Verificar permisos
+    if (!['adminaccount', 'superadmin', 'coordinador'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver actividades'
+      });
+    }
+
+    if (!divisionId || !fechaInicio || !fechaFin) {
+      return res.status(400).json({
+        success: false,
+        message: 'divisionId, fechaInicio y fechaFin son requeridos'
+      });
+    }
+
+    // Construir query base
+    let query = {
+      division: divisionId,
+      activo: true
+    };
+
+    // Filtro por cuenta según el rol del usuario
+    if (currentUser.role?.nombre === 'superadmin') {
+      // Superadmin puede ver todas las actividades
+    } else if (currentUser.role?.nombre === 'adminaccount') {
+      // Adminaccount solo puede ver actividades de sus cuentas
+      const userAccounts = await Shared.find({ 
+        user: currentUser._id, 
+        status: { $in: ['active', 'pending'] }
+      }).select('account');
+      
+      const accountIds = userAccounts.map(ah => ah.account);
+      query.account = { $in: accountIds };
+    } else if (currentUser.role?.nombre === 'coordinador') {
+      // Coordinador puede ver actividades de sus cuentas
+      const userAccounts = await Shared.find({ 
+        user: currentUser._id, 
+        status: { $in: ['active', 'pending'] }
+      }).select('account');
+      
+      const accountIds = userAccounts.map(ah => ah.account);
+      query.account = { $in: accountIds };
+    }
+
+    // Filtro por fecha
+    query.createdAt = {
+      $gte: fechaInicio,
+      $lte: fechaFin
+    };
+
+    console.log('📅 [BACKOFFICE ACTIVITIES] Query:', JSON.stringify(query, null, 2));
+
+    // Obtener actividades
+    const activities = await Activity.find(query)
+      .populate('account', 'nombre razonSocial')
+      .populate('division', 'nombre descripcion')
+      .populate('usuario', 'name email')
+      .populate('participantes', 'nombre apellido')
+      .sort({ createdAt: -1 });
+
+    console.log('📅 [BACKOFFICE ACTIVITIES] Actividades encontradas:', activities.length);
+
+    // Agrupar por fecha y generar URLs firmadas para las imágenes
+    const calendarData = {};
+    
+    for (const activity of activities) {
+      const fecha = activity.createdAt.toISOString().split('T')[0];
+      
+      if (!calendarData[fecha]) {
+        calendarData[fecha] = {
+          fecha: fecha,
+          totalActividades: 0,
+          actividades: []
+        };
+      }
+      
+      // Generar URLs firmadas para las imágenes
+      let imagenesSignedUrls = [];
+      if (activity.imagenes && Array.isArray(activity.imagenes)) {
+        try {
+          const { generateSignedUrl } = require('./config/s3.config');
+          imagenesSignedUrls = await Promise.all(activity.imagenes.map(async (imageKey) => {
+            // Generar URL firmada usando la key directamente
+            const signedUrl = await generateSignedUrl(imageKey, 172800); // 2 días
+            return signedUrl;
+          }));
+        } catch (error) {
+          console.error('Error generando URLs firmadas para actividad:', activity._id, error);
+          imagenesSignedUrls = []; // No devolver URLs si falla
+        }
+      }
+      
+      calendarData[fecha].totalActividades++;
+      calendarData[fecha].actividades.push({
+        _id: activity._id,
+        titulo: activity.titulo,
+        descripcion: activity.descripcion,
+        fecha: activity.createdAt.toISOString().split('T')[0],
+        hora: activity.createdAt.toTimeString().split(' ')[0],
+        lugar: activity.lugar || '',
+        estado: activity.estado || 'publicada', // Actividades existentes sin estado se consideran publicadas
+        categoria: activity.categoria || 'general',
+        imagenes: imagenesSignedUrls,
+        objetivos: activity.objetivos || [],
+        materiales: activity.materiales || [],
+        evaluacion: activity.evaluacion || '',
+        observaciones: activity.observaciones || '',
+        participantes: activity.participantes || [],
+        creador: {
+          name: activity.usuario?.name || 'Desconocido'
+        },
+        institucion: {
+          _id: activity.account?._id,
+          nombre: activity.account?.nombre || 'Sin institución'
+        },
+        division: activity.division ? {
+          _id: activity.division._id,
+          nombre: activity.division.nombre
+        } : null
+      });
+    }
+
+    console.log('📅 [BACKOFFICE ACTIVITIES] Datos del calendario generados:', Object.keys(calendarData).length, 'días');
+
+    res.json({
+      success: true,
+      data: calendarData
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo datos del calendario:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Endpoint para obtener actividades de un día específico
+app.get('/backoffice/actividades/day', authenticateToken, async (req, res) => {
+  try {
+    const { fecha, divisionId } = req.query;
+    const currentUser = req.user;
+
+    console.log('📅 [BACKOFFICE ACTIVITIES DAY] Obteniendo actividades del día');
+    console.log('📅 [BACKOFFICE ACTIVITIES DAY] Fecha:', fecha);
+    console.log('📅 [BACKOFFICE ACTIVITIES DAY] DivisionId:', divisionId);
+
+    // Verificar permisos
+    if (!['adminaccount', 'superadmin', 'coordinador'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver actividades'
+      });
+    }
+
+    if (!fecha || !divisionId) {
+      return res.status(400).json({
+        success: false,
+        message: 'fecha y divisionId son requeridos'
+      });
+    }
+
+    // Construir query base
+    let query = {
+      division: divisionId,
+      activo: true
+    };
+
+    // Filtro por cuenta según el rol del usuario
+    if (currentUser.role?.nombre === 'superadmin') {
+      // Superadmin puede ver todas las actividades
+    } else if (currentUser.role?.nombre === 'adminaccount') {
+      // Adminaccount solo puede ver actividades de sus cuentas
+      const userAccounts = await Shared.find({ 
+        user: currentUser._id, 
+        status: { $in: ['active', 'pending'] }
+      }).select('account');
+      
+      const accountIds = userAccounts.map(ah => ah.account);
+      query.account = { $in: accountIds };
+    } else if (currentUser.role?.nombre === 'coordinador') {
+      // Coordinador puede ver actividades de sus cuentas
+      const userAccounts = await Shared.find({ 
+        user: currentUser._id, 
+        status: { $in: ['active', 'pending'] }
+      }).select('account');
+      
+      const accountIds = userAccounts.map(ah => ah.account);
+      query.account = { $in: accountIds };
+    }
+
+    // Filtro por fecha (todo el día)
+    const startDate = new Date(fecha);
+    const endDate = new Date(fecha);
+    endDate.setDate(endDate.getDate() + 1);
+    
+    query.createdAt = {
+      $gte: startDate,
+      $lt: endDate
+    };
+
+    console.log('📅 [BACKOFFICE ACTIVITIES DAY] Query:', JSON.stringify(query, null, 2));
+
+    // Obtener actividades
+    const activities = await Activity.find(query)
+      .populate('account', 'nombre razonSocial')
+      .populate('division', 'nombre descripcion')
+      .populate('usuario', 'name email')
+      .populate('participantes', 'nombre apellido')
+      .sort({ createdAt: -1 });
+
+    console.log('📅 [BACKOFFICE ACTIVITIES DAY] Actividades encontradas:', activities.length);
+
+    // Formatear actividades
+    const formattedActivities = activities.map(activity => ({
+      _id: activity._id,
+      titulo: activity.titulo,
+      descripcion: activity.descripcion,
+      fecha: activity.createdAt.toISOString().split('T')[0],
+      hora: activity.createdAt.toTimeString().split(' ')[0],
+      lugar: activity.lugar || '',
+      estado: activity.estado || 'activa',
+      categoria: activity.categoria || 'general',
+      imagenes: activity.imagenes || [],
+      objetivos: activity.objetivos || [],
+      materiales: activity.materiales || [],
+      evaluacion: activity.evaluacion || '',
+      observaciones: activity.observaciones || '',
+      participantes: activity.participantes || [],
+      creador: {
+        name: activity.usuario?.name || 'Desconocido'
+      },
+      institucion: {
+        _id: activity.account?._id,
+        nombre: activity.account?.nombre || 'Sin institución'
+      },
+      division: activity.division ? {
+        _id: activity.division._id,
+        nombre: activity.division.nombre
+      } : null
+    }));
+
+    res.json({
+      success: true,
+      data: formattedActivities
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo actividades del día:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor'
@@ -4484,7 +5035,7 @@ app.get('/students/by-account-division', authenticateToken, async (req, res) => 
           if (student.avatar.includes('students/')) {
             // Es una key de S3 para estudiantes, generar URL firmada
             const { generateSignedUrl } = require('./config/s3.config');
-            const signedUrl = await generateSignedUrl(student.avatar, 3600); // 1 hora
+            const signedUrl = await generateSignedUrl(student.avatar, 172800); // 2 días
             studentObj.avatar = signedUrl;
           } else if (!student.avatar.startsWith('http')) {
             // Es una key local, generar URL local
@@ -6781,10 +7332,133 @@ app.post('/push/unregister-token', authenticateToken, async (req, res) => {
 
 // ==================== ENDPOINTS DE NOTIFICACIONES ====================
 
+// Obtener datos del calendario de notificaciones
+app.get('/backoffice/notifications/calendar', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.user.userId;
+    const { 
+      divisionId,
+      fechaInicio,
+      fechaFin
+    } = req.query;
+    
+    console.log('📅 [CALENDAR NOTIFICATIONS] Usuario:', userId);
+    console.log('📅 [CALENDAR NOTIFICATIONS] Parámetros:', { divisionId, fechaInicio, fechaFin });
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    console.log('📅 [CALENDAR NOTIFICATIONS] Rol del usuario:', user.role?.nombre);
+    
+    // Construir query base
+    let query = {};
+    
+    // Lógica según el rol
+    if (user.role?.nombre === 'superadmin') {
+      // Superadmin ve todas las notificaciones de todas las cuentas
+      // No filtrar por cuenta específica
+    } else if (user.role?.nombre === 'adminaccount') {
+      // Adminaccount ve todas las notificaciones de su cuenta
+      query.account = user.account?._id;
+    } else {
+      // Otros roles no tienen acceso al backoffice
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para acceder a esta sección'
+      });
+    }
+    
+    // Filtros adicionales
+    if (divisionId) {
+      query.division = divisionId;
+    }
+    
+    if (fechaInicio && fechaFin) {
+      // Crear fechas UTC para evitar problemas de zona horaria
+      const startDate = new Date(fechaInicio + 'T00:00:00.000Z');
+      const endDate = new Date(fechaFin + 'T23:59:59.999Z');
+      
+      query.sentAt = {
+        $gte: startDate,
+        $lte: endDate
+      };
+      
+      console.log('📅 [CALENDAR NOTIFICATIONS] Filtro de fechas:', {
+        fechaInicio: startDate.toISOString(),
+        fechaFin: endDate.toISOString()
+      });
+    }
+    
+    console.log('📅 [CALENDAR NOTIFICATIONS] Query:', JSON.stringify(query, null, 2));
+    
+    // Buscar notificaciones
+    const notifications = await Notification.find(query)
+      .populate('account', 'nombre')
+      .populate('division', 'nombre')
+      .populate('sender', 'name email')
+      .sort({ sentAt: -1 })
+      .lean();
+    
+    console.log('📅 [CALENDAR NOTIFICATIONS] Notificaciones encontradas:', notifications.length);
+    console.log('📅 [CALENDAR NOTIFICATIONS] Notificaciones detalladas:', notifications.map(n => ({
+      id: n._id,
+      title: n.title,
+      sentAt: n.sentAt,
+      division: n.division?.nombre || 'Sin división'
+    })));
+    
+    // Agrupar notificaciones por fecha
+    const calendarData = {};
+    
+    notifications.forEach(notification => {
+      // Usar fecha local en lugar de UTC para evitar problemas de zona horaria
+      const sentAtDate = new Date(notification.sentAt);
+      const year = sentAtDate.getFullYear();
+      const month = String(sentAtDate.getMonth() + 1).padStart(2, '0');
+      const day = String(sentAtDate.getDate()).padStart(2, '0');
+      const fecha = `${year}-${month}-${day}`;
+      
+      console.log('📅 [CALENDAR NOTIFICATIONS] Notificación fecha original:', notification.sentAt);
+      console.log('📅 [CALENDAR NOTIFICATIONS] Notificación fecha local:', fecha);
+      
+      if (!calendarData[fecha]) {
+        calendarData[fecha] = {
+          fecha: fecha,
+          totalNotificaciones: 0,
+          notificaciones: []
+        };
+      }
+      
+      calendarData[fecha].totalNotificaciones++;
+      calendarData[fecha].notificaciones.push(notification);
+    });
+    
+    console.log('📅 [CALENDAR NOTIFICATIONS] Datos del calendario:', Object.keys(calendarData).length, 'días');
+    
+    res.json({
+      success: true,
+      data: calendarData
+    });
+    
+  } catch (error) {
+    console.error('❌ [CALENDAR NOTIFICATIONS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener datos del calendario'
+    });
+  }
+});
+
 // Obtener notificaciones del usuario (endpoint general)
 app.get('/notifications', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user._id;
     const { 
       limit = 20, 
       skip = 0, 
@@ -6840,7 +7514,7 @@ app.get('/notifications', authenticateToken, async (req, res) => {
 // Obtener notificaciones para usuarios familia (familyadmin/familyviewer)
 app.get('/notifications/family', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user._id;
     const { 
       limit = 20, 
       skip = 0, 
@@ -6967,7 +7641,7 @@ app.get('/notifications/family', authenticateToken, async (req, res) => {
 app.get('/notifications/:id/details', authenticateToken, async (req, res) => {
   try {
     const notificationId = req.params.id;
-    const userId = req.user.userId;
+    const userId = req.user._id;
     
     console.log('🔔 [GET NOTIFICATION DETAILS] ID:', notificationId);
     console.log('🔔 [GET NOTIFICATION DETAILS] Usuario:', userId);
@@ -7163,7 +7837,7 @@ app.get('/notifications/:id/details', authenticateToken, async (req, res) => {
 // Marcar notificación como leída
 app.put('/notifications/:id/read', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user._id;
     const notificationId = req.params.id;
     
     console.log('🔔 [MARK READ] Usuario:', userId, 'Notificación:', notificationId);
@@ -7198,7 +7872,7 @@ app.put('/notifications/:id/read', authenticateToken, async (req, res) => {
 // Eliminar notificación
 app.delete('/notifications/:id', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user._id;
     const notificationId = req.params.id;
     
     console.log('🔔 [DELETE] Usuario:', userId, 'Notificación:', notificationId);
@@ -7441,7 +8115,7 @@ app.delete('/users/:userId/avatar', authenticateToken, async (req, res) => {
 // Obtener conteo de notificaciones sin leer
 app.get('/notifications/unread-count', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user._id;
     
     console.log('🔔 [UNREAD COUNT] Usuario:', userId);
     
@@ -7532,7 +8206,7 @@ app.get('/notifications/unread-count', authenticateToken, async (req, res) => {
 // Obtener conteo de notificaciones sin leer para usuarios familia (endpoint específico)
 app.get('/notifications/family/unread-count', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.userId;
+    const userId = req.user._id;
     const { accountId } = req.query;
     
     console.log('🔔 [FAMILY UNREAD COUNT] Usuario:', userId);
@@ -7772,7 +8446,7 @@ app.post('/notifications', authenticateToken, async (req, res) => {
   try {
     console.log('🔔 [SEND NOTIFICATION] Iniciando...');
     const { title, message, type, accountId, divisionId, recipients = [] } = req.body;
-    const userId = req.user.userId;
+    const userId = req.user._id;
 
     console.log('🔔 [SEND NOTIFICATION] Datos recibidos:', { title, message, type, accountId, divisionId, recipients });
 
@@ -7786,28 +8460,70 @@ app.post('/notifications', authenticateToken, async (req, res) => {
     }
 
     // Validar tipo de notificación
-    if (!['informacion', 'comunicacion', 'institucion'].includes(type)) {
+    if (!['informacion', 'comunicacion', 'institucion', 'coordinador'].includes(type)) {
       console.log('❌ [SEND NOTIFICATION] Tipo inválido:', type);
       return res.status(400).json({
         success: false,
-        message: 'Tipo de notificación inválido. Debe ser "informacion", "comunicacion" o "institucion"'
+        message: 'Tipo de notificación inválido. Debe ser "informacion", "comunicacion", "institucion" o "coordinador"'
       });
     }
 
     // Verificar que el usuario tiene permisos para la cuenta
     console.log('🔔 [SEND NOTIFICATION] Verificando permisos...');
-    const userAssociation = await Shared.findOne({
-      user: userId,
-      account: accountId,
-      status: 'active'
-    });
-
-    if (!userAssociation) {
-      console.log('❌ [SEND NOTIFICATION] Sin permisos');
-      return res.status(403).json({
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      console.log('❌ [SEND NOTIFICATION] Usuario no encontrado');
+      return res.status(404).json({
         success: false,
-        message: 'No tienes permisos para enviar notificaciones a esta cuenta'
+        message: 'Usuario no encontrado'
       });
+    }
+    
+    console.log('🔔 [SEND NOTIFICATION] Usuario:', user.email, 'Rol:', user.role?.nombre);
+    
+    // Verificar permisos según el rol
+    if (user.role?.nombre === 'adminaccount') {
+      // Adminaccount puede enviar notificaciones a su cuenta
+      if (user.account?._id?.toString() !== accountId) {
+        // Si no tiene cuenta asignada directamente, verificar asociación en Shared
+        console.log('🔔 [SEND NOTIFICATION] Adminaccount sin cuenta directa, verificando asociación en Shared...');
+        const userAssociation = await Shared.findOne({
+          user: userId,
+          account: accountId,
+          status: 'active'
+        });
+
+        if (!userAssociation) {
+          console.log('❌ [SEND NOTIFICATION] Adminaccount no tiene permisos para esta cuenta');
+          return res.status(403).json({
+            success: false,
+            message: 'No tienes permisos para enviar notificaciones a esta cuenta'
+          });
+        }
+        console.log('✅ [SEND NOTIFICATION] Adminaccount tiene asociación activa en Shared');
+      } else {
+        console.log('✅ [SEND NOTIFICATION] Adminaccount tiene cuenta asignada directamente');
+      }
+    } else if (user.role?.nombre === 'superadmin') {
+      // Superadmin puede enviar a cualquier cuenta
+      console.log('🔔 [SEND NOTIFICATION] Superadmin - permisos otorgados');
+    } else {
+      // Para otros roles, verificar asociación en Shared
+      const userAssociation = await Shared.findOne({
+        user: userId,
+        account: accountId,
+        status: 'active'
+      });
+
+      if (!userAssociation) {
+        console.log('❌ [SEND NOTIFICATION] Sin permisos - no hay asociación activa');
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes permisos para enviar notificaciones a esta cuenta'
+        });
+      }
     }
 
     console.log('🔔 [SEND NOTIFICATION] Creando notificación...');
@@ -7855,18 +8571,33 @@ app.post('/notifications', authenticateToken, async (req, res) => {
 
     // Populate sender info
     await notification.populate('sender', 'nombre email');
+    await notification.populate('account', 'nombre');
+    await notification.populate('division', 'nombre');
+    await notification.populate('recipients', 'nombre email');
 
-    res.status(201).json({
+    const responseData = {
       success: true,
       message: 'Notificación enviada exitosamente',
       data: {
-        id: notification._id,
+        _id: notification._id,
         title: notification.title,
         message: notification.message,
         type: notification.type,
-        sentAt: notification.sentAt
+        sender: notification.sender,
+        account: notification.account,
+        division: notification.division,
+        recipients: notification.recipients,
+        readBy: notification.readBy,
+        status: notification.status,
+        priority: notification.priority,
+        sentAt: notification.sentAt,
+        createdAt: notification.createdAt,
+        updatedAt: notification.updatedAt
       }
-    });
+    };
+
+    console.log('🔔 [SEND NOTIFICATION] Respuesta exitosa:', JSON.stringify(responseData, null, 2));
+    res.status(201).json(responseData);
 
   } catch (error) {
     console.error('❌ [SEND NOTIFICATION] Error completo:', error);
@@ -7933,51 +8664,46 @@ app.get('/notifications/recipients', authenticateToken, async (req, res) => {
 
 // ===== NUEVOS ENDPOINTS DE EVENTOS =====
 
-// Crear evento (solo coordinadores)
-app.post('/events/create', authenticateToken, async (req, res) => {
+// Crear evento desde backoffice (adminaccount y superadmin)
+app.post('/api/events', authenticateToken, async (req, res) => {
   try {
-    const { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId, requiereAutorizacion } = req.body;
+    const { titulo, descripcion, fecha, hora, lugar, institucion, division, estado, requiereAutorizacion } = req.body;
     const currentUser = req.user;
 
-    console.log('📅 [CREATE EVENT] Datos recibidos:', { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId, requiereAutorizacion });
-    console.log('👤 [CREATE EVENT] Usuario:', currentUser._id, currentUser.role?.nombre);
+    console.log('📅 [CREATE EVENT BACKOFFICE] Datos recibidos:', { titulo, descripcion, fecha, hora, lugar, institucion, division, requiereAutorizacion });
+    console.log('👤 [CREATE EVENT BACKOFFICE] Usuario:', currentUser._id, currentUser.role?.nombre);
 
-    // Verificar que el usuario es coordinador
-    if (currentUser.role?.nombre !== 'coordinador') {
+    // Verificar que el usuario tiene permisos para crear eventos
+    if (!['adminaccount', 'superadmin'].includes(currentUser.role?.nombre)) {
       return res.status(403).json({
         success: false,
-        message: 'Solo los coordinadores pueden crear eventos'
+        message: 'No tienes permisos para crear eventos'
       });
     }
 
     // Validar campos requeridos
-    if (!titulo || !descripcion || !fecha || !hora) {
+    if (!titulo || !descripcion || !fecha || !hora || !institucion || !division) {
       return res.status(400).json({
         success: false,
-        message: 'Título, descripción, fecha y hora son requeridos'
+        message: 'Título, descripción, fecha, hora, institución y división son requeridos'
       });
     }
 
-    // Resolver la asociación del usuario en base a institutionId/divisionId si se recibieron
-    const assocFilter = {
-      user: currentUser._id,
-      status: { $in: ['active', 'pending'] }
-    };
-    if (institutionId) {
-      assocFilter.account = institutionId;
-    }
-    if (divisionId) {
-      assocFilter.division = divisionId;
-    }
-
-    const userAssociation = await Shared.findOne(assocFilter).populate('account division');
-
-    if (!userAssociation) {
-      return res.status(403).json({
+    // Verificar que la institución existe
+    const institutionExists = await Account.findById(institucion);
+    if (!institutionExists) {
+      return res.status(404).json({
         success: false,
-        message: institutionId || divisionId
-          ? 'No tienes acceso a la institución/división indicada'
-          : 'Usuario no tiene asociaciones activas'
+        message: 'La institución especificada no existe'
+      });
+    }
+
+    // Verificar que la división existe
+    const divisionExists = await Group.findById(division);
+    if (!divisionExists) {
+      return res.status(404).json({
+        success: false,
+        message: 'La división especificada no existe'
       });
     }
 
@@ -7989,8 +8715,153 @@ app.post('/events/create', authenticateToken, async (req, res) => {
       hora,
       lugar: lugar || '',
       creador: currentUser._id,
-      institucion: userAssociation.account._id,
-      division: userAssociation.division?._id || null,
+      institucion: institucion,
+      division: division,
+      estado: estado || 'activo',
+      requiereAutorizacion: requiereAutorizacion || false
+    });
+
+    await newEvent.save();
+    console.log('📅 [CREATE EVENT BACKOFFICE] Evento creado:', newEvent._id);
+
+    // Populate para la respuesta
+    await newEvent.populate('creador', 'name email');
+    await newEvent.populate('institucion', 'nombre');
+    await newEvent.populate('division', 'nombre');
+
+    res.status(201).json({
+      success: true,
+      message: 'Evento creado exitosamente',
+      data: {
+        event: {
+          _id: newEvent._id,
+          titulo: newEvent.titulo,
+          descripcion: newEvent.descripcion,
+          fecha: newEvent.fecha,
+          hora: newEvent.hora,
+          lugar: newEvent.lugar,
+          estado: newEvent.estado,
+          requiereAutorizacion: newEvent.requiereAutorizacion,
+          creador: newEvent.creador,
+          institucion: newEvent.institucion,
+          division: newEvent.division,
+          createdAt: newEvent.createdAt
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ [CREATE EVENT BACKOFFICE] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor al crear evento'
+    });
+  }
+});
+
+// Crear evento (solo coordinadores)
+app.post('/events/create', authenticateToken, async (req, res) => {
+  try {
+    const { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId, requiereAutorizacion } = req.body;
+    const currentUser = req.user;
+
+    console.log('📅 [CREATE EVENT] Datos recibidos:', { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId, requiereAutorizacion });
+    console.log('👤 [CREATE EVENT] Usuario:', currentUser._id, currentUser.role?.nombre);
+
+    // Verificar que el usuario tiene permisos para crear eventos
+    if (!['coordinador', 'adminaccount', 'superadmin'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para crear eventos'
+      });
+    }
+
+    // Validar campos requeridos
+    if (!titulo || !descripcion || !fecha || !hora) {
+      return res.status(400).json({
+        success: false,
+        message: 'Título, descripción, fecha y hora son requeridos'
+      });
+    }
+
+    // Para adminaccount, verificar que tenga acceso a la cuenta
+    let userAssociation;
+    let targetAccount;
+    let targetDivision;
+
+    console.log('🔍 [CREATE EVENT] Verificando permisos...');
+    console.log('🔍 [CREATE EVENT] Rol del usuario:', currentUser.role?.nombre);
+    console.log('🔍 [CREATE EVENT] InstitutionId recibido:', institutionId);
+    console.log('🔍 [CREATE EVENT] DivisionId recibido:', divisionId);
+
+    if (currentUser.role?.nombre === 'adminaccount') {
+      console.log('🔍 [CREATE EVENT] Usuario es adminaccount, verificando acceso a cuenta:', institutionId);
+      
+      // Para adminaccount, buscar cualquier asociación activa con la cuenta
+      userAssociation = await Shared.findOne({
+        user: currentUser._id,
+        account: institutionId,
+        status: { $in: ['active', 'pending'] }
+      }).populate('account division');
+
+      console.log('🔍 [CREATE EVENT] Asociación encontrada:', userAssociation ? 'Sí' : 'No');
+      if (userAssociation) {
+        console.log('🔍 [CREATE EVENT] Asociación details:', {
+          account: userAssociation.account?._id,
+          division: userAssociation.division?._id,
+          status: userAssociation.status
+        });
+      }
+
+      if (!userAssociation) {
+        console.log('❌ [CREATE EVENT] No se encontró asociación para adminaccount');
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes acceso a la institución indicada'
+        });
+      }
+
+      targetAccount = userAssociation.account._id;
+      targetDivision = divisionId || null;
+      console.log('✅ [CREATE EVENT] Adminaccount autorizado. TargetAccount:', targetAccount, 'TargetDivision:', targetDivision);
+    } else {
+      // Para coordinadores, verificar asociación específica
+      const assocFilter = {
+        user: currentUser._id,
+        status: { $in: ['active', 'pending'] }
+      };
+      if (institutionId) {
+        assocFilter.account = institutionId;
+      }
+      if (divisionId) {
+        assocFilter.division = divisionId;
+      }
+
+      userAssociation = await Shared.findOne(assocFilter).populate('account division');
+
+      if (!userAssociation) {
+        return res.status(403).json({
+          success: false,
+          message: institutionId || divisionId
+            ? 'No tienes acceso a la institución/división indicada'
+            : 'Usuario no tiene asociaciones activas'
+        });
+      }
+
+      targetAccount = userAssociation.account._id;
+      targetDivision = userAssociation.division?._id || null;
+    }
+
+    // Crear el evento
+    const newEvent = new Event({
+      titulo,
+      descripcion,
+      fecha: new Date(fecha),
+      hora,
+      lugar: lugar || '',
+      creador: currentUser._id,
+      institucion: targetAccount,
+      division: targetDivision,
       estado: 'activo',
       requiereAutorizacion: requiereAutorizacion || false
     });
@@ -7999,55 +8870,58 @@ app.post('/events/create', authenticateToken, async (req, res) => {
     console.log('📅 [CREATE EVENT] Evento creado:', newEvent._id);
 
     // Si el evento requiere autorización, generar notificaciones para todos los estudiantes de la división
-    if (newEvent.requiereAutorizacion && userAssociation.division) {
+    if (newEvent.requiereAutorizacion && targetDivision) {
       try {
         console.log('📢 [CREATE EVENT] Generando notificaciones para evento que requiere autorización');
         
         // Obtener todos los estudiantes de la división
         const students = await Student.find({
-          division: userAssociation.division._id,
+          division: targetDivision,
           activo: true
         });
 
         console.log('📢 [CREATE EVENT] Estudiantes encontrados para notificar:', students.length);
 
-        // Crear notificaciones para cada estudiante
-        const notifications = [];
-        for (const student of students) {
-          const notification = new Notification({
-            title: `Nuevo evento: ${newEvent.titulo}`,
-            message: `${newEvent.descripcion}\n\n📅 Fecha: ${new Date(newEvent.fecha).toLocaleDateString('es-ES', { 
-              weekday: 'long', 
-              day: 'numeric', 
-              month: 'long' 
-            })} a las ${newEvent.hora}${newEvent.lugar ? `\n📍 Lugar: ${newEvent.lugar}` : ''}\n\n⚠️ Este evento requiere tu autorización. Por favor, autoriza o rechaza la participación de tu hijo.`,
-            type: 'informacion',
-            sender: currentUser._id,
-            account: newEvent.institucion,
-            division: newEvent.division,
-            recipients: [student._id],
-            status: 'sent',
-            priority: 'high'
-          });
-          notifications.push(notification);
-        }
+        // Crear una sola notificación para todos los estudiantes
+        const studentIds = students.map(student => student._id);
+        const notification = new Notification({
+          title: `Nuevo evento: ${newEvent.titulo}`,
+          message: `${newEvent.descripcion}\n\n📅 Fecha: ${new Date(newEvent.fecha).toLocaleDateString('es-ES', { 
+            weekday: 'long', 
+            day: 'numeric', 
+            month: 'long' 
+          })} a las ${newEvent.hora}${newEvent.lugar ? `\n📍 Lugar: ${newEvent.lugar}` : ''}\n\n⚠️ Este evento requiere tu autorización. Por favor, autoriza o rechaza la participación de tu hijo.`,
+          type: 'informacion',
+          sender: currentUser._id,
+          account: newEvent.institucion,
+          division: newEvent.division,
+          recipients: studentIds, // Todos los estudiantes en una sola notificación
+          status: 'sent',
+          priority: 'high'
+        });
 
-        // Guardar todas las notificaciones
-        if (notifications.length > 0) {
-          await Notification.insertMany(notifications);
-          console.log('📢 [CREATE EVENT] Notificaciones creadas:', notifications.length);
-          
-          // Enviar push notifications a usuarios familiares
-          console.log('📢 [CREATE EVENT] Enviando push notifications a familiares...');
-          for (const notification of notifications) {
-            try {
-              const pushResult = await sendPushNotificationToStudentFamily(notification.recipients[0], notification);
-              console.log('📢 [CREATE EVENT] Push para evento - Enviados:', pushResult.sent, 'Fallidos:', pushResult.failed);
-            } catch (pushError) {
-              console.error('📢 [CREATE EVENT] Error enviando push para evento:', pushError.message);
-            }
+        // Guardar la notificación
+        await notification.save();
+        console.log('📢 [CREATE EVENT] Notificación única creada para', studentIds.length, 'estudiantes');
+        
+        // Enviar push notifications a usuarios familiares de todos los estudiantes
+        console.log('📢 [CREATE EVENT] Enviando push notifications a familiares...');
+        let totalSent = 0;
+        let totalFailed = 0;
+        
+        for (const studentId of studentIds) {
+          try {
+            const pushResult = await sendPushNotificationToStudentFamily(studentId, notification);
+            totalSent += pushResult.sent;
+            totalFailed += pushResult.failed;
+            console.log('📢 [CREATE EVENT] Push para estudiante', studentId, '- Enviados:', pushResult.sent, 'Fallidos:', pushResult.failed);
+          } catch (pushError) {
+            console.error('📢 [CREATE EVENT] Error enviando push para estudiante', studentId, ':', pushError.message);
+            totalFailed++;
           }
         }
+        
+        console.log('📢 [CREATE EVENT] Resumen push notifications - Total enviados:', totalSent, 'Total fallidos:', totalFailed);
 
       } catch (notificationError) {
         console.error('❌ [CREATE EVENT] Error creando notificaciones:', notificationError);
@@ -8191,8 +9065,20 @@ app.post('/events/:eventId/authorize', authenticateToken, async (req, res) => {
     console.log('👨‍🎓 [AUTHORIZE EVENT] Estudiante:', studentId);
     console.log('✅ [AUTHORIZE EVENT] Autorizado:', autorizado);
 
-    // Verificar que el usuario es familyadmin
-    if (currentUser.role?.nombre !== 'familyadmin') {
+    // Verificar que el usuario tiene asociación activa como familyadmin
+    const activeAssociation = await ActiveAssociation.getActiveAssociation(currentUser._id);
+    
+    if (!activeAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes una asociación activa'
+      });
+    }
+
+    // Obtener los detalles de la asociación activa
+    const activeShared = await Shared.findById(activeAssociation.activeShared).populate('role');
+    
+    if (activeShared.role?.nombre !== 'familyadmin') {
       return res.status(403).json({
         success: false,
         message: 'Solo los tutores principales pueden autorizar eventos'
@@ -8440,8 +9326,20 @@ app.get('/events/:eventId/authorization/:studentId', authenticateToken, async (r
     console.log('👨‍🎓 [CHECK AUTHORIZATION] Estudiante:', studentId);
     console.log('👤 [CHECK AUTHORIZATION] Usuario:', currentUser._id, currentUser.role?.nombre);
 
-    // Verificar que el usuario es familyadmin
-    if (currentUser.role?.nombre !== 'familyadmin') {
+    // Verificar que el usuario tiene asociación activa como familyadmin
+    const activeAssociation = await ActiveAssociation.getActiveAssociation(currentUser._id);
+    
+    if (!activeAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes una asociación activa'
+      });
+    }
+
+    // Obtener los detalles de la asociación activa
+    const activeShared = await Shared.findById(activeAssociation.activeShared).populate('role');
+    
+    if (activeShared.role?.nombre !== 'familyadmin') {
       return res.status(403).json({
         success: false,
         message: 'Solo los tutores principales pueden verificar autorizaciones'
@@ -9225,13 +10123,13 @@ app.get('/backoffice/asistencias/stats', authenticateToken, async (req, res) => 
     // Filtros de fecha
     if (fechaInicio && fechaFin) {
       query.fecha = {
-        $gte: new Date(fechaInicio),
-        $lte: new Date(fechaFin)
+        $gte: fechaInicio,
+        $lte: fechaFin
       };
     } else if (fechaInicio) {
       query.fecha = { $gte: new Date(fechaInicio) };
     } else if (fechaFin) {
-      query.fecha = { $lte: new Date(fechaFin) };
+      query.fecha = { $lte: fechaFin };
     }
     
     // Obtener estadísticas
@@ -9324,13 +10222,13 @@ app.get('/backoffice/asistencias/export', authenticateToken, async (req, res) =>
     
     if (fechaInicio && fechaFin) {
       query.fecha = {
-        $gte: new Date(fechaInicio),
-        $lte: new Date(fechaFin)
+        $gte: fechaInicio,
+        $lte: fechaFin
       };
     } else if (fechaInicio) {
       query.fecha = { $gte: new Date(fechaInicio) };
     } else if (fechaFin) {
-      query.fecha = { $lte: new Date(fechaFin) };
+      query.fecha = { $lte: fechaFin };
     }
     
     if (estado && estado !== 'all') {
@@ -9896,13 +10794,16 @@ app.get('/shared/user', authenticateToken, async (req, res) => {
       .sort({ createdAt: -1 });
 
     // Generar URLs firmadas para los avatares de estudiantes
-    console.log('🔍 [SHARED GET] Generando URLs para avatares de estudiantes...');
-    const associationsWithSignedUrls = await Promise.all(userAssociations.map(async (association) => {
-      console.log('🔍 [SHARED GET] Asociación:', {
+    console.log('🔍 [SHARED GET] ===== PROCESANDO AVATARES DE ESTUDIANTES =====');
+    console.log('🔍 [SHARED GET] Total de asociaciones:', userAssociations.length);
+    
+    const associationsWithSignedUrls = await Promise.all(userAssociations.map(async (association, index) => {
+      console.log(`🔍 [SHARED GET] Procesando asociación ${index + 1}/${userAssociations.length}:`, {
         id: association._id,
         studentId: association.student?._id,
         studentName: association.student?.nombre,
-        studentAvatar: association.student?.avatar
+        studentAvatar: association.student?.avatar,
+        hasAvatar: !!association.student?.avatar
       });
       
       if (association.student && association.student.avatar) {
@@ -9917,10 +10818,29 @@ app.get('/shared/user', authenticateToken, async (req, res) => {
           } else if (association.student.avatar.includes('students/')) {
             // Es una key de S3 para estudiantes, generar URL firmada
             console.log('🔍 [SHARED GET] Es una key de S3 para estudiantes, generando URL firmada');
-            const { generateSignedUrl } = require('./config/s3.config');
-            const signedUrl = await generateSignedUrl(association.student.avatar, 3600); // 1 hora
-            console.log('🔍 [SHARED GET] URL firmada generada:', signedUrl);
-            association.student.avatar = signedUrl;
+            console.log('🔍 [SHARED GET] Key original:', association.student.avatar);
+            
+            try {
+              const { generateSignedUrl } = require('./config/s3.config');
+              console.log('🔍 [SHARED GET] Función generateSignedUrl importada correctamente');
+              
+              const signedUrl = await generateSignedUrl(association.student.avatar, 172800); // 2 días
+              console.log('🔍 [SHARED GET] URL firmada generada exitosamente:', signedUrl);
+              console.log('🔍 [SHARED GET] Tipo de URL firmada:', typeof signedUrl);
+              console.log('🔍 [SHARED GET] Longitud de URL firmada:', signedUrl ? signedUrl.length : 'null');
+              
+              association.student.avatar = signedUrl;
+              console.log('🔍 [SHARED GET] Avatar actualizado en la asociación');
+            } catch (s3Error) {
+              console.error('❌ [SHARED GET] Error generando URL firmada:', s3Error);
+              console.error('❌ [SHARED GET] Error details:', {
+                message: s3Error.message,
+                stack: s3Error.stack,
+                name: s3Error.name
+              });
+              // Mantener la key original si falla
+              console.log('🔍 [SHARED GET] Manteniendo key original:', association.student.avatar);
+            }
           } else {
             // Es una key local, generar URL local
             const localUrl = `${req.protocol}://${req.get('host')}/uploads/${association.student.avatar.split('/').pop()}`;
@@ -9940,7 +10860,141 @@ app.get('/shared/user', authenticateToken, async (req, res) => {
       return association;
     }));
     
+    console.log('📦 [SHARED GET] ===== RESULTADO FINAL =====');
     console.log('📦 [SHARED GET] Asociaciones encontradas:', associationsWithSignedUrls.length);
+    
+    // Log de las asociaciones procesadas
+    associationsWithSignedUrls.forEach((assoc, index) => {
+      console.log(`📦 [SHARED GET] Asociación ${index + 1} final:`, {
+        id: assoc._id,
+        studentId: assoc.student?._id,
+        studentName: assoc.student?.nombre,
+        studentAvatar: assoc.student?.avatar,
+        hasAvatar: !!assoc.student?.avatar
+      });
+    });
+    
+    console.log('📤 [SHARED GET] ===== ENVIANDO RESPUESTA AL CLIENTE =====');
+    console.log('📤 [SHARED GET] Total de asociaciones a enviar:', associationsWithSignedUrls.length);
+    
+    associationsWithSignedUrls.forEach((assoc, index) => {
+      console.log(`📤 [SHARED GET] Asociación ${index + 1} en respuesta:`, {
+        id: assoc._id,
+        studentId: assoc.student?._id,
+        studentName: assoc.student?.nombre,
+        studentAvatar: assoc.student?.avatar,
+        hasAvatar: !!assoc.student?.avatar,
+        avatarType: assoc.student?.avatar ? (assoc.student.avatar.startsWith('http') ? 'URL completa' : 'Key de S3') : 'Sin avatar'
+      });
+    });
+    
+    res.json({
+      success: true,
+      data: {
+        associations: associationsWithSignedUrls
+      }
+    });
+  } catch (error) {
+    console.error('Error al obtener asociaciones del usuario:', error);
+    res.status(500).json({ success: false, message: 'Error interno del servidor' });
+  }
+});
+
+// Endpoint para obtener asociaciones del usuario (con prefijo /api)
+app.get('/api/shared/user', authenticateToken, async (req, res) => {
+  try {
+    console.log('🎯 [API SHARED GET] Obteniendo asociaciones del usuario');
+    const { userId } = req.user;
+    
+    console.log('👤 [API SHARED GET] Usuario:', userId);
+    
+    // Obtener las asociaciones del usuario
+    const userAssociations = await Shared.find({ user: userId })
+      .populate('account')
+      .populate('division')
+      .populate({
+        path: 'student',
+        select: 'nombre apellido avatar'
+      });
+    
+    console.log('🔍 [API SHARED GET] ===== PROCESANDO AVATARES DE ESTUDIANTES =====');
+    console.log('🔍 [API SHARED GET] Total de asociaciones:', userAssociations.length);
+    
+    const associationsWithSignedUrls = await Promise.all(userAssociations.map(async (association, index) => {
+      console.log(`🔍 [API SHARED GET] Procesando asociación ${index + 1}/${userAssociations.length}:`, {
+        id: association._id,
+        studentId: association.student?._id,
+        studentName: association.student?.nombre,
+        studentAvatar: association.student?.avatar,
+        hasAvatar: !!association.student?.avatar
+      });
+      
+      if (association.student && association.student.avatar) {
+        try {
+          console.log('🔍 [API SHARED GET] Procesando avatar del estudiante:', association.student._id);
+          console.log('🔍 [API SHARED GET] Avatar original:', association.student.avatar);
+          
+          // Verificar si es una key de S3 o una URL local
+          if (association.student.avatar.startsWith('http')) {
+            console.log('🔍 [API SHARED GET] Es una URL completa, usando tal como está');
+            // Es una URL completa (puede ser local o S3), no hacer nada
+          } else if (association.student.avatar.includes('students/')) {
+            // Es una key de S3 para estudiantes, generar URL firmada
+            console.log('🔍 [API SHARED GET] Es una key de S3 para estudiantes, generando URL firmada');
+            console.log('🔍 [API SHARED GET] Key original:', association.student.avatar);
+            
+            try {
+              const { generateSignedUrl } = require('./config/s3.config');
+              console.log('🔍 [API SHARED GET] Función generateSignedUrl importada correctamente');
+              
+              const signedUrl = await generateSignedUrl(association.student.avatar, 172800); // 2 días
+              console.log('🔍 [API SHARED GET] URL firmada generada exitosamente:', signedUrl);
+              console.log('🔍 [API SHARED GET] Tipo de URL firmada:', typeof signedUrl);
+              console.log('🔍 [API SHARED GET] Longitud de URL firmada:', signedUrl ? signedUrl.length : 'null');
+              
+              association.student.avatar = signedUrl;
+              console.log('🔍 [API SHARED GET] Avatar actualizado en la asociación');
+            } catch (s3Error) {
+              console.error('❌ [API SHARED GET] Error generando URL firmada:', s3Error);
+              console.error('❌ [API SHARED GET] Error details:', {
+                message: s3Error.message,
+                stack: s3Error.stack,
+                name: s3Error.name
+              });
+              // Mantener la key original si falla
+              console.log('🔍 [API SHARED GET] Manteniendo key original:', association.student.avatar);
+            }
+          } else {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${association.student.avatar.split('/').pop()}`;
+            console.log('🔍 [API SHARED GET] URL local generada:', localUrl);
+            association.student.avatar = localUrl;
+          }
+        } catch (error) {
+          console.error('❌ [API SHARED GET] Error procesando avatar del estudiante:', association.student._id, error);
+          // Si falla, usar URL directa
+          const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${association.student.avatar.split('/').pop()}`;
+          console.log('🔍 [API SHARED GET] Usando URL de fallback:', fallbackUrl);
+          association.student.avatar = fallbackUrl;
+        }
+      } else {
+        console.log('🔍 [API SHARED GET] Estudiante sin avatar:', association.student?._id);
+      }
+      return association;
+    }));
+    
+    console.log('📦 [API SHARED GET] ===== RESULTADO FINAL =====');
+    console.log('📦 [API SHARED GET] Asociaciones encontradas:', associationsWithSignedUrls.length);
+    
+    associationsWithSignedUrls.forEach((assoc, index) => {
+      console.log(`📦 [API SHARED GET] Asociación ${index + 1} final:`, {
+        id: assoc._id,
+        studentId: assoc.student?._id,
+        studentName: assoc.student?.nombre,
+        studentAvatar: assoc.student?.avatar,
+        hasAvatar: !!assoc.student?.avatar
+      });
+    });
     
     res.json({
       success: true,
@@ -10380,7 +11434,7 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
           console.log('✅ [SHARED REQUEST] Asociación creada exitosamente');
           
           // Enviar email de invitación con las credenciales (asíncrono)
-          sendEmailAsync(sendFamilyInvitationEmail, newUser.email, newUser.name, randomPassword);
+          sendEmailAsync(sendFamilyInvitationEmail, null, newUser.email, newUser.name, randomPassword);
           console.log('📧 [SHARED REQUEST] Email de invitación familiar programado para envío asíncrono a:', email);
           
           res.status(201).json({
@@ -10535,7 +11589,7 @@ app.get('/active-association', authenticateToken, async (req, res) => {
             // Es una key de S3 para estudiantes, generar URL firmada
             console.log('🎓 [ACTIVE ASSOCIATION GET] Es una key de S3 para estudiantes, generando URL firmada');
             const { generateSignedUrl } = require('./config/s3.config');
-            const signedUrl = await generateSignedUrl(activeAssociation.student.avatar, 3600); // 1 hora
+            const signedUrl = await generateSignedUrl(activeAssociation.student.avatar, 172800); // 2 días
             console.log('🎓 [ACTIVE ASSOCIATION GET] URL firmada generada:', signedUrl);
             studentWithSignedUrl.avatar = signedUrl;
           } else {
@@ -10629,7 +11683,7 @@ app.get('/active-association/available', authenticateToken, async (req, res) => 
               // Es una key de S3 para estudiantes, generar URL firmada
               console.log('🎓 [ACTIVE ASSOCIATION AVAILABLE] Es una key de S3 para estudiantes, generando URL firmada');
               const { generateSignedUrl } = require('./config/s3.config');
-              const signedUrl = await generateSignedUrl(assoc.student.avatar, 3600); // 1 hora
+              const signedUrl = await generateSignedUrl(assoc.student.avatar, 172800); // 2 días
               console.log('🎓 [ACTIVE ASSOCIATION AVAILABLE] URL firmada generada:', signedUrl);
               studentWithSignedUrl.avatar = signedUrl;
             } else {
