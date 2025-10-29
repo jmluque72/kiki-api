@@ -33,7 +33,7 @@ const pickupSchema = new mongoose.Schema({
     type: String,
     required: [true, 'El DNI es obligatorio'],
     trim: true,
-    match: [/^[0-9]{7,8}$/, 'DNI inválido (debe tener 7 u 8 dígitos)']
+    // Validación de formato removida para permitir DNIs no estándar
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,

@@ -57,6 +57,27 @@ const authenticateToken = async (req, res, next) => {
   }
 };
 
+const requireRole = (roles) => {
+  return (req, res, next) => {
+    if (!req.user || !req.user.role) {
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+
+    if (!roles.includes(req.user.role.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para acceder a este recurso'
+      });
+    }
+
+    next();
+  };
+};
+
 module.exports = {
-  authenticateToken
+  authenticateToken,
+  requireRole
 }; 

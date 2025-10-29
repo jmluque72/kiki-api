@@ -37,75 +37,17 @@ const PasswordReset = require('./shared/models/PasswordReset');
 const ActiveAssociation = require('./shared/models/ActiveAssociation');
 const StudentAction = require('./shared/models/StudentAction');
 const StudentActionLog = require('./shared/models/StudentActionLog');
-
-// Importar servicios
-const RefreshTokenService = require('./services/refreshTokenService');
-const TwoFactorAuthService = require('./services/twoFactorAuthService');
-const LoginMonitorService = require('./services/loginMonitorService');
-const PasswordExpirationService = require('./services/passwordExpirationService');
 const { sendPasswordResetEmail, sendWelcomeEmail, sendInstitutionWelcomeEmail, sendFamilyInvitationEmail, sendNotificationEmail, generateRandomPassword, sendEmailAsync } = require('./config/email.config');
 const emailService = require('./services/emailService');
 
 // Importar middleware de autenticación REAL con Cognito
-const { authenticateToken, requireRole, requireAdmin, requireSuperAdmin } = require('./middleware/mongoAuth');
+const { authenticateToken, requireRole, requireAdmin, requireSuperAdmin } = require('./middleware/cognitoRealAuth');
 
-// Importar rate limiting
-const { 
-  loginRateLimit, 
-  registerRateLimit, 
-  passwordChangeRateLimit, 
-  generalRateLimit, 
-  sensitiveRateLimit 
-} = require('./middleware/rateLimiter');
+// Importar middleware global para institución de Cognito
+const { getCognitoUserInstitution, verifyAccountAccess, getAccountFilter, getAccountFilterMultiple, verifyDivisionAccess } = require('./middleware/cognitoInstitution');
 
-// Middleware de institución simplificado (sin Cognito)
-// const { verifyAccountAccess, getAccountFilter, getAccountFilterMultiple, verifyDivisionAccess } = require('./middleware/cognitoInstitution');
-
-// Middleware para establecer userInstitution para adminaccount
-const setUserInstitution = async (req, res, next) => {
-  try {
-    console.log('🔧 [MIDDLEWARE] setUserInstitution ejecutándose...');
-    console.log('🔧 [MIDDLEWARE] req.user:', req.user ? 'Usuario presente' : 'Sin usuario');
-    console.log('🔧 [MIDDLEWARE] req.user.role?.nombre:', req.user?.role?.nombre);
-    console.log('🔧 [MIDDLEWARE] req.user.account:', req.user?.account);
-    
-    if (req.user && req.user.role?.nombre === 'adminaccount') {
-      console.log('🔧 [MIDDLEWARE] Usuario adminaccount detectado...');
-      
-      // Si no tiene cuenta asignada, usar la cuenta BAMBINO por defecto
-      let accountId = req.user.account;
-      if (!accountId) {
-        console.log('🔧 [MIDDLEWARE] Usuario adminaccount sin cuenta, asignando BAMBINO por defecto...');
-        accountId = '68dc5f1a626391464e2bcb3c';
-        
-        // Actualizar el usuario en la base de datos
-        const User = require('./shared/models/User');
-        await User.findByIdAndUpdate(req.user._id, { account: accountId });
-        console.log('✅ [MIDDLEWARE] Cuenta BAMBINO asignada al usuario');
-      }
-      
-      // Buscar la cuenta
-      const Account = require('./shared/models/Account');
-      const account = await Account.findById(accountId);
-      
-      if (account) {
-        req.userInstitution = {
-          _id: account._id,
-          nombre: account.nombre
-        };
-        console.log('🏢 [MIDDLEWARE] Institución establecida para adminaccount:', account.nombre);
-      } else {
-        console.log('❌ [MIDDLEWARE] Cuenta no encontrada para ID:', accountId);
-      }
-    } else {
-      console.log('🔧 [MIDDLEWARE] No es adminaccount');
-    }
-    next();
-  } catch (error) {
-    console.error('❌ [MIDDLEWARE] Error estableciendo userInstitution:', error);
-    next();
-  }
-};
+// Importar servicio de Cognito
+const cognitoService = require('./services/cognitoService');
 
 // Función helper para obtener la asociación activa del usuario
 async function getActiveAssociationForUser(userId) {
@@ -326,9 +268,6 @@ const app = express();
 // Middleware de seguridad
 app.use(helmet());
 
-// Rate limiting general
-app.use(generalRateLimit);
-
 // CORS - Configurado para permitir conexiones desde apps móviles
 app.use(cors({
   origin: function (origin, callback) {
@@ -507,87 +446,6 @@ app.get('/debug/student-actions/division/:divisionId', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error al obtener acciones'
-    });
-  }
-});
-
-// Endpoint temporal para actualizar acciones sin autenticación (sin prefijo /api)
-app.put('/debug/student-actions/:actionId', async (req, res) => {
-  console.log('🚀 [DEBUG] Route PUT /debug/student-actions/:actionId called');
-  try {
-    const { actionId } = req.params;
-    const updateData = req.body;
-    console.log('🔍 [DEBUG] Updating action:', actionId, updateData);
-
-    // Simular actualización en modo debug
-    const updatedAction = {
-      _id: actionId,
-      nombre: updateData.name || 'Updated Action',
-      descripcion: updateData.description || 'Updated description',
-      division: updateData.division || '68dc5fa9626391464e2bcbd6',
-      color: updateData.color || '#0E5FCE',
-      orden: updateData.order || 0,
-      activo: updateData.active !== undefined ? updateData.active : true,
-      categoria: updateData.categoria || 'otro',
-      creadoPor: new mongoose.Types.ObjectId('68dc5f1a626391464e2bcb3a'),
-      account: new mongoose.Types.ObjectId('68dc5f1a626391464e2bcb3a'),
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-
-    console.log('✅ [DEBUG] Action updated (simulated):', updatedAction._id);
-
-    res.json({
-      success: true,
-      message: 'Action updated successfully (debug mode)',
-      data: updatedAction
-    });
-  } catch (error) {
-    console.error('❌ [DEBUG] Error updating action:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error',
-      error: error.message
-    });
-  }
-});
-
-// Endpoint temporal para crear acciones sin autenticación (sin prefijo /api)
-app.post('/debug/student-actions', async (req, res) => {
-  console.log('🚀 [DEBUG] Route /debug/student-actions called');
-  try {
-    const { name, description, division, color, order, categoria } = req.body;
-    console.log('🔍 [DEBUG] Creating action:', { name, description, division, color, order, categoria });
-
-    // Crear un objeto simple para debug
-    const debugAction = {
-      _id: new mongoose.Types.ObjectId(),
-      nombre: name || 'Default Action',
-      descripcion: description || 'Default description',
-      division: division,
-      color: color || '#0E5FCE',
-      orden: order || 0,
-      activo: true,
-      categoria: categoria || 'otro',
-      creadoPor: new mongoose.Types.ObjectId('68dc5f1a626391464e2bcb3a'),
-      account: new mongoose.Types.ObjectId('68dc5f1a626391464e2bcb3a'),
-      createdAt: new Date(),
-      updatedAt: new Date()
-    };
-    
-    console.log('🔍 [DEBUG] Debug action created:', debugAction._id);
-
-    res.json({
-      success: true,
-      message: 'Action created successfully (debug mode)',
-      data: debugAction
-    });
-  } catch (error) {
-    console.error('❌ [DEBUG] Error creating action:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error',
-      error: error.message
     });
   }
 });
@@ -853,60 +711,25 @@ app.post('/debug/test', async (req, res) => {
   }
 });
 
-// Login con rate limiting y monitoreo
-app.post('/users/login', loginRateLimit, async (req, res) => {
+// Login
+app.post('/users/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const ipAddress = req.ip || req.connection.remoteAddress;
-    const userAgent = req.get('User-Agent');
 
     console.log('🔍 Login attempt:', email);
 
     if (!email || !password) {
-      // Registrar intento fallido
-      await LoginMonitorService.logLoginAttempt({
-        email: email || 'unknown',
-        ipAddress: ipAddress,
-        userAgent: userAgent,
-        success: false,
-        failureReason: 'missing_credentials',
-        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-        location: await LoginMonitorService.getLocationInfo(ipAddress)
-      });
-
       return res.status(400).json({
         success: false,
         message: 'Email y contraseña son requeridos'
       });
     }
 
-    // Verificar si la IP está bloqueada
-    const isIPBlocked = await LoginMonitorService.isIPBlocked(ipAddress);
-    if (isIPBlocked) {
-      console.log('🚫 IP bloqueada:', ipAddress);
-      return res.status(403).json({
-        success: false,
-        message: 'Acceso bloqueado temporalmente. Intenta más tarde.'
-      });
-    }
-
     // Buscar usuario en la base de datos
-    const user = await User.findOne({ email }).populate('role').select('+password');
+    const user = await User.findOne({ email }).populate('role');
     
     if (!user) {
       console.log('❌ Usuario no encontrado:', email);
-      
-      // Registrar intento fallido
-      await LoginMonitorService.logLoginAttempt({
-        email: email,
-        ipAddress: ipAddress,
-        userAgent: userAgent,
-        success: false,
-        failureReason: 'user_not_found',
-        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-        location: await LoginMonitorService.getLocationInfo(ipAddress)
-      });
-
       return res.status(401).json({
         success: false,
         message: 'Credenciales inválidas'
@@ -920,259 +743,25 @@ app.post('/users/login', loginRateLimit, async (req, res) => {
 
     // Verificar si el usuario está activo
     if (user.status !== 'approved') {
-      // Registrar intento fallido
-      await LoginMonitorService.logLoginAttempt({
-        email: email,
-        ipAddress: ipAddress,
-        userAgent: userAgent,
-        success: false,
-        failureReason: 'user_not_approved',
-        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-        location: await LoginMonitorService.getLocationInfo(ipAddress)
-      });
-
       return res.status(401).json({
         success: false,
         message: 'Usuario no aprobado o inactivo'
       });
     }
 
-    // Verificar contraseña
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      console.log('❌ Contraseña inválida para:', email);
-      
-      // Registrar intento fallido
-      await LoginMonitorService.logLoginAttempt({
-        email: email,
-        ipAddress: ipAddress,
-        userAgent: userAgent,
-        success: false,
-        failureReason: 'password_incorrect',
-        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-        location: await LoginMonitorService.getLocationInfo(ipAddress)
-      });
-
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciales inválidas'
-      });
-    }
-
-    console.log('✅ Contraseña válida para:', email);
-
-    // Generar URL firmada para el avatar del usuario
-    let avatarUrl = null;
-    if (user.avatar) {
-      try {
-        const { generateSignedUrl } = require('./config/s3.config');
-        avatarUrl = await generateSignedUrl(user.avatar);
-        console.log('🖼️ [LOGIN] Avatar URL generada:', avatarUrl);
-      } catch (avatarError) {
-        console.error('❌ [LOGIN] Error generando avatar URL:', avatarError);
-        console.log('🖼️ [LOGIN] Usando avatar original');
-      }
-    }
+    // TODOS LOS USUARIOS DEBEN AUTENTICARSE CON COGNITO
+    // console.log('🔄 TODOS los usuarios deben autenticarse con Cognito...');
     
-    // Crear objeto usuario con avatar procesado
-    const userWithProcessedAvatar = {
-      ...user.toObject(),
-      avatar: avatarUrl || user.avatar
-    };
-    
-    // Obtener asociaciones del usuario
-    const associations = await Shared.find({ user: user._id, status: 'active' })
-      .populate('account', 'nombre')
-      .populate('division', 'nombre')
-      .populate('student', 'nombre apellido avatar')
-      .populate('role', 'nombre')
-      .populate('createdBy', 'name')
-      .sort({ createdAt: -1 });
-    
-    // Si es adminaccount, agregar las divisiones/grupos de su cuenta
-    // Si el rol no está poblado, intentar poblar manualmente
-    let roleName = user.role?.nombre;
-    if (!roleName && user.role) {
-      const Role = require('./shared/models/Role');
-      const roleDoc = await Role.findById(user.role);
-      roleName = roleDoc?.nombre;
-    }
-    
-    if (roleName === 'adminaccount' && user.account) {
-      console.log('✅ [LOGIN] Usuario tiene cuenta, buscando grupos...');
-      const Group = require('./shared/models/Group');
-      const accountGroups = await Group.find({ account: user.account, activo: true })
-        .populate('creadoPor', 'name')
-        .sort({ nombre: 1 });
-      
-      
-      // Agregar las divisiones como asociaciones virtuales
-      const virtualAssociations = accountGroups.map(group => ({
-        _id: `group_${group._id}`,
-        user: user._id,
-        account: {
-          _id: user.account,
-          nombre: associations[0]?.account?.nombre || 'Cuenta'
-        },
-        division: {
-          _id: group._id,
-          nombre: group.nombre
-        },
-        student: null,
-        role: {
-          _id: user.role._id,
-          nombre: user.role.nombre
-        },
-        status: 'active',
-        createdBy: {
-          _id: group.creadoPor._id,
-          name: group.creadoPor.name
-        },
-        permissions: [],
-        createdAt: group.createdAt,
-        updatedAt: group.updatedAt,
-        isVirtual: true // Marcar como asociación virtual
-      }));
-      
-      // Combinar asociaciones reales con virtuales
-      associations.push(...virtualAssociations);
-    }
-    
-    const activeAssociation = associations.length > 0 ? associations[0] : null;
-    
-    // Generar access token (5 minutos)
-    const accessToken = jwt.sign(
-      { 
-        userId: user._id,
-        email: user.email,
-        role: user.role._id
-      },
-      process.env.JWT_SECRET || 'fallback-secret',
-      { expiresIn: '5m' } // 5 minutos
-    );
-    
-    // Generar refresh token (7 días)
-    const deviceInfo = RefreshTokenService.getDeviceInfo(req);
-    const refreshToken = await RefreshTokenService.generateRefreshToken(user._id, deviceInfo);
-    
-    console.log('🔑 [LOGIN] Access token generado (5m)');
-    console.log('🔄 [LOGIN] Refresh token generado (7d)');
-    
-    // Registrar login exitoso
-    await LoginMonitorService.logLoginAttempt({
-      email: email,
-      ipAddress: ipAddress,
-      userAgent: userAgent,
-      success: true,
-      deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-      location: await LoginMonitorService.getLocationInfo(ipAddress),
-      metadata: {
-        userId: user._id,
-        role: user.role?.nombre,
-        associationsCount: associations.length
-      }
-    });
-    
+    // Redirigir a Cognito para autenticación
     return res.json({
       success: true,
-      data: {
-        user: userWithProcessedAvatar,
-        accessToken: accessToken,
-        refreshToken: refreshToken.token,
-        activeAssociation: activeAssociation,
-        associations: associations,
-        tokenExpiresIn: 5 * 60 // 5 minutos en segundos
-      }
+      message: 'Usuario autenticado correctamente',
+      redirectToCognito: true,
+      email: email
     });
 
   } catch (error) {
     console.error('❌ Error en login:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor'
-    });
-  }
-});
-
-// Endpoint para renovar access token usando refresh token
-app.post('/auth/refresh', async (req, res) => {
-  try {
-    const { refreshToken } = req.body;
-    
-    console.log('🔄 [REFRESH] Intentando renovar access token...');
-    
-    if (!refreshToken) {
-      return res.status(400).json({
-        success: false,
-        message: 'Refresh token es requerido'
-      });
-    }
-    
-    // Verificar y usar el refresh token
-    const validRefreshToken = await RefreshTokenService.verifyAndUseRefreshToken(refreshToken);
-    
-    if (!validRefreshToken) {
-      console.log('❌ [REFRESH] Refresh token inválido o expirado');
-      return res.status(401).json({
-        success: false,
-        message: 'Refresh token inválido o expirado'
-      });
-    }
-    
-    // Generar nuevo access token
-    const newAccessToken = await RefreshTokenService.generateNewAccessToken(validRefreshToken);
-    
-    console.log('✅ [REFRESH] Nuevo access token generado');
-    
-    return res.json({
-      success: true,
-      data: {
-        accessToken: newAccessToken,
-        tokenExpiresIn: 5 * 60 // 5 minutos en segundos
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ [REFRESH] Error renovando token:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor'
-    });
-  }
-});
-
-// Endpoint para revocar refresh token (logout)
-app.post('/auth/revoke', async (req, res) => {
-  try {
-    const { refreshToken } = req.body;
-    
-    console.log('🔒 [REVOKE] Revocando refresh token...');
-    
-    if (!refreshToken) {
-      return res.status(400).json({
-        success: false,
-        message: 'Refresh token es requerido'
-      });
-    }
-    
-    const revoked = await RefreshTokenService.revokeRefreshToken(refreshToken);
-    
-    if (revoked) {
-      console.log('✅ [REVOKE] Refresh token revocado exitosamente');
-      return res.json({
-        success: true,
-        message: 'Sesión cerrada exitosamente'
-      });
-    } else {
-      console.log('⚠️ [REVOKE] Refresh token no encontrado');
-      return res.status(404).json({
-        success: false,
-        message: 'Refresh token no encontrado'
-      });
-    }
-    
-  } catch (error) {
-    console.error('❌ [REVOKE] Error revocando token:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor'
@@ -1359,8 +948,8 @@ app.post('/users', /* authenticateToken, */ async (req, res) => {
   }
 });
 
-// Registro - DESACTIVADO con rate limiting
-app.post('/users/register', registerRateLimit, async (req, res) => {
+// Registro - DESACTIVADO
+app.post('/users/register', async (req, res) => {
   try {
     console.log('👤 [REGISTER] Intento de registro general - DESACTIVADO');
     
@@ -1463,241 +1052,114 @@ app.get('/auth/verify', /* authenticateToken, */ async (req, res) => {
 
 // ===== ENDPOINT DE LOGIN CON COGNITO =====
 
-// Endpoint de login para backoffice - Usa MongoDB (mismo que /users/login)
-app.post('/auth/cognito-login', loginRateLimit, async (req, res) => {
+// Endpoint de login con Cognito - SOLO COGNITO, NO MONGODB
+app.post('/auth/cognito-login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    const ipAddress = req.ip || req.connection.remoteAddress;
-    const userAgent = req.get('User-Agent');
 
-    console.log('🔍 [BACKOFFICE LOGIN] Intentando login para backoffice:', email);
+    console.log('🔍 [COGNITO LOGIN] Intentando login con Cognito real:', email);
 
     if (!email || !password) {
-      // Registrar intento fallido
-      await LoginMonitorService.logLoginAttempt({
-        email: email || 'unknown',
-        ipAddress: ipAddress,
-        userAgent: userAgent,
-        success: false,
-        failureReason: 'missing_credentials',
-        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-        location: await LoginMonitorService.getLocationInfo(ipAddress)
-      });
-
       return res.status(400).json({
         success: false,
         message: 'Email y contraseña son requeridos'
       });
     }
 
-    // Verificar si la IP está bloqueada
-    const isIPBlocked = await LoginMonitorService.isIPBlocked(ipAddress);
-    if (isIPBlocked) {
-      console.log('🚫 IP bloqueada:', ipAddress);
-      return res.status(403).json({
-        success: false,
-        message: 'Acceso bloqueado temporalmente. Intenta más tarde.'
-      });
-    }
-
-    // Buscar usuario en la base de datos
-    const user = await User.findOne({ email }).populate('role').select('+password');
+    // Verificar si Cognito está configurado
+    console.log('🔍 [COGNITO LOGIN] Verificando configuración de Cognito...');
+    console.log('🔍 [COGNITO LOGIN] isConfigured():', cognitoService.isConfigured());
     
-    if (!user) {
-      console.log('❌ Usuario no encontrado:', email);
+    if (!cognitoService.isConfigured()) {
+      console.log('⚠️ [COGNITO LOGIN] Cognito no configurado, usando modo simulado');
       
-      // Registrar intento fallido
-      await LoginMonitorService.logLoginAttempt({
-        email: email,
-        ipAddress: ipAddress,
-        userAgent: userAgent,
-        success: false,
-        failureReason: 'user_not_found',
-        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-        location: await LoginMonitorService.getLocationInfo(ipAddress)
-      });
-
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciales inválidas'
-      });
-    }
-
-    console.log('✅ Usuario encontrado:', user.email);
-    console.log('📊 Status:', user.status);
-    console.log('🎭 Rol:', user.role?.nombre);
-
-    // Verificar si el usuario está activo
-    if (user.status !== 'approved') {
-      // Registrar intento fallido
-      await LoginMonitorService.logLoginAttempt({
-        email: email,
-        ipAddress: ipAddress,
-        userAgent: userAgent,
-        success: false,
-        failureReason: 'user_not_approved',
-        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-        location: await LoginMonitorService.getLocationInfo(ipAddress)
-      });
-
-      return res.status(401).json({
-        success: false,
-        message: 'Usuario no aprobado o inactivo'
-      });
-    }
-
-    // Verificar contraseña
-    const isPasswordValid = await bcrypt.compare(password, user.password);
-    if (!isPasswordValid) {
-      console.log('❌ Contraseña inválida para:', email);
+      // Modo simulado para desarrollo
+      const cognitoToken = `cognito-jwt-${Date.now()}-${email}`;
       
-      // Registrar intento fallido
-      await LoginMonitorService.logLoginAttempt({
-        email: email,
-        ipAddress: ipAddress,
-        userAgent: userAgent,
-        success: false,
-        failureReason: 'password_incorrect',
-        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-        location: await LoginMonitorService.getLocationInfo(ipAddress)
-      });
-
-      return res.status(401).json({
-        success: false,
-        message: 'Credenciales inválidas'
+      return res.json({
+        success: true,
+        message: 'Login exitoso con Cognito (modo simulado)',
+        data: {
+          user: {
+            email: email,
+            name: email.split('@')[0],
+            cognitoId: `cognito-${Date.now()}`,
+            source: 'cognito-simulated',
+            role: { nombre: 'superadmin' } // Rol por defecto para modo simulado
+          },
+          token: cognitoToken,
+          tokenType: 'cognito',
+          expiresIn: '1h'
+        }
       });
     }
 
-    console.log('✅ Contraseña válida para:', email);
-
-    // Generar URL firmada para el avatar del usuario
-    let avatarUrl = null;
-    if (user.avatar) {
+    // AUTENTICACIÓN REAL CON COGNITO
+    console.log('🔍 [COGNITO LOGIN] Autenticando con AWS Cognito real...');
+    
+    const authResult = await cognitoService.authenticateUser(email, password);
+    
+    if (authResult.success) {
+      console.log('✅ [COGNITO LOGIN] Autenticación exitosa con Cognito real');
+      
+      // Obtener información del usuario
+      const userInfo = await cognitoService.getUserInfo(authResult.tokens.accessToken);
+      
+      // Extraer el rol del token de Cognito
+      let userRole = 'adminaccount'; // Rol por defecto
       try {
-        const { generateSignedUrl } = require('./config/s3.config');
-        avatarUrl = await generateSignedUrl(user.avatar);
-        console.log('🖼️ [BACKOFFICE LOGIN] Avatar URL generada:', avatarUrl);
-      } catch (avatarError) {
-        console.error('❌ [BACKOFFICE LOGIN] Error generando avatar URL:', avatarError);
-        console.log('🖼️ [BACKOFFICE LOGIN] Usando avatar original');
+        // Decodificar el ID token para extraer los grupos
+        const jwt = require('jsonwebtoken');
+        const decodedToken = jwt.decode(authResult.tokens.idToken);
+        console.log('🔍 [COGNITO LOGIN] Token decodificado:', decodedToken);
+        
+        if (decodedToken && decodedToken['cognito:groups'] && decodedToken['cognito:groups'].length > 0) {
+          userRole = decodedToken['cognito:groups'][0];
+          console.log('🔍 [COGNITO LOGIN] Rol extraído del token:', userRole);
+        } else {
+          console.log('⚠️ [COGNITO LOGIN] No se encontraron grupos en el token, usando rol por defecto');
+        }
+      } catch (error) {
+        console.error('❌ [COGNITO LOGIN] Error decodificando token:', error);
+        console.log('⚠️ [COGNITO LOGIN] Usando rol por defecto debido al error');
       }
-    }
-    
-    // Crear objeto usuario con avatar procesado
-    const userWithProcessedAvatar = {
-      ...user.toObject(),
-      avatar: avatarUrl || user.avatar
-    };
-    
-    // Obtener asociaciones del usuario
-    const associations = await Shared.find({ user: user._id, status: 'active' })
-      .populate('account', 'nombre')
-      .populate('division', 'nombre')
-      .populate('student', 'nombre apellido avatar')
-      .populate('role', 'nombre')
-      .populate('createdBy', 'name')
-      .sort({ createdAt: -1 });
-    
-    // Si es adminaccount, agregar las divisiones/grupos de su cuenta
-    // Si el rol no está poblado, intentar poblar manualmente
-    let roleName = user.role?.nombre;
-    if (!roleName && user.role) {
-      const Role = require('./shared/models/Role');
-      const roleDoc = await Role.findById(user.role);
-      roleName = roleDoc?.nombre;
-    }
-    
-    if (roleName === 'adminaccount' && user.account) {
-      console.log('✅ [LOGIN] Usuario tiene cuenta, buscando grupos...');
-      const Group = require('./shared/models/Group');
-      const accountGroups = await Group.find({ account: user.account, activo: true })
-        .populate('creadoPor', 'name')
-        .sort({ nombre: 1 });
       
-      
-      // Agregar las divisiones como asociaciones virtuales
-      const virtualAssociations = accountGroups.map(group => ({
-        _id: `group_${group._id}`,
-        user: user._id,
-        account: {
-          _id: user.account,
-          nombre: associations[0]?.account?.nombre || 'Cuenta'
-        },
-        division: {
-          _id: group._id,
-          nombre: group.nombre
-        },
-        student: null,
-        role: {
-          _id: user.role._id,
-          nombre: user.role.nombre
-        },
-        status: 'active',
-        createdBy: {
-          _id: group.creadoPor._id,
-          name: group.creadoPor.name
-        },
-        permissions: [],
-        createdAt: group.createdAt,
-        updatedAt: group.updatedAt,
-        isVirtual: true // Marcar como asociación virtual
-      }));
-      
-      // Combinar asociaciones reales con virtuales
-      associations.push(...virtualAssociations);
+      res.json({
+        success: true,
+        message: 'Login exitoso con Cognito',
+        data: {
+          user: {
+            email: email,
+            name: userInfo.success ? userInfo.user.name : email.split('@')[0],
+            cognitoId: `cognito-${Date.now()}`,
+            source: 'cognito-real',
+            role: { nombre: userRole } // Incluir el rol en la respuesta
+          },
+          token: authResult.tokens.idToken, // Usar el ID token de Cognito
+          accessToken: authResult.tokens.accessToken,
+          refreshToken: authResult.tokens.refreshToken,
+          tokenType: authResult.tokens.tokenType,
+          expiresIn: authResult.tokens.expiresIn
+        }
+      });
+    } else if (authResult.challengeName) {
+      console.log('🔧 [COGNITO LOGIN] Desafío requerido:', authResult.challengeName);
+      res.status(400).json({
+        success: false,
+        message: authResult.message,
+        challengeName: authResult.challengeName,
+        session: authResult.session
+      });
+    } else {
+      console.log('❌ [COGNITO LOGIN] Autenticación fallida:', authResult.message);
+      res.status(401).json({
+        success: false,
+        message: authResult.message
+      });
     }
-    
-    const activeAssociation = associations.length > 0 ? associations[0] : null;
-    
-    // Generar access token (5 minutos)
-    const accessToken = jwt.sign(
-      { 
-        userId: user._id,
-        email: user.email,
-        role: user.role._id
-      },
-      process.env.JWT_SECRET || 'fallback-secret',
-      { expiresIn: '5m' } // 5 minutos
-    );
-    
-    // Generar refresh token (7 días)
-    const deviceInfo = RefreshTokenService.getDeviceInfo(req);
-    const refreshToken = await RefreshTokenService.generateRefreshToken(user._id, deviceInfo);
-    
-    console.log('🔑 [BACKOFFICE LOGIN] Access token generado (5m)');
-    console.log('🔄 [BACKOFFICE LOGIN] Refresh token generado (7d)');
-    
-    // Registrar login exitoso
-    await LoginMonitorService.logLoginAttempt({
-      email: email,
-      ipAddress: ipAddress,
-      userAgent: userAgent,
-      success: true,
-      deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
-      location: await LoginMonitorService.getLocationInfo(ipAddress),
-      metadata: {
-        userId: user._id,
-        role: user.role?.nombre,
-        associationsCount: associations.length,
-        source: 'backoffice'
-      }
-    });
-    
-    return res.json({
-      success: true,
-      message: 'Login exitoso para backoffice',
-      data: {
-        user: userWithProcessedAvatar,
-        accessToken: accessToken,
-        refreshToken: refreshToken.token,
-        activeAssociation: activeAssociation,
-        associations: associations,
-        tokenExpiresIn: 5 * 60 // 5 minutos en segundos
-      }
-    });
 
   } catch (error) {
-    console.error('❌ Error en login de backoffice:', error);
+    console.error('❌ [COGNITO LOGIN] Error:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor'
@@ -1716,7 +1178,7 @@ app.get('/auth/config', (req, res) => {
 });
 
 // Obtener perfil - Versión simplificada para Cognito
-app.get('/users/profile', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/users/profile', authenticateToken, async (req, res) => {
   try {
     const user = req.user;
     
@@ -1825,7 +1287,7 @@ app.get('/users/profile', authenticateToken, setUserInstitution, async (req, res
 });
 
 // Actualizar perfil
-app.put('/users/profile', authenticateToken, setUserInstitution, async (req, res) => {
+app.put('/users/profile', authenticateToken, async (req, res) => {
   try {
     const { name, email, phone, telefono } = req.body;
     const userId = req.user._id;
@@ -2426,7 +1888,7 @@ app.put('/users/reject-association/:associationId', authenticateToken, async (re
 });
 
 // Obtener asociaciones pendientes
-app.get('/users/pending-associations', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/users/pending-associations', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const currentUser = req.user;
 
@@ -2678,7 +2140,7 @@ app.post('/users/register-mobile', async (req, res) => {
 });
 
 // Listar usuarios
-app.get('/users', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/users', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -2764,7 +2226,7 @@ app.get('/users', authenticateToken, setUserInstitution, async (req, res) => {
 // ===== RUTAS DE GRUPOS (DIVISIONES) =====
 
 // Listar grupos con filtros por cuenta
-app.get('/grupos', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/grupos', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -2863,7 +2325,7 @@ app.get('/grupos', authenticateToken, setUserInstitution, async (req, res) => {
 });
 
 // Crear nuevo grupo
-app.post('/grupos', authenticateToken, setUserInstitution, async (req, res) => {
+app.post('/grupos', authenticateToken, async (req, res) => {
   try {
     const { nombre, descripcion, cuentaId } = req.body;
 
@@ -3013,7 +2475,7 @@ app.get('/grupos/mobile/:cuentaId', async (req, res) => {
 });
 
 // Obtener grupo por ID
-app.get('/grupos/:id', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/grupos/:id', authenticateToken, async (req, res) => {
   try {
     const grupo = await Grupo.findById(req.params.id)
       .populate('cuenta', 'nombre razonSocial')
@@ -3076,7 +2538,7 @@ app.get('/grupos/:id', authenticateToken, setUserInstitution, async (req, res) =
 });
 
 // Actualizar grupo
-app.put('/grupos/:id', authenticateToken, setUserInstitution, async (req, res) => {
+app.put('/grupos/:id', authenticateToken, async (req, res) => {
   try {
     const { nombre, descripcion, activo } = req.body;
 
@@ -3151,7 +2613,7 @@ app.put('/grupos/:id', authenticateToken, setUserInstitution, async (req, res) =
 });
 
 // Eliminar grupo
-app.delete('/grupos/:id', authenticateToken, setUserInstitution, async (req, res) => {
+app.delete('/grupos/:id', authenticateToken, async (req, res) => {
   try {
     const grupo = await Grupo.findById(req.params.id)
       .populate('cuenta', 'nombre razonSocial');
@@ -3249,7 +2711,7 @@ app.get('/accounts/mobile', async (req, res) => {
 
 
 // Listar cuentas
-app.get('/accounts', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/accounts', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
@@ -3588,7 +3050,7 @@ app.post('/accounts/:accountId/admin-users', authenticateToken, async (req, res)
 });
 
 // Endpoint para obtener estadísticas del dashboard (solo superadmin)
-app.get('/dashboard/stats', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/dashboard/stats', authenticateToken, async (req, res) => {
   try {
     console.log('🔍 [DASHBOARD STATS] Usuario autenticado:', req.user);
     
@@ -3664,7 +3126,7 @@ app.get('/dashboard/stats', authenticateToken, setUserInstitution, async (req, r
 });
 
 // Endpoint para obtener actividades recientes (solo superadmin)
-app.get('/dashboard/recent-activities', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/dashboard/recent-activities', authenticateToken, async (req, res) => {
   try {
     console.log('🔍 [DASHBOARD ACTIVITIES] Usuario autenticado:', req.user);
     
@@ -4126,7 +3588,7 @@ app.get('/debug/eventos', authenticateToken, async (req, res) => {
 });
 
 // Obtener datos del calendario de eventos
-app.get('/backoffice/eventos/calendar', authenticateToken, async (req, res) => {
+app.get('/backoffice/eventos/calendar', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     // Verificar permisos del usuario
     let currentUser;
@@ -4316,7 +3778,7 @@ app.get('/backoffice/eventos/calendar', authenticateToken, async (req, res) => {
 });
 
 // Listar eventos
-app.get('/events', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/events', authenticateToken, async (req, res) => {
   try {
     const { accountId, search, page = 1, limit = 20 } = req.query;
     const currentUser = req.user;
@@ -4521,7 +3983,7 @@ app.get('/api/student-actions/test', async (req, res) => {
 });
 
 // Obtener todas las acciones configuradas (sin filtros)
-app.get('/api/student-actions', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/api/student-actions', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     // Verificar permisos del usuario
     let currentUser;
@@ -4584,7 +4046,7 @@ app.get('/api/student-actions', authenticateToken, setUserInstitution, async (re
 });
 
 // Obtener acciones configuradas por división
-app.get('/api/student-actions/division/:divisionId', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/api/student-actions/division/:divisionId', authenticateToken, async (req, res) => {
   try {
     const { divisionId } = req.params;
     const currentUser = req.user;
@@ -4620,7 +4082,7 @@ app.get('/api/student-actions/division/:divisionId', authenticateToken, setUserI
 });
 
 // Crear nueva acción para una división
-app.post('/api/student-actions', authenticateToken, setUserInstitution, async (req, res) => {
+app.post('/api/student-actions', authenticateToken, async (req, res) => {
   try {
     const { nombre, descripcion, division, color, orden } = req.body;
     const currentUser = req.user;
@@ -4717,7 +4179,7 @@ app.post('/api/student-actions', authenticateToken, setUserInstitution, async (r
 });
 
 // Actualizar acción existente
-app.put('/api/student-actions/:actionId', authenticateToken, setUserInstitution, async (req, res) => {
+app.put('/api/student-actions/:actionId', authenticateToken, async (req, res) => {
   try {
     const { actionId } = req.params;
     const { nombre, descripcion, categoria, icono, color, orden, activo } = req.body;
@@ -4769,7 +4231,7 @@ app.put('/api/student-actions/:actionId', authenticateToken, setUserInstitution,
 });
 
 // Eliminar acción
-app.delete('/api/student-actions/:actionId', authenticateToken, setUserInstitution, async (req, res) => {
+app.delete('/api/student-actions/:actionId', authenticateToken, async (req, res) => {
   try {
     const { actionId } = req.params;
     const currentUser = req.user;
@@ -4935,7 +4397,7 @@ app.get('/api/student-actions/log/student/:studentId', authenticateToken, async 
 // ===== RUTAS DE ASISTENCIAS =====
 
 // Listar asistencias por cuenta
-app.get('/asistencias', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/asistencias', authenticateToken, async (req, res) => {
   try {
     const { accountId, grupoId, alumnoId, fechaInicio, fechaFin, page = 1, limit = 20 } = req.query;
     const currentUser = req.user;
@@ -5043,7 +4505,7 @@ app.get('/asistencias', authenticateToken, setUserInstitution, async (req, res) 
 });
 
 // Registrar nueva asistencia
-app.post('/asistencias', authenticateToken, setUserInstitution, async (req, res) => {
+app.post('/asistencias', authenticateToken, async (req, res) => {
   try {
     const { alumnoId, accountId, grupoId, fecha, estado, horaLlegada, horaSalida, observaciones } = req.body;
     const currentUser = req.user;
@@ -5308,7 +4770,7 @@ app.delete('/asistencias/:asistenciaId', authenticateToken, async (req, res) => 
 // ===== RUTAS DE ACTIVITY =====
 
 // Listar actividades
-app.get('/activities', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/activities', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const { accountId, userId, tipo, entidad, fechaInicio, fechaFin, page = 1, limit = 50 } = req.query;
     const currentUser = req.user;
@@ -5731,7 +5193,7 @@ app.post('/upload-image', authenticateToken, upload.single('image'), async (req,
 });
 
 // Endpoint para crear actividades
-app.post('/activities', authenticateToken, setUserInstitution, async (req, res) => {
+app.post('/activities', authenticateToken, async (req, res) => {
   try {
     const { titulo, participantes, descripcion, imagenes, accountId, divisionId, userId } = req.body;
 
@@ -5923,7 +5385,7 @@ app.delete('/activities/:id', authenticateToken, async (req, res) => {
 // ===== ENDPOINTS PARA BACKOFFICE - ACTIVIDADES =====
 
 // Endpoint para obtener datos del calendario de actividades
-app.get('/backoffice/actividades/calendar', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/backoffice/actividades/calendar', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const { divisionId, fechaInicio, fechaFin } = req.query;
     
@@ -6343,7 +5805,7 @@ app.delete('/backoffice/actividades/:id', authenticateToken, async (req, res) =>
 });
 
 // Endpoint para obtener actividades de un día específico
-app.get('/backoffice/actividades/day', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/backoffice/actividades/day', authenticateToken, async (req, res) => {
   try {
     const { fecha, divisionId } = req.query;
     const currentUser = req.user;
@@ -6477,7 +5939,7 @@ app.get('/backoffice/actividades/day', authenticateToken, setUserInstitution, as
 // ==================== ENDPOINTS PARA ALUMNOS ====================
 
 // Endpoint para obtener alumnos por institución y división
-app.get('/students', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/students', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const { accountId, divisionId, year } = req.query;
 
@@ -7460,7 +6922,7 @@ app.post('/coordinators/upload-excel', authenticateToken, uploadExcel.single('fi
 });
 
 // Endpoint para obtener coordinadores por división
-app.get('/coordinators/by-division/:divisionId', authenticateToken, async (req, res) => {
+app.get('/coordinators/by-division/:divisionId', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const { divisionId } = req.params;
     const { userId } = req.user;
@@ -7563,7 +7025,7 @@ app.get('/coordinators/by-division/:divisionId', authenticateToken, async (req, 
 });
 
 // Endpoint para obtener todos los coordinadores
-app.get('/coordinators', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/coordinators', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const { userId } = req.user;
 
@@ -7681,7 +7143,7 @@ app.get('/coordinators', authenticateToken, setUserInstitution, async (req, res)
 });
 
 // Endpoint para obtener todos los tutores
-app.get('/tutors', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/tutors', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     console.log('🔍 Obteniendo todos los tutores...');
     console.log('🔍 [TUTORS] req.user:', req.user);
@@ -7807,7 +7269,7 @@ app.get('/tutors', authenticateToken, setUserInstitution, async (req, res) => {
 });
 
 // Endpoint para obtener tutores por división
-app.get('/tutors/by-division/:divisionId', authenticateToken, async (req, res) => {
+app.get('/tutors/by-division/:divisionId', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const { divisionId } = req.params;
     const { userId } = req.user;
@@ -8967,7 +8429,7 @@ app.post('/push/unregister-token', authenticateToken, async (req, res) => {
 // ==================== ENDPOINTS DE NOTIFICACIONES ====================
 
 // Obtener datos del calendario de notificaciones
-app.get('/backoffice/notifications/calendar', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/backoffice/notifications/calendar', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const { 
       divisionId,
@@ -9102,7 +8564,7 @@ app.get('/backoffice/notifications/calendar', authenticateToken, setUserInstitut
 });
 
 // Obtener notificaciones del usuario (endpoint general)
-app.get('/notifications', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/notifications', authenticateToken, async (req, res) => {
   try {
     const userId = req.user._id;
     const { 
@@ -9611,7 +9073,7 @@ app.get('/users/example', (req, res) => {
 });
 
 // Endpoint para obtener datos del usuario actual
-app.get('/users/me', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/users/me', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const user = await User.findById(userId).select('-password');
@@ -9631,7 +9093,7 @@ app.get('/users/me', authenticateToken, setUserInstitution, async (req, res) => 
 });
 
 // Endpoint para obtener un usuario por ID
-app.get('/users/:id', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/users/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
     console.log('🔍 [GET USER BY ID] Obteniendo usuario con ID:', id);
@@ -9950,7 +9412,7 @@ app.get('/notifications/family/unread-count', authenticateToken, async (req, res
 });
 
 // Obtener notificaciones para el backoffice (servicio específico)
-app.get('/backoffice/notifications', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/backoffice/notifications', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     // Verificar permisos del usuario
     let currentUser;
@@ -10113,7 +9575,7 @@ app.get('/backoffice/notifications', authenticateToken, setUserInstitution, asyn
 });
 
 // Enviar nueva notificación
-app.post('/notifications', authenticateToken, setUserInstitution, async (req, res) => {
+app.post('/notifications', authenticateToken, async (req, res) => {
   try {
     console.log('🔔 [SEND NOTIFICATION] Iniciando...');
     const { title, message, type, accountId, divisionId, recipients = [] } = req.body;
@@ -11213,7 +10675,7 @@ app.get('/accounts/:accountId/logo', authenticateToken, async (req, res) => {
 // ===== ENDPOINTS DE ASISTENCIAS PARA BACKOFFICE =====
 
 // Obtener resumen de asistencias para calendario (solo fechas con asistencias)
-app.get('/backoffice/asistencias/calendar', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/backoffice/asistencias/calendar', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const { 
       grupoId,
@@ -11309,7 +10771,7 @@ app.get('/backoffice/asistencias/calendar', authenticateToken, setUserInstitutio
 });
 
 // Obtener asistencias detalladas para un día específico
-app.get('/backoffice/asistencias/day/:fecha', authenticateToken, async (req, res) => {
+app.get('/backoffice/asistencias/day/:fecha', authenticateToken, getCognitoUserInstitution, async (req, res) => {
   try {
     const { fecha } = req.params;
     const { grupoId } = req.query;
@@ -11413,7 +10875,7 @@ app.get('/backoffice/asistencias/day/:fecha', authenticateToken, async (req, res
 });
 
 // Obtener asistencias del backoffice con paginación
-app.get('/backoffice/asistencias', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/backoffice/asistencias', authenticateToken, async (req, res) => {
   try {
     const userId = req.user.userId;
     const { 
@@ -12496,7 +11958,7 @@ app.delete('/pickup/:id', authenticateToken, async (req, res) => {
 });
 
 // Obtener asociaciones del usuario
-app.get('/shared/user', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/shared/user', authenticateToken, async (req, res) => {
   try {
     console.log('🎯 [SHARED GET] Obteniendo asociaciones del usuario');
     const { userId } = req.user;
@@ -12612,14 +12074,6 @@ app.get('/shared/user', authenticateToken, setUserInstitution, async (req, res) 
     res.json({
       success: true,
       data: {
-        user: {
-          _id: req.user._id,
-          email: req.user.email,
-          name: req.user.name,
-          role: req.user.role,
-          status: req.user.status,
-          avatar: req.user.avatar
-        },
         associations: associationsWithSignedUrls
       }
     });
@@ -13268,7 +12722,7 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
 // ========================================
 
 // Obtener la asociación activa del usuario
-app.get('/active-association', authenticateToken, setUserInstitution, async (req, res) => {
+app.get('/active-association', authenticateToken, async (req, res) => {
   try {
     console.log('🎯 [ACTIVE ASSOCIATION GET] Obteniendo asociación activa del usuario');
     const { userId } = req.user;
@@ -13963,729 +13417,6 @@ app.get('/activities/:activityId/favorite/:studentId', authenticateToken, async 
 
   } catch (error) {
     console.error('❌ [FAVORITE CHECK] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor',
-      error: error.message
-    });
-  }
-});
-
-// ===== ENDPOINTS DE 2FA =====
-
-// Generar secreto 2FA
-app.post('/auth/2fa/setup', authenticateToken, async (req, res) => {
-  try {
-    console.log('🔐 [2FA SETUP] Iniciando configuración 2FA para:', req.user.email);
-    
-    const { secret, qrCodeUrl, manualEntryKey } = await TwoFactorAuthService.generateSecret(
-      req.user.userId, 
-      req.user.email
-    );
-    
-    const qrCodeDataURL = await TwoFactorAuthService.generateQRCode(qrCodeUrl);
-    
-    console.log('✅ [2FA SETUP] Configuración 2FA generada exitosamente');
-    
-    res.json({
-      success: true,
-      data: {
-        secret: secret,
-        qrCodeUrl: qrCodeUrl,
-        qrCodeDataURL: qrCodeDataURL,
-        manualEntryKey: manualEntryKey
-      }
-    });
-  } catch (error) {
-    console.error('❌ [2FA SETUP] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error configurando 2FA'
-    });
-  }
-});
-
-// Habilitar 2FA
-app.post('/auth/2fa/enable', authenticateToken, async (req, res) => {
-  try {
-    const { secret, verificationToken } = req.body;
-    
-    console.log('🔐 [2FA ENABLE] Habilitando 2FA para:', req.user.email);
-    
-    const result = await TwoFactorAuthService.enable2FA(
-      req.user.userId, 
-      secret, 
-      verificationToken
-    );
-    
-    console.log('✅ [2FA ENABLE] 2FA habilitado exitosamente');
-    
-    res.json({
-      success: true,
-      data: {
-        backupCodes: result.backupCodes
-      }
-    });
-  } catch (error) {
-    console.error('❌ [2FA ENABLE] Error:', error);
-    res.status(400).json({
-      success: false,
-      message: error.message || 'Error habilitando 2FA'
-    });
-  }
-});
-
-// Deshabilitar 2FA
-app.post('/auth/2fa/disable', authenticateToken, async (req, res) => {
-  try {
-    const { password } = req.body;
-    
-    console.log('🔐 [2FA DISABLE] Deshabilitando 2FA para:', req.user.email);
-    
-    await TwoFactorAuthService.disable2FA(req.user.userId, password);
-    
-    console.log('✅ [2FA DISABLE] 2FA deshabilitado exitosamente');
-    
-    res.json({
-      success: true,
-      message: '2FA deshabilitado exitosamente'
-    });
-  } catch (error) {
-    console.error('❌ [2FA DISABLE] Error:', error);
-    res.status(400).json({
-      success: false,
-      message: error.message || 'Error deshabilitando 2FA'
-    });
-  }
-});
-
-// Verificar código 2FA
-app.post('/auth/2fa/verify', async (req, res) => {
-  try {
-    const { email, token, backupCode } = req.body;
-    
-    console.log('🔍 [2FA VERIFY] Verificando código 2FA para:', email);
-    
-    const user = await User.findOne({ email }).select('+twoFactorSecret +twoFactorBackupCodes');
-    
-    if (!user || !user.twoFactorEnabled) {
-      return res.status(400).json({
-        success: false,
-        message: '2FA no habilitado para este usuario'
-      });
-    }
-    
-    let isValid = false;
-    
-    if (backupCode) {
-      // Verificar código de respaldo
-      isValid = await TwoFactorAuthService.verifyBackupCode(user._id, backupCode);
-    } else if (token) {
-      // Verificar código TOTP
-      isValid = TwoFactorAuthService.verifyToken(user.twoFactorSecret, token);
-    }
-    
-    if (isValid) {
-      console.log('✅ [2FA VERIFY] Código 2FA válido');
-      res.json({
-        success: true,
-        message: 'Código 2FA válido'
-      });
-    } else {
-      console.log('❌ [2FA VERIFY] Código 2FA inválido');
-      res.status(400).json({
-        success: false,
-        message: 'Código 2FA inválido'
-      });
-    }
-  } catch (error) {
-    console.error('❌ [2FA VERIFY] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error verificando código 2FA'
-    });
-  }
-});
-
-// Obtener estado 2FA
-app.get('/auth/2fa/status', authenticateToken, async (req, res) => {
-  try {
-    console.log('🔍 [2FA STATUS] Obteniendo estado 2FA para:', req.user.email);
-    
-    const status = await TwoFactorAuthService.get2FAStatus(req.user.userId);
-    
-    res.json({
-      success: true,
-      data: status
-    });
-  } catch (error) {
-    console.error('❌ [2FA STATUS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error obteniendo estado 2FA'
-    });
-  }
-});
-
-// ===== ENDPOINTS DE MONITOREO DE LOGIN =====
-
-// Obtener estadísticas de login (solo administradores)
-app.get('/admin/login-stats', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { timeWindow = 24 } = req.query;
-    
-    console.log('📊 [LOGIN STATS] Obteniendo estadísticas de login...');
-    
-    const stats = await LoginMonitorService.getLoginStats(parseInt(timeWindow));
-    
-    res.json({
-      success: true,
-      data: stats
-    });
-  } catch (error) {
-    console.error('❌ [LOGIN STATS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error obteniendo estadísticas de login'
-    });
-  }
-});
-
-// Obtener intentos recientes de un usuario
-app.get('/admin/user-login-attempts/:email', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { email } = req.params;
-    const { limit = 10 } = req.query;
-    
-    console.log('📊 [USER ATTEMPTS] Obteniendo intentos de login para:', email);
-    
-    const attempts = await LoginMonitorService.getUserRecentAttempts(email, parseInt(limit));
-    
-    res.json({
-      success: true,
-      data: attempts
-    });
-  } catch (error) {
-    console.error('❌ [USER ATTEMPTS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error obteniendo intentos del usuario'
-    });
-  }
-});
-
-// Obtener intentos sospechosos
-app.get('/admin/suspicious-attempts', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { timeWindow = 24, limit = 50 } = req.query;
-    
-    console.log('🚨 [SUSPICIOUS] Obteniendo intentos sospechosos...');
-    
-    const attempts = await LoginMonitorService.getSuspiciousAttempts(
-      parseInt(timeWindow), 
-      parseInt(limit)
-    );
-    
-    res.json({
-      success: true,
-      data: attempts
-    });
-  } catch (error) {
-    console.error('❌ [SUSPICIOUS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error obteniendo intentos sospechosos'
-    });
-  }
-});
-
-// Limpiar registros antiguos (solo superadmin)
-app.post('/admin/cleanup-login-attempts', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    const { daysToKeep = 30 } = req.body;
-    
-    console.log('🧹 [CLEANUP] Limpiando registros antiguos...');
-    
-    const deletedCount = await LoginMonitorService.cleanupOldAttempts(parseInt(daysToKeep));
-    
-    res.json({
-      success: true,
-      message: `${deletedCount} registros eliminados`,
-      deletedCount: deletedCount
-    });
-  } catch (error) {
-    console.error('❌ [CLEANUP] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error limpiando registros antiguos'
-    });
-  }
-});
-
-// ===== ENDPOINTS DE EXPIRACIÓN DE CONTRASEÑAS =====
-
-// Obtener estado de expiración de contraseña del usuario actual
-app.get('/auth/password-expiration-status', authenticateToken, async (req, res) => {
-  try {
-    console.log('🔍 [PASSWORD EXPIRATION] Obteniendo estado para:', req.user.email);
-    
-    const user = await User.findById(req.user.userId);
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    const isExpired = user.isPasswordExpired();
-    const isExpiringSoon = user.isPasswordExpiringSoon();
-    const daysUntilExpiration = user.getDaysUntilPasswordExpiration();
-    
-    res.json({
-      success: true,
-      data: {
-        isExpired: isExpired,
-        isExpiringSoon: isExpiringSoon,
-        daysUntilExpiration: daysUntilExpiration,
-        passwordExpiresAt: user.passwordExpiresAt,
-        passwordChangedAt: user.passwordChangedAt
-      }
-    });
-  } catch (error) {
-    console.error('❌ [PASSWORD EXPIRATION] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error obteniendo estado de expiración'
-    });
-  }
-});
-
-// Obtener estadísticas de expiración (solo administradores)
-app.get('/admin/password-expiration-stats', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    console.log('📊 [PASSWORD EXPIRATION] Obteniendo estadísticas...');
-    
-    const stats = await PasswordExpirationService.getExpirationStats();
-    
-    res.json({
-      success: true,
-      data: stats
-    });
-  } catch (error) {
-    console.error('❌ [PASSWORD EXPIRATION] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error obteniendo estadísticas de expiración'
-    });
-  }
-});
-
-// Extender expiración de contraseña (solo administradores)
-app.post('/admin/extend-password-expiration', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { userId, days = 90 } = req.body;
-    
-    console.log('⏰ [PASSWORD EXPIRATION] Extendiendo expiración para usuario:', userId);
-    
-    const user = await PasswordExpirationService.extendUserPasswordExpiration(userId, parseInt(days));
-    
-    res.json({
-      success: true,
-      message: `Expiración extendida por ${days} días`,
-      data: {
-        userId: user._id,
-        email: user.email,
-        newExpirationDate: user.passwordExpiresAt
-      }
-    });
-  } catch (error) {
-    console.error('❌ [PASSWORD EXPIRATION] Error:', error);
-    res.status(400).json({
-      success: false,
-      message: error.message || 'Error extendiendo expiración'
-    });
-  }
-});
-
-// Ejecutar verificación manual de expiraciones (solo superadmin)
-app.post('/admin/check-password-expirations', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    console.log('🔍 [PASSWORD EXPIRATION] Ejecutando verificación manual...');
-    
-    const result = await PasswordExpirationService.runScheduledCheck();
-    
-    res.json({
-      success: true,
-      message: 'Verificación de expiraciones completada',
-      data: result
-    });
-  } catch (error) {
-    console.error('❌ [PASSWORD EXPIRATION] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error ejecutando verificación de expiraciones'
-    });
-  }
-});
-
-// ====================================================================================================
-// RUTAS PARA ACCIONES DE ESTUDIANTES
-// ====================================================================================================
-
-// Registrar acción de estudiante (para coordinadores)
-app.post('/api/student-actions/log', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    const { estudiante, accion, comentarios, imagenes, fechaAccion } = req.body;
-    const currentUser = req.user;
-
-    console.log('🎯 [STUDENT ACTION LOG] Registrando acción:', { estudiante, accion, comentarios });
-
-    // Verificar que el estudiante existe y pertenece a la institución
-    const student = await Student.findById(estudiante).populate('division');
-    if (!student) {
-      return res.status(404).json({ success: false, message: 'Estudiante no encontrado' });
-    }
-
-    // Verificar que la acción existe
-    const action = await StudentAction.findById(accion);
-    if (!action) {
-      return res.status(404).json({ success: false, message: 'Acción no encontrada' });
-    }
-
-    // Verificar que la división del estudiante pertenece a la institución del usuario
-    if (req.userInstitution && student.division.cuenta.toString() !== req.userInstitution._id.toString()) {
-      return res.status(403).json({ success: false, message: 'El estudiante no pertenece a tu institución' });
-    }
-
-    // Crear el log de acción
-    const actionLog = new StudentActionLog({
-      estudiante,
-      accion,
-      registradoPor: currentUser._id,
-      division: student.division._id,
-      account: student.division.cuenta,
-      fechaAccion: fechaAccion ? new Date(fechaAccion) : new Date(),
-      comentarios,
-      imagenes: imagenes || [],
-      estado: 'registrado'
-    });
-
-    await actionLog.save();
-
-    // Poblar los datos para la respuesta
-    await actionLog.populate([
-      { path: 'estudiante', select: 'nombre apellido avatar' },
-      { path: 'accion', select: 'nombre descripcion color categoria' },
-      { path: 'registradoPor', select: 'name email' },
-      { path: 'division', select: 'nombre descripcion' }
-    ]);
-
-    console.log('✅ [STUDENT ACTION LOG] Acción registrada:', actionLog._id);
-
-    res.json({
-      success: true,
-      message: 'Acción registrada exitosamente',
-      data: actionLog
-    });
-
-  } catch (error) {
-    console.error('❌ [STUDENT ACTION LOG] Error registrando acción:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor',
-      error: error.message
-    });
-  }
-});
-
-// Obtener acciones de un estudiante (para familias)
-app.get('/api/student-actions/log/student/:studentId', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    const { studentId } = req.params;
-    const { fecha, fechaInicio, fechaFin } = req.query;
-    const currentUser = req.user;
-
-    console.log('🎯 [STUDENT ACTION LOG] Obteniendo acciones para estudiante:', studentId);
-
-    // Verificar que el estudiante existe
-    const student = await Student.findById(studentId).populate('division');
-    if (!student) {
-      return res.status(404).json({ success: false, message: 'Estudiante no encontrado' });
-    }
-
-    // Verificar que el usuario tiene acceso al estudiante
-    // Para familias: verificar que el estudiante está en sus asociaciones
-    // Para coordinadores: verificar que el estudiante está en su división
-    let hasAccess = false;
-    
-    if (currentUser.role.nombre === 'familyadmin' || currentUser.role.nombre === 'familyview') {
-      // Para familias, verificar que el estudiante está en sus asociaciones
-      const association = await Shared.findOne({ 
-        user: currentUser._id, 
-        student: studentId, 
-        status: 'active' 
-      });
-      hasAccess = !!association;
-    } else if (currentUser.role.nombre === 'coordinador') {
-      // Para coordinadores, verificar que el estudiante está en su división
-      hasAccess = student.division._id.toString() === currentUser.division?.toString();
-    } else if (currentUser.role.nombre === 'adminaccount') {
-      // Para adminaccount, verificar que pertenece a la misma institución
-      hasAccess = student.division.cuenta.toString() === req.userInstitution._id.toString();
-    }
-
-    if (!hasAccess) {
-      return res.status(403).json({ success: false, message: 'No tienes acceso a este estudiante' });
-    }
-
-    // Construir filtros de fecha
-    let dateFilter = {};
-    if (fecha) {
-      // Filtro por fecha específica
-      const startDate = new Date(fecha);
-      startDate.setHours(0, 0, 0, 0);
-      const endDate = new Date(fecha);
-      endDate.setHours(23, 59, 59, 999);
-      dateFilter = { fechaAccion: { $gte: startDate, $lte: endDate } };
-    } else if (fechaInicio && fechaFin) {
-      // Filtro por rango de fechas
-      dateFilter = { 
-        fechaAccion: { 
-          $gte: new Date(fechaInicio), 
-          $lte: new Date(fechaFin) 
-        } 
-      };
-    }
-
-    // Buscar las acciones
-    const actions = await StudentActionLog.find({
-      estudiante: studentId,
-      ...dateFilter
-    })
-    .populate('accion', 'nombre descripcion color categoria icono')
-    .populate('registradoPor', 'name email')
-    .populate('division', 'nombre descripcion')
-    .sort({ fechaAccion: -1 });
-
-    console.log('✅ [STUDENT ACTION LOG] Acciones obtenidas:', actions.length);
-
-    res.json({
-      success: true,
-      message: 'Acciones obtenidas exitosamente',
-      data: actions
-    });
-
-  } catch (error) {
-    console.error('❌ [STUDENT ACTION LOG] Error obteniendo acciones:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor',
-      error: error.message
-    });
-  }
-});
-
-// Obtener acciones por división (para coordinadores)
-app.get('/api/student-actions/log/division/:divisionId', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    const { divisionId } = req.params;
-    const { fecha, fechaInicio, fechaFin } = req.query;
-    const currentUser = req.user;
-
-    console.log('🎯 [STUDENT ACTION LOG] Obteniendo acciones para división:', divisionId);
-
-    // Verificar que la división existe
-    const division = await Grupo.findById(divisionId);
-    if (!division) {
-      return res.status(404).json({ success: false, message: 'División no encontrada' });
-    }
-
-    // Verificar que el usuario tiene acceso a la división
-    if (req.userInstitution && division.cuenta.toString() !== req.userInstitution._id.toString()) {
-      return res.status(403).json({ success: false, message: 'No tienes acceso a esta división' });
-    }
-
-    // Construir filtros de fecha
-    let dateFilter = {};
-    if (fecha) {
-      const startDate = new Date(fecha);
-      startDate.setHours(0, 0, 0, 0);
-      const endDate = new Date(fecha);
-      endDate.setHours(23, 59, 59, 999);
-      dateFilter = { fechaAccion: { $gte: startDate, $lte: endDate } };
-    } else if (fechaInicio && fechaFin) {
-      dateFilter = { 
-        fechaAccion: { 
-          $gte: new Date(fechaInicio), 
-          $lte: new Date(fechaFin) 
-        } 
-      };
-    }
-
-    // Buscar las acciones
-    const actions = await StudentActionLog.find({
-      division: divisionId,
-      ...dateFilter
-    })
-    .populate('estudiante', 'nombre apellido avatar')
-    .populate('accion', 'nombre descripcion color categoria icono')
-    .populate('registradoPor', 'name email')
-    .sort({ fechaAccion: -1 });
-
-    console.log('✅ [STUDENT ACTION LOG] Acciones obtenidas:', actions.length);
-
-    res.json({
-      success: true,
-      message: 'Acciones obtenidas exitosamente',
-      data: actions
-    });
-
-  } catch (error) {
-    console.error('❌ [STUDENT ACTION LOG] Error obteniendo acciones:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor',
-      error: error.message
-    });
-  }
-});
-
-// Obtener acciones por cuenta (para backoffice)
-app.get('/api/student-actions/log/account/:accountId', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    const { accountId } = req.params;
-    const { fecha, fechaInicio, fechaFin, divisionId } = req.query;
-    const currentUser = req.user;
-
-    console.log('🎯 [STUDENT ACTION LOG] Obteniendo acciones para cuenta:', accountId);
-
-    // Verificar que el usuario tiene acceso a la cuenta
-    if (req.userInstitution && accountId !== req.userInstitution._id.toString()) {
-      return res.status(403).json({ success: false, message: 'No tienes acceso a esta cuenta' });
-    }
-
-    // Construir filtros
-    let filters = { account: accountId };
-    
-    if (divisionId) {
-      filters.division = divisionId;
-    }
-
-    // Filtros de fecha
-    if (fecha) {
-      const startDate = new Date(fecha);
-      startDate.setHours(0, 0, 0, 0);
-      const endDate = new Date(fecha);
-      endDate.setHours(23, 59, 59, 999);
-      filters.fechaAccion = { $gte: startDate, $lte: endDate };
-    } else if (fechaInicio && fechaFin) {
-      filters.fechaAccion = { 
-        $gte: new Date(fechaInicio), 
-        $lte: new Date(fechaFin) 
-      };
-    }
-
-    // Buscar las acciones
-    const actions = await StudentActionLog.find(filters)
-    .populate('estudiante', 'nombre apellido avatar')
-    .populate('accion', 'nombre descripcion color categoria icono')
-    .populate('registradoPor', 'name email')
-    .populate('division', 'nombre descripcion')
-    .sort({ fechaAccion: -1 });
-
-    console.log('✅ [STUDENT ACTION LOG] Acciones obtenidas:', actions.length);
-
-    res.json({
-      success: true,
-      message: 'Acciones obtenidas exitosamente',
-      data: actions
-    });
-
-  } catch (error) {
-    console.error('❌ [STUDENT ACTION LOG] Error obteniendo acciones:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor',
-      error: error.message
-    });
-  }
-});
-
-// Endpoint temporal para crear estudiante de prueba
-app.post('/api/admin/create-test-student', authenticateToken, async (req, res) => {
-  try {
-    console.log('🔧 [ADMIN] Creando estudiante de prueba...');
-    
-    // Crear estudiante de prueba
-    const testStudent = new Student({
-      nombre: 'Juan',
-      apellido: 'Pérez',
-      email: 'juan.perez@test.com',
-      division: '68dc5fa9626391464e2bcbd6', // SALA VERDE
-      account: '68dc5f1a626391464e2bcb3c', // BAMBINO
-      activo: true,
-      creadoPor: req.user._id
-    });
-    
-    await testStudent.save();
-    
-    console.log('✅ [ADMIN] Estudiante de prueba creado:', testStudent._id);
-    
-    res.json({
-      success: true,
-      message: 'Estudiante de prueba creado exitosamente',
-      data: {
-        studentId: testStudent._id,
-        nombre: testStudent.nombre,
-        apellido: testStudent.apellido
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ [ADMIN] Error creando estudiante de prueba:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor',
-      error: error.message
-    });
-  }
-});
-
-// Endpoint temporal para asignar cuenta al usuario adminaccount
-app.post('/api/admin/assign-account', authenticateToken, async (req, res) => {
-  try {
-    console.log('🔧 [ADMIN] Asignando cuenta al usuario adminaccount...');
-    
-    const user = await User.findOne({ email: 'matilanzaco@gmail.com' });
-    
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
-    }
-    
-    console.log('👤 [ADMIN] Usuario encontrado:', user.email);
-    console.log('👤 [ADMIN] Cuenta actual:', user.account);
-    
-    // Asignar la cuenta BAMBINO
-    const accountId = '68dc5f1a626391464e2bcb3c';
-    user.account = accountId;
-    
-    await user.save();
-    
-    console.log('✅ [ADMIN] Cuenta asignada exitosamente');
-    console.log('✅ [ADMIN] Nueva cuenta:', user.account);
-    
-    res.json({
-      success: true,
-      message: 'Cuenta asignada exitosamente',
-      data: {
-        userId: user._id,
-        email: user.email,
-        account: user.account
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ [ADMIN] Error asignando cuenta:', error);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor',

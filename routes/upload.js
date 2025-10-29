@@ -21,6 +21,21 @@ const uploadToMemory = multer({
   }
 });
 
+// Configurar multer para videos en memoria (para S3)
+const uploadVideoToMemory = multer({
+  storage: memoryStorage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB máximo para videos
+  },
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype.startsWith('video/')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Solo se permiten archivos de video'), false);
+    }
+  }
+});
+
 // Upload de un solo archivo
 router.post('/single', authenticateToken, (req, res) => {
   uploadSingle(req, res, async (err) => {
@@ -306,6 +321,52 @@ router.post('/s3/image', authenticateToken, uploadToMemory.single('image'), asyn
     res.status(500).json({
       success: false,
       message: 'Error al subir la imagen a S3',
+      error: error.message
+    });
+  }
+});
+
+// Upload de video a S3
+router.post('/s3/video', authenticateToken, uploadVideoToMemory.single('video'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No se proporcionó ningún video'
+      });
+    }
+
+    // Upload directo a S3 sin multer-s3
+    const { v4: uuidv4 } = require('uuid');
+    const { s3 } = require('../config/s3.config');
+
+    // Forzar extensión MP4 para todos los videos
+    const fileName = `${uuidv4()}.mp4`;
+    const key = `uploads/${fileName}`;
+
+    const uploadParams = {
+      Bucket: process.env.AWS_S3_BUCKET_NAME,
+      Key: key,
+      Body: req.file.buffer,
+      ContentType: 'video/mp4' // Forzar content type MP4
+    };
+
+    const result = await s3.upload(uploadParams).promise();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Video subido exitosamente',
+      videoKey: key,
+      data: {
+        videoKey: key,
+        videoUrl: result.Location
+      }
+    });
+  } catch (error) {
+    console.error('Error en upload S3 video:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al subir el video a S3',
       error: error.message
     });
   }

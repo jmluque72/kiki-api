@@ -1,0 +1,184 @@
+const { CognitoJwtVerifier } = require('aws-jwt-verify');
+
+// Configuración de Cognito
+const cognitoConfig = {
+  userPoolId: process.env.COGNITO_USER_POOL_ID,
+  clientId: process.env.COGNITO_CLIENT_ID,
+  tokenUse: 'id' // Verificar ID tokens
+};
+
+// Verificador de JWT de Cognito
+let cognitoVerifier = null;
+if (cognitoConfig.userPoolId && cognitoConfig.clientId) {
+  try {
+    cognitoVerifier = CognitoJwtVerifier.create(cognitoConfig);
+    console.log('✅ [COGNITO REAL AUTH] Verificador de JWT configurado correctamente');
+  } catch (error) {
+    console.error('❌ [COGNITO REAL AUTH] Error configurando verificador:', error.message);
+  }
+} else {
+  console.log('⚠️ [COGNITO REAL AUTH] Variables de entorno de Cognito no configuradas');
+}
+
+/**
+ * Middleware de autenticación con Cognito REAL
+ */
+const authenticateToken = async (req, res, next) => {
+  try {
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+
+    if (!token) {
+      console.log('❌ [COGNITO REAL AUTH] No se proporcionó token de autorización');
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Token de autorización requerido' 
+      });
+    }
+
+    // Si no hay verificador configurado, usar modo simulado
+    if (!cognitoVerifier) {
+      console.log('⚠️ [COGNITO REAL AUTH] Verificador no configurado, usando modo simulado');
+      
+      // Verificar si es un token simulado
+      if (token.startsWith('cognito-jwt-')) {
+        console.log('✅ [COGNITO REAL AUTH] Token simulado detectado');
+        
+        // Crear usuario simulado con ObjectId válido
+        const mongoose = require('mongoose');
+        const crypto = require('crypto');
+        
+        const emailHash = crypto.createHash('md5').update('admin@kiki.com.ar').digest('hex');
+        const objectId = new mongoose.Types.ObjectId(emailHash.substring(0, 24));
+
+        req.user = {
+          _id: objectId,
+          email: 'admin@kiki.com.ar',
+          name: 'admin',
+          role: { nombre: 'superadmin' }, // Estructura esperada por el sistema
+          status: 'approved',
+          isCognitoUser: true,
+          cognitoId: 'simulated',
+          source: 'cognito-simulated'
+        };
+        
+        return next();
+      } else {
+        return res.status(401).json({ 
+          success: false, 
+          message: 'Token inválido' 
+        });
+      }
+    }
+
+    // Verificar token real de Cognito
+    console.log('🔍 [COGNITO REAL AUTH] Verificando token real de Cognito...');
+    const payload = await cognitoVerifier.verify(token);
+    console.log('✅ [COGNITO REAL AUTH] Token de Cognito verificado:', payload.sub);
+
+    // Determinar rol basado en grupos de Cognito
+    let userRole = 'superadmin'; // Rol por defecto
+    if (payload['cognito:groups'] && payload['cognito:groups'].length > 0) {
+      // Si hay grupos, usar el primer grupo como rol
+      userRole = payload['cognito:groups'][0];
+    }
+
+    // Crear un ObjectId válido para MongoDB basado en el email
+    const mongoose = require('mongoose');
+    const crypto = require('crypto');
+    
+    // Generar un ObjectId determinístico basado en el email
+    const emailHash = crypto.createHash('md5').update(payload.email).digest('hex');
+    const objectId = new mongoose.Types.ObjectId(emailHash.substring(0, 24));
+
+    // Crear objeto de usuario desde el payload de Cognito
+    req.user = {
+      _id: objectId, // ObjectId válido para MongoDB
+      email: payload.email,
+      name: payload.name || payload.email,
+      role: { nombre: userRole }, // Estructura esperada por el sistema
+      status: 'approved',
+      isCognitoUser: true,
+      cognitoId: payload.sub,
+      groups: payload['cognito:groups'] || [],
+      // Atributos adicionales de Cognito
+      emailVerified: payload.email_verified,
+      tokenUse: payload.token_use,
+      authTime: payload.auth_time,
+      exp: payload.exp,
+      iat: payload.iat
+    };
+    
+    console.log('✅ [COGNITO REAL AUTH] Usuario autenticado:', req.user.email);
+    console.log('🔍 [COGNITO REAL AUTH] Rol asignado:', req.user.role);
+    console.log('🔍 [COGNITO REAL AUTH] Grupos de Cognito:', payload['cognito:groups']);
+    return next();
+
+  } catch (error) {
+    console.error('❌ [COGNITO REAL AUTH] Error verificando token:', error);
+    
+    // Si es un error de verificación de JWT, intentar modo simulado
+    if (error.name === 'JwtParseError' || error.name === 'JwtVerificationError') {
+      console.log('⚠️ [COGNITO REAL AUTH] Token no válido, intentando modo simulado...');
+      
+      // Verificar si es un token simulado
+      if (token.startsWith('cognito-jwt-')) {
+        console.log('✅ [COGNITO REAL AUTH] Token simulado detectado en fallback');
+        
+        // Crear usuario simulado con ObjectId válido
+        const mongoose = require('mongoose');
+        const crypto = require('crypto');
+        
+        const emailHash = crypto.createHash('md5').update('admin@kiki.com.ar').digest('hex');
+        const objectId = new mongoose.Types.ObjectId(emailHash.substring(0, 24));
+
+        req.user = {
+          _id: objectId,
+          email: 'admin@kiki.com.ar',
+          name: 'admin',
+          role: { nombre: 'superadmin' }, // Estructura esperada por el sistema
+          status: 'approved',
+          isCognitoUser: true,
+          cognitoId: 'simulated',
+          source: 'cognito-simulated'
+        };
+        
+        return next();
+      }
+    }
+    
+    return res.status(401).json({ 
+      success: false, 
+      message: 'Token de Cognito inválido o expirado', 
+      error: error.message 
+    });
+  }
+};
+
+// Funciones de autorización
+const requireRole = (roles) => (req, res, next) => {
+  if (!req.user || !req.user.role) {
+    return res.status(403).json({ success: false, message: 'Acceso denegado: Usuario sin rol' });
+  }
+  
+  // Manejar tanto estructura de objeto { nombre: 'rol' } como string directo
+  const userRole = typeof req.user.role === 'string' ? req.user.role : req.user.role.nombre;
+  
+  if (!roles.includes(userRole)) {
+    console.log('❌ [REQUIRE ROLE] Rol insuficiente:', userRole, 'Requerido:', roles);
+    return res.status(403).json({ success: false, message: 'Acceso denegado: Rol insuficiente' });
+  }
+  
+  console.log('✅ [REQUIRE ROLE] Rol autorizado:', userRole);
+  next();
+};
+
+const requireAdmin = requireRole(['adminaccount', 'superadmin']);
+const requireSuperAdmin = requireRole(['superadmin']);
+
+module.exports = {
+  authenticateToken,
+  requireRole,
+  requireAdmin,
+  requireSuperAdmin
+};

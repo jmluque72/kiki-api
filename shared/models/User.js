@@ -26,11 +26,11 @@ const userSchema = new mongoose.Schema({
     sparse: true, // Permite múltiples valores null/undefined
     trim: true
   },
-  password: {
-    type: String,
-    required: [true, 'La contraseña es obligatoria'],
-    minlength: [6, 'La contraseña debe tener al menos 6 caracteres']
-  },
+        password: {
+          type: String,
+          required: [true, 'La contraseña es obligatoria'],
+          minlength: [6, 'La contraseña debe tener al menos 6 caracteres']
+        },
   role: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Role',
@@ -82,7 +82,36 @@ const userSchema = new mongoose.Schema({
   avatar: {
     type: String,
     trim: true
-  }
+  },
+  // Campos para 2FA
+  twoFactorEnabled: {
+    type: Boolean,
+    default: false
+  },
+  twoFactorSecret: {
+    type: String,
+    select: false // No incluir en consultas por defecto
+  },
+  twoFactorBackupCodes: [{
+    type: String,
+    select: false
+  }],
+  // Campos para expiración de contraseñas
+  passwordChangedAt: {
+    type: Date,
+    default: Date.now
+  },
+  passwordExpiresAt: {
+    type: Date,
+    default: function() {
+      // Por defecto, 90 días desde ahora
+      return new Date(Date.now() + 90 * 24 * 60 * 60 * 1000);
+    }
+  },
+  passwordExpirationWarnings: [{
+    type: Date,
+    default: []
+  }]
 }, {
   timestamps: true,
   toJSON: {
@@ -101,6 +130,12 @@ userSchema.pre('save', async function(next) {
   try {
     const salt = await bcrypt.genSalt(12);
     this.password = await bcrypt.hash(this.password, salt);
+    
+    // Actualizar fechas de contraseña
+    this.passwordChangedAt = new Date();
+    this.passwordExpiresAt = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000); // 90 días
+    this.passwordExpirationWarnings = []; // Limpiar advertencias
+    
     next();
   } catch (error) {
     next(error);
@@ -147,6 +182,45 @@ userSchema.methods.isAdmin = async function() {
 userSchema.methods.updateLastLogin = async function() {
   this.lastLogin = new Date();
   await this.save();
+};
+
+// Método para verificar si la contraseña ha expirado
+userSchema.methods.isPasswordExpired = function() {
+  return new Date() > this.passwordExpiresAt;
+};
+
+// Método para verificar si la contraseña está próxima a expirar
+userSchema.methods.isPasswordExpiringSoon = function(daysThreshold = 7) {
+  const thresholdDate = new Date(Date.now() + daysThreshold * 24 * 60 * 60 * 1000);
+  return this.passwordExpiresAt <= thresholdDate;
+};
+
+// Método para obtener días hasta la expiración
+userSchema.methods.getDaysUntilPasswordExpiration = function() {
+  const now = new Date();
+  const diffTime = this.passwordExpiresAt - now;
+  const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  return Math.max(0, diffDays);
+};
+
+// Método para extender la expiración de contraseña
+userSchema.methods.extendPasswordExpiration = async function(days = 90) {
+  this.passwordExpiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+  this.passwordExpirationWarnings = []; // Limpiar advertencias
+  await this.save();
+};
+
+// Método para marcar advertencia de expiración
+userSchema.methods.markPasswordExpirationWarning = async function() {
+  const now = new Date();
+  const warningExists = this.passwordExpirationWarnings.some(warning => 
+    Math.abs(warning - now) < 24 * 60 * 60 * 1000 // 24 horas
+  );
+  
+  if (!warningExists) {
+    this.passwordExpirationWarnings.push(now);
+    await this.save();
+  }
 };
 
 // Índices para optimizar consultas (email ya tiene índice único automático)
