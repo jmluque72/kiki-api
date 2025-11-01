@@ -69,8 +69,19 @@ const setUserInstitution = async (req, res, next) => {
     console.log('🔧 [MIDDLEWARE] req.user.role?.nombre:', req.user?.role?.nombre);
     console.log('🔧 [MIDDLEWARE] req.user.account:', req.user?.account);
     
-    if (req.user && req.user.role?.nombre === 'adminaccount') {
-      console.log('🔧 [MIDDLEWARE] Usuario adminaccount detectado...');
+    // Obtener el nombre del rol de manera flexible
+    let roleName = null;
+    if (typeof req.user.role === 'string') {
+      roleName = req.user.role;
+    } else if (req.user.role?.nombre) {
+      roleName = req.user.role.nombre;
+    }
+    
+    console.log('🔧 [MIDDLEWARE] Nombre del rol detectado:', roleName);
+    console.log('🔧 [MIDDLEWARE] ¿Es adminaccount o accountadmin?:', roleName === 'adminaccount' || roleName === 'accountadmin');
+    
+    if (req.user && (roleName === 'adminaccount' || roleName === 'accountadmin')) {
+      console.log('🔧 [MIDDLEWARE] Usuario adminaccount/accountadmin detectado...');
       
       // Si no tiene cuenta asignada, usar la cuenta BAMBINO por defecto
       let accountId = req.user.account;
@@ -1038,7 +1049,85 @@ app.post('/users/login', loginRateLimit, async (req, res) => {
       associations.push(...virtualAssociations);
     }
     
-    const activeAssociation = associations.length > 0 ? associations[0] : null;
+    // Procesar avatares de estudiantes en las asociaciones
+    console.log('🔍 [LOGIN] ===== PROCESANDO AVATARES DE ESTUDIANTES =====');
+    console.log('🔍 [LOGIN] Total de asociaciones:', associations.length);
+    
+    const associationsWithProcessedAvatars = await Promise.all(associations.map(async (association, index) => {
+      // Si es una asociación virtual (sin estudiante), retornar tal cual
+      if (association.isVirtual || !association.student) {
+        return association;
+      }
+      
+      // Convertir a objeto plano para poder modificar propiedades
+      const associationObj = association.toObject ? association.toObject() : association;
+      
+      if (associationObj.student && associationObj.student.avatar) {
+        try {
+          console.log(`🔍 [LOGIN] Procesando avatar ${index + 1}/${associations.length} - Estudiante:`, associationObj.student._id);
+          console.log('🔍 [LOGIN] Avatar original:', associationObj.student.avatar);
+          
+          const originalAvatar = associationObj.student.avatar;
+          let processedAvatar = originalAvatar;
+          
+          // Verificar si es una key de S3 o una URL local
+          if (originalAvatar.startsWith('http')) {
+            console.log('🔍 [LOGIN] Es una URL completa, usando tal como está');
+            // Es una URL completa (puede ser local o S3), no hacer nada
+          } else if (originalAvatar.includes('students/')) {
+            // Es una key de S3 para estudiantes, generar URL firmada
+            console.log('🔍 [LOGIN] Es una key de S3 para estudiantes, generando URL firmada');
+            console.log('🔍 [LOGIN] Key original:', originalAvatar);
+            
+            try {
+              const { generateSignedUrl } = require('./config/s3.config');
+              console.log('🔍 [LOGIN] Función generateSignedUrl importada correctamente');
+              
+              const signedUrl = await generateSignedUrl(originalAvatar, 172800); // 2 días
+              console.log('🔍 [LOGIN] URL firmada generada exitosamente:', signedUrl);
+              console.log('🔍 [LOGIN] Tipo de URL firmada:', typeof signedUrl);
+              console.log('🔍 [LOGIN] Longitud de URL firmada:', signedUrl ? signedUrl.length : 'null');
+              
+              processedAvatar = signedUrl || originalAvatar; // Fallback si signedUrl es null
+              console.log('🔍 [LOGIN] Avatar procesado:', processedAvatar);
+            } catch (s3Error) {
+              console.error('❌ [LOGIN] Error generando URL firmada:', s3Error);
+              console.error('❌ [LOGIN] Error details:', {
+                message: s3Error.message,
+                stack: s3Error.stack,
+                name: s3Error.name
+              });
+              // Mantener la key original si falla
+              console.log('🔍 [LOGIN] Manteniendo key original:', originalAvatar);
+              processedAvatar = originalAvatar;
+            }
+          } else {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${originalAvatar.split('/').pop()}`;
+            console.log('🔍 [LOGIN] URL local generada:', localUrl);
+            processedAvatar = localUrl;
+          }
+          
+          // Asignar el avatar procesado
+          associationObj.student.avatar = processedAvatar;
+          console.log('✅ [LOGIN] Avatar procesado asignado:', associationObj.student.avatar);
+        } catch (error) {
+          console.error('❌ [LOGIN] Error procesando avatar del estudiante:', associationObj.student?._id, error);
+          // Si falla, usar URL directa
+          if (associationObj.student && associationObj.student.avatar) {
+            const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${associationObj.student.avatar.split('/').pop()}`;
+            console.log('🔍 [LOGIN] Usando URL de fallback:', fallbackUrl);
+            associationObj.student.avatar = fallbackUrl;
+          }
+        }
+      } else {
+        console.log('🔍 [LOGIN] Estudiante sin avatar:', associationObj.student?._id);
+      }
+      
+      return associationObj;
+    }));
+    
+    const activeAssociation = associationsWithProcessedAvatars.length > 0 ? associationsWithProcessedAvatars[0] : null;
     
     // Generar access token (5 minutos)
     const accessToken = jwt.sign(
@@ -1069,7 +1158,7 @@ app.post('/users/login', loginRateLimit, async (req, res) => {
       metadata: {
         userId: user._id,
         role: user.role?.nombre,
-        associationsCount: associations.length
+        associationsCount: associationsWithProcessedAvatars.length
       }
     });
     
@@ -1080,7 +1169,7 @@ app.post('/users/login', loginRateLimit, async (req, res) => {
         accessToken: accessToken,
         refreshToken: refreshToken.token,
         activeAssociation: activeAssociation,
-        associations: associations,
+        associations: associationsWithProcessedAvatars,
         tokenExpiresIn: 5 * 60 // 5 minutos en segundos
       }
     });
@@ -1647,7 +1736,85 @@ app.post('/auth/cognito-login', loginRateLimit, async (req, res) => {
       associations.push(...virtualAssociations);
     }
     
-    const activeAssociation = associations.length > 0 ? associations[0] : null;
+    // Procesar avatares de estudiantes en las asociaciones
+    console.log('🔍 [BACKOFFICE LOGIN] ===== PROCESANDO AVATARES DE ESTUDIANTES =====');
+    console.log('🔍 [BACKOFFICE LOGIN] Total de asociaciones:', associations.length);
+    
+    const associationsWithProcessedAvatars = await Promise.all(associations.map(async (association, index) => {
+      // Si es una asociación virtual (sin estudiante), retornar tal cual
+      if (association.isVirtual || !association.student) {
+        return association;
+      }
+      
+      // Convertir a objeto plano para poder modificar propiedades
+      const associationObj = association.toObject ? association.toObject() : association;
+      
+      if (associationObj.student && associationObj.student.avatar) {
+        try {
+          console.log(`🔍 [BACKOFFICE LOGIN] Procesando avatar ${index + 1}/${associations.length} - Estudiante:`, associationObj.student._id);
+          console.log('🔍 [BACKOFFICE LOGIN] Avatar original:', associationObj.student.avatar);
+          
+          const originalAvatar = associationObj.student.avatar;
+          let processedAvatar = originalAvatar;
+          
+          // Verificar si es una key de S3 o una URL local
+          if (originalAvatar.startsWith('http')) {
+            console.log('🔍 [BACKOFFICE LOGIN] Es una URL completa, usando tal como está');
+            // Es una URL completa (puede ser local o S3), no hacer nada
+          } else if (originalAvatar.includes('students/')) {
+            // Es una key de S3 para estudiantes, generar URL firmada
+            console.log('🔍 [BACKOFFICE LOGIN] Es una key de S3 para estudiantes, generando URL firmada');
+            console.log('🔍 [BACKOFFICE LOGIN] Key original:', originalAvatar);
+            
+            try {
+              const { generateSignedUrl } = require('./config/s3.config');
+              console.log('🔍 [BACKOFFICE LOGIN] Función generateSignedUrl importada correctamente');
+              
+              const signedUrl = await generateSignedUrl(originalAvatar, 172800); // 2 días
+              console.log('🔍 [BACKOFFICE LOGIN] URL firmada generada exitosamente:', signedUrl);
+              console.log('🔍 [BACKOFFICE LOGIN] Tipo de URL firmada:', typeof signedUrl);
+              console.log('🔍 [BACKOFFICE LOGIN] Longitud de URL firmada:', signedUrl ? signedUrl.length : 'null');
+              
+              processedAvatar = signedUrl || originalAvatar; // Fallback si signedUrl es null
+              console.log('🔍 [BACKOFFICE LOGIN] Avatar procesado:', processedAvatar);
+            } catch (s3Error) {
+              console.error('❌ [BACKOFFICE LOGIN] Error generando URL firmada:', s3Error);
+              console.error('❌ [BACKOFFICE LOGIN] Error details:', {
+                message: s3Error.message,
+                stack: s3Error.stack,
+                name: s3Error.name
+              });
+              // Mantener la key original si falla
+              console.log('🔍 [BACKOFFICE LOGIN] Manteniendo key original:', originalAvatar);
+              processedAvatar = originalAvatar;
+            }
+          } else {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${originalAvatar.split('/').pop()}`;
+            console.log('🔍 [BACKOFFICE LOGIN] URL local generada:', localUrl);
+            processedAvatar = localUrl;
+          }
+          
+          // Asignar el avatar procesado
+          associationObj.student.avatar = processedAvatar;
+          console.log('✅ [BACKOFFICE LOGIN] Avatar procesado asignado:', associationObj.student.avatar);
+        } catch (error) {
+          console.error('❌ [BACKOFFICE LOGIN] Error procesando avatar del estudiante:', associationObj.student?._id, error);
+          // Si falla, usar URL directa
+          if (associationObj.student && associationObj.student.avatar) {
+            const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${associationObj.student.avatar.split('/').pop()}`;
+            console.log('🔍 [BACKOFFICE LOGIN] Usando URL de fallback:', fallbackUrl);
+            associationObj.student.avatar = fallbackUrl;
+          }
+        }
+      } else {
+        console.log('🔍 [BACKOFFICE LOGIN] Estudiante sin avatar:', associationObj.student?._id);
+      }
+      
+      return associationObj;
+    }));
+    
+    const activeAssociation = associationsWithProcessedAvatars.length > 0 ? associationsWithProcessedAvatars[0] : null;
     
     // Generar access token (5 minutos)
     const accessToken = jwt.sign(
@@ -1678,7 +1845,7 @@ app.post('/auth/cognito-login', loginRateLimit, async (req, res) => {
       metadata: {
         userId: user._id,
         role: user.role?.nombre,
-        associationsCount: associations.length,
+        associationsCount: associationsWithProcessedAvatars.length,
         source: 'backoffice'
       }
     });
@@ -1691,7 +1858,7 @@ app.post('/auth/cognito-login', loginRateLimit, async (req, res) => {
         accessToken: accessToken,
         refreshToken: refreshToken.token,
         activeAssociation: activeAssociation,
-        associations: associations,
+        associations: associationsWithProcessedAvatars,
         tokenExpiresIn: 5 * 60 // 5 minutos en segundos
       }
     });
@@ -4626,14 +4793,50 @@ app.post('/api/student-actions', authenticateToken, setUserInstitution, async (r
     const currentUser = req.user;
 
     console.log('🎯 [STUDENT ACTIONS CREATE] Datos recibidos:', { nombre, descripcion, division, color });
-    console.log('🎯 [STUDENT ACTIONS CREATE] Usuario:', currentUser.email, 'Rol:', currentUser.role?.nombre);
+    console.log('🎯 [STUDENT ACTIONS CREATE] Usuario:', currentUser.email);
+    console.log('🎯 [STUDENT ACTIONS CREATE] Rol completo:', JSON.stringify(currentUser.role, null, 2));
+    console.log('🎯 [STUDENT ACTIONS CREATE] Rol nombre:', currentUser.role?.nombre);
+    console.log('🎯 [STUDENT ACTIONS CREATE] Rol es objeto?:', typeof currentUser.role);
+    console.log('🎯 [STUDENT ACTIONS CREATE] Rol es string?:', typeof currentUser.role?.nombre);
+
+    // Obtener el nombre del rol de manera flexible
+    let roleName = null;
+    if (typeof currentUser.role === 'string') {
+      roleName = currentUser.role;
+    } else if (currentUser.role?.nombre) {
+      roleName = currentUser.role.nombre;
+    } else if (currentUser.role?._id) {
+      // Si el rol no está poblado, intentar obtenerlo
+      const Role = require('./shared/models/Role');
+      const roleDoc = await Role.findById(currentUser.role._id);
+      if (roleDoc) {
+        roleName = roleDoc.nombre;
+      }
+    }
+
+    // Normalizar nombre del rol (adminaccount y accountadmin son equivalentes)
+    if (roleName === 'accountadmin') {
+      roleName = 'adminaccount'; // Normalizar a adminaccount
+      console.log('🔄 [STUDENT ACTIONS CREATE] Rol normalizado de accountadmin a adminaccount');
+    }
+
+    console.log('🎯 [STUDENT ACTIONS CREATE] Nombre de rol final:', roleName);
+    console.log('🎯 [STUDENT ACTIONS CREATE] ¿Es adminaccount?:', roleName === 'adminaccount');
+    console.log('🎯 [STUDENT ACTIONS CREATE] ¿Es superadmin?:', roleName === 'superadmin');
 
     // Verificar permisos
-    if (!['adminaccount', 'superadmin'].includes(currentUser.role?.nombre)) {
-      console.log('❌ [STUDENT ACTIONS CREATE] Sin permisos para crear acciones');
+    if (!['adminaccount', 'superadmin'].includes(roleName)) {
+      console.log('❌ [STUDENT ACTIONS CREATE] Sin permisos para crear acciones. Rol:', roleName);
+      console.log('❌ [STUDENT ACTIONS CREATE] Roles permitidos: adminaccount, superadmin (accountadmin se normaliza a adminaccount)');
+      console.log('❌ [STUDENT ACTIONS CREATE] Rol objeto completo:', JSON.stringify(currentUser.role, null, 2));
       return res.status(403).json({
         success: false,
-        message: 'No tienes permisos para crear acciones de estudiantes'
+        message: 'No tienes permisos para crear acciones de estudiantes',
+        debug: {
+          role: roleName,
+          roleObject: currentUser.role,
+          allowedRoles: ['adminaccount', 'superadmin', 'accountadmin']
+        }
       });
     }
 
@@ -4655,11 +4858,14 @@ app.post('/api/student-actions', authenticateToken, setUserInstitution, async (r
       console.log('❌ [STUDENT ACTIONS CREATE] División no encontrada:', division);
       console.log('🔧 [STUDENT ACTIONS CREATE] Creando división de prueba...');
       
+      // Usar req.userInstitution si está disponible, sino currentUser.account
+      const accountId = req.userInstitution?._id || currentUser.account || new mongoose.Types.ObjectId();
+      
       // Crear división de prueba
       divisionExists = new Group({
         _id: division,
         nombre: 'División de Prueba',
-        account: currentUser.account || new mongoose.Types.ObjectId(),
+        account: accountId,
         descripcion: 'División creada automáticamente para pruebas',
         creadoPor: currentUser._id
       });
@@ -4671,18 +4877,46 @@ app.post('/api/student-actions', authenticateToken, setUserInstitution, async (r
     }
     
     // Verificar que la división pertenece a la institución del usuario
-    // Si el usuario tiene una asociación activa, usar esa cuenta
-    // Si no, usar la cuenta de la división
-    const userAccount = currentUser.account || divisionExists.account;
-    console.log('🔍 [STUDENT ACTIONS CREATE] Cuenta del usuario:', userAccount);
+    // Usar req.userInstitution si está disponible (establecido por el middleware)
+    // Si no, usar currentUser.account
+    const userAccount = req.userInstitution?._id || currentUser.account;
+    console.log('🔍 [STUDENT ACTIONS CREATE] Cuenta del usuario (userInstitution):', req.userInstitution?._id);
+    console.log('🔍 [STUDENT ACTIONS CREATE] Cuenta del usuario (currentUser.account):', currentUser.account);
+    console.log('🔍 [STUDENT ACTIONS CREATE] Cuenta del usuario (final):', userAccount);
     console.log('🔍 [STUDENT ACTIONS CREATE] Cuenta de la división:', divisionExists.account);
     
+    // Si la cuenta de la división no coincide con la del usuario
     if (userAccount && divisionExists.account && userAccount.toString() !== divisionExists.account.toString()) {
-      console.log('❌ [STUDENT ACTIONS CREATE] La división no pertenece a la institución del usuario');
-      return res.status(403).json({
-        success: false,
-        message: 'La división no pertenece a tu institución'
+      console.log('⚠️ [STUDENT ACTIONS CREATE] La división tiene una cuenta diferente');
+      
+      // Buscar si ya existe una división con el mismo nombre en la cuenta del usuario
+      const existingDivisionInUserAccount = await Group.findOne({
+        account: userAccount,
+        nombre: divisionExists.nombre
       });
+      
+      if (existingDivisionInUserAccount) {
+        // Si existe, usar esa división en lugar de la actual
+        console.log('✅ [STUDENT ACTIONS CREATE] Se encontró división con el mismo nombre en la cuenta del usuario, usándola');
+        divisionExists = existingDivisionInUserAccount;
+      } else {
+        // Si no existe, actualizar la cuenta de la división
+        // Para evitar el error de índice único, primero cambiamos el nombre a uno temporal único
+        console.log('⚠️ [STUDENT ACTIONS CREATE] No existe división con ese nombre en la cuenta del usuario');
+        console.log('🔄 [STUDENT ACTIONS CREATE] Actualizando cuenta de la división...');
+        
+        const originalNombre = divisionExists.nombre;
+        // Usar un nombre temporal único basado en el ID para evitar conflictos
+        divisionExists.nombre = `TEMP_${divisionExists._id}_${Date.now()}`;
+        await divisionExists.save();
+        
+        // Ahora actualizar la cuenta y restaurar el nombre original
+        divisionExists.account = userAccount;
+        divisionExists.nombre = originalNombre;
+        await divisionExists.save();
+        
+        console.log('✅ [STUDENT ACTIONS CREATE] Cuenta de la división actualizada a:', userAccount);
+      }
     }
 
     // Crear la acción
@@ -5565,18 +5799,19 @@ app.get('/activities/mobile', authenticateToken, async (req, res) => {
       ]
     };
 
-    // Filtrar por fecha: usar solo como fecha límite superior (hasta la fecha seleccionada)
+    // Filtrar por fecha: cuando hay fecha seleccionada, buscar actividades de esa fecha primero
+    let dateFilter = null;
     if (selectedDate) {
-      // Usar la fecha seleccionada como límite superior
       const selected = new Date(selectedDate);
+      const startDate = new Date(selected.getFullYear(), selected.getMonth(), selected.getDate(), 0, 0, 0, 0);
       const endDate = new Date(selected.getFullYear(), selected.getMonth(), selected.getDate(), 23, 59, 59, 999);
-      query.createdAt = {
-        $lte: endDate
+      dateFilter = {
+        startDate,
+        endDate
       };
-      console.log('📅 [ACTIVITIES MOBILE] Usando fecha seleccionada como límite superior:', selectedDate);
-      console.log('📅 [ACTIVITIES MOBILE] Fecha límite calculada:', endDate.toISOString());
+      console.log('📅 [ACTIVITIES MOBILE] Fecha seleccionada:', selectedDate);
+      console.log('📅 [ACTIVITIES MOBILE] Rango de fecha:', startDate.toISOString(), 'a', endDate.toISOString());
     } else {
-      // Si no hay fecha seleccionada, no aplicar filtro de fecha (mostrar todas las actividades)
       console.log('📅 [ACTIVITIES MOBILE] Sin filtro de fecha - mostrando todas las actividades');
     }
 
@@ -5608,23 +5843,67 @@ app.get('/activities/mobile', authenticateToken, async (req, res) => {
       query.participantes = null; // Esto no devolverá resultados
     }
 
-    console.log('🔍 [ACTIVITIES MOBILE] Query final:', JSON.stringify(query, null, 2));
+    console.log('🔍 [ACTIVITIES MOBILE] Query base:', JSON.stringify(query, null, 2));
 
-    // DEBUG: Contar actividades totales antes del límite
-    const totalActivities = await Activity.countDocuments(query);
-    console.log('📊 [ACTIVITIES MOBILE] Total actividades en DB que coinciden con query:', totalActivities);
+    let activities = [];
 
-    // Obtener actividades
-    const activities = await Activity.find(query)
-      .populate('usuario', 'name email')
-      .populate('account', 'nombre razonSocial')
-      .populate('division', 'nombre descripcion')
-      .populate('participantes', 'nombre apellido dni')
-      .sort({ createdAt: -1 })
-      .limit(100); // Limitar a las últimas 100 actividades
-
-    console.log('📊 [ACTIVITIES MOBILE] Actividades encontradas:', activities.length, '(máximo 100 actividades)');
-    console.log('📊 [ACTIVITIES MOBILE] Total en DB vs encontradas:', `${totalActivities} vs ${activities.length}`);
+    if (dateFilter) {
+      // CASO 1: Hay fecha seleccionada
+      // 1. Primero obtener actividades de la fecha seleccionada
+      const dateQuery = {
+        ...query,
+        createdAt: {
+          $gte: dateFilter.startDate,
+          $lte: dateFilter.endDate
+        }
+      };
+      
+      const activitiesOnDate = await Activity.find(dateQuery)
+        .populate('usuario', 'name email')
+        .populate('account', 'nombre razonSocial')
+        .populate('division', 'nombre descripcion')
+        .populate('participantes', 'nombre apellido dni')
+        .sort({ createdAt: -1 }); // Orden cronológico descendente (más recientes primero)
+      
+      console.log('📅 [ACTIVITIES MOBILE] Actividades de la fecha seleccionada:', activitiesOnDate.length);
+      
+      // 2. Obtener las 25 actividades más cercanas anteriores a la fecha seleccionada
+      const previousQuery = {
+        ...query,
+        createdAt: {
+          $lt: dateFilter.startDate
+        }
+      };
+      
+      const previousActivities = await Activity.find(previousQuery)
+        .populate('usuario', 'name email')
+        .populate('account', 'nombre razonSocial')
+        .populate('division', 'nombre descripcion')
+        .populate('participantes', 'nombre apellido dni')
+        .sort({ createdAt: -1 }) // Orden cronológico descendente
+        .limit(25); // Máximo 25 actividades
+      
+      console.log('📅 [ACTIVITIES MOBILE] Actividades anteriores (máximo 25):', previousActivities.length);
+      
+      // 3. Combinar: primero las de la fecha seleccionada, luego las anteriores
+      activities = [...activitiesOnDate, ...previousActivities];
+      
+      console.log('📊 [ACTIVITIES MOBILE] Total actividades combinadas:', activities.length);
+    } else {
+      // CASO 2: No hay fecha seleccionada - mostrar las últimas actividades
+      const totalActivities = await Activity.countDocuments(query);
+      console.log('📊 [ACTIVITIES MOBILE] Total actividades en DB que coinciden con query:', totalActivities);
+      
+      activities = await Activity.find(query)
+        .populate('usuario', 'name email')
+        .populate('account', 'nombre razonSocial')
+        .populate('division', 'nombre descripcion')
+        .populate('participantes', 'nombre apellido dni')
+        .sort({ createdAt: -1 })
+        .limit(100); // Limitar a las últimas 100 actividades
+      
+      console.log('📊 [ACTIVITIES MOBILE] Actividades encontradas:', activities.length, '(máximo 100 actividades)');
+    }
     activities.forEach((activity, index) => {
       console.log(`📋 [ACTIVITIES MOBILE] Actividad ${index + 1}:`, {
         id: activity._id,
@@ -7460,7 +7739,7 @@ app.post('/coordinators/upload-excel', authenticateToken, uploadExcel.single('fi
 });
 
 // Endpoint para obtener coordinadores por división
-app.get('/coordinators/by-division/:divisionId', authenticateToken, async (req, res) => {
+app.get('/coordinators/by-division/:divisionId', authenticateToken, setUserInstitution, async (req, res) => {
   try {
     const { divisionId } = req.params;
     const { userId } = req.user;
@@ -7503,8 +7782,8 @@ app.get('/coordinators/by-division/:divisionId', authenticateToken, async (req, 
 
     // Si es adminaccount, verificar que pertenece a la cuenta de la división
     if (currentUser.role?.nombre === 'adminaccount') {
-      // Verificar acceso a la división usando el middleware
-      if (!await verifyDivisionAccess(req, divisionId)) {
+      // Verificar acceso a la división comparando la cuenta
+      if (req.userInstitution && division.cuenta.toString() !== req.userInstitution._id.toString()) {
         return res.status(403).json({
           success: false,
           message: 'No tienes permisos para ver coordinadores de esta división'
@@ -7807,7 +8086,7 @@ app.get('/tutors', authenticateToken, setUserInstitution, async (req, res) => {
 });
 
 // Endpoint para obtener tutores por división
-app.get('/tutors/by-division/:divisionId', authenticateToken, async (req, res) => {
+app.get('/tutors/by-division/:divisionId', authenticateToken, setUserInstitution, async (req, res) => {
   try {
     const { divisionId } = req.params;
     const { userId } = req.user;
@@ -7850,8 +8129,8 @@ app.get('/tutors/by-division/:divisionId', authenticateToken, async (req, res) =
 
     // Si es adminaccount, verificar que pertenece a la cuenta de la división
     if (currentUser.role?.nombre === 'adminaccount') {
-      // Verificar acceso a la división usando el middleware
-      if (!await verifyDivisionAccess(req, divisionId)) {
+      // Verificar acceso a la división comparando la cuenta
+      if (req.userInstitution && division.cuenta.toString() !== req.userInstitution._id.toString()) {
         return res.status(403).json({
           success: false,
           message: 'No tienes permisos para ver tutores de esta división'
@@ -12527,31 +12806,37 @@ app.get('/shared/user', authenticateToken, setUserInstitution, async (req, res) 
         hasAvatar: !!association.student?.avatar
       });
       
-      if (association.student && association.student.avatar) {
+      // Convertir a objeto plano para poder modificar propiedades
+      const associationObj = association.toObject ? association.toObject() : association;
+      
+      if (associationObj.student && associationObj.student.avatar) {
         try {
-          console.log('🔍 [SHARED GET] Procesando avatar del estudiante:', association.student._id);
-          console.log('🔍 [SHARED GET] Avatar original:', association.student.avatar);
+          console.log('🔍 [SHARED GET] Procesando avatar del estudiante:', associationObj.student._id);
+          console.log('🔍 [SHARED GET] Avatar original:', associationObj.student.avatar);
+          
+          const originalAvatar = associationObj.student.avatar;
+          let processedAvatar = originalAvatar;
           
           // Verificar si es una key de S3 o una URL local
-          if (association.student.avatar.startsWith('http')) {
+          if (originalAvatar.startsWith('http')) {
             console.log('🔍 [SHARED GET] Es una URL completa, usando tal como está');
             // Es una URL completa (puede ser local o S3), no hacer nada
-          } else if (association.student.avatar.includes('students/')) {
+          } else if (originalAvatar.includes('students/')) {
             // Es una key de S3 para estudiantes, generar URL firmada
             console.log('🔍 [SHARED GET] Es una key de S3 para estudiantes, generando URL firmada');
-            console.log('🔍 [SHARED GET] Key original:', association.student.avatar);
+            console.log('🔍 [SHARED GET] Key original:', originalAvatar);
             
             try {
               const { generateSignedUrl } = require('./config/s3.config');
               console.log('🔍 [SHARED GET] Función generateSignedUrl importada correctamente');
               
-              const signedUrl = await generateSignedUrl(association.student.avatar, 172800); // 2 días
+              const signedUrl = await generateSignedUrl(originalAvatar, 172800); // 2 días
               console.log('🔍 [SHARED GET] URL firmada generada exitosamente:', signedUrl);
               console.log('🔍 [SHARED GET] Tipo de URL firmada:', typeof signedUrl);
               console.log('🔍 [SHARED GET] Longitud de URL firmada:', signedUrl ? signedUrl.length : 'null');
               
-              association.student.avatar = signedUrl;
-              console.log('🔍 [SHARED GET] Avatar actualizado en la asociación');
+              processedAvatar = signedUrl || originalAvatar; // Fallback si signedUrl es null
+              console.log('🔍 [SHARED GET] Avatar procesado:', processedAvatar);
             } catch (s3Error) {
               console.error('❌ [SHARED GET] Error generando URL firmada:', s3Error);
               console.error('❌ [SHARED GET] Error details:', {
@@ -12560,25 +12845,32 @@ app.get('/shared/user', authenticateToken, setUserInstitution, async (req, res) 
                 name: s3Error.name
               });
               // Mantener la key original si falla
-              console.log('🔍 [SHARED GET] Manteniendo key original:', association.student.avatar);
+              console.log('🔍 [SHARED GET] Manteniendo key original:', originalAvatar);
+              processedAvatar = originalAvatar;
             }
           } else {
             // Es una key local, generar URL local
-            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${association.student.avatar.split('/').pop()}`;
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${originalAvatar.split('/').pop()}`;
             console.log('🔍 [SHARED GET] URL local generada:', localUrl);
-            association.student.avatar = localUrl;
+            processedAvatar = localUrl;
           }
+          
+          // Asignar el avatar procesado
+          associationObj.student.avatar = processedAvatar;
+          console.log('✅ [SHARED GET] Avatar procesado asignado:', associationObj.student.avatar);
         } catch (error) {
-          console.error('❌ [SHARED GET] Error procesando avatar del estudiante:', association.student._id, error);
+          console.error('❌ [SHARED GET] Error procesando avatar del estudiante:', associationObj.student?._id, error);
           // Si falla, usar URL directa
-          const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${association.student.avatar.split('/').pop()}`;
-          console.log('🔍 [SHARED GET] Usando URL de fallback:', fallbackUrl);
-          association.student.avatar = fallbackUrl;
+          if (associationObj.student && associationObj.student.avatar) {
+            const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${associationObj.student.avatar.split('/').pop()}`;
+            console.log('🔍 [SHARED GET] Usando URL de fallback:', fallbackUrl);
+            associationObj.student.avatar = fallbackUrl;
+          }
         }
       } else {
-        console.log('🔍 [SHARED GET] Estudiante sin avatar:', association.student?._id);
+        console.log('🔍 [SHARED GET] Estudiante sin avatar:', associationObj.student?._id);
       }
-      return association;
+      return associationObj;
     }));
     
     console.log('📦 [SHARED GET] ===== RESULTADO FINAL =====');
@@ -12658,31 +12950,37 @@ app.get('/api/shared/user', authenticateToken, async (req, res) => {
         hasAvatar: !!association.student?.avatar
       });
       
-      if (association.student && association.student.avatar) {
+      // Convertir a objeto plano para poder modificar propiedades
+      const associationObj = association.toObject ? association.toObject() : association;
+      
+      if (associationObj.student && associationObj.student.avatar) {
         try {
-          console.log('🔍 [API SHARED GET] Procesando avatar del estudiante:', association.student._id);
-          console.log('🔍 [API SHARED GET] Avatar original:', association.student.avatar);
+          console.log('🔍 [API SHARED GET] Procesando avatar del estudiante:', associationObj.student._id);
+          console.log('🔍 [API SHARED GET] Avatar original:', associationObj.student.avatar);
+          
+          const originalAvatar = associationObj.student.avatar;
+          let processedAvatar = originalAvatar;
           
           // Verificar si es una key de S3 o una URL local
-          if (association.student.avatar.startsWith('http')) {
+          if (originalAvatar.startsWith('http')) {
             console.log('🔍 [API SHARED GET] Es una URL completa, usando tal como está');
             // Es una URL completa (puede ser local o S3), no hacer nada
-          } else if (association.student.avatar.includes('students/')) {
+          } else if (originalAvatar.includes('students/')) {
             // Es una key de S3 para estudiantes, generar URL firmada
             console.log('🔍 [API SHARED GET] Es una key de S3 para estudiantes, generando URL firmada');
-            console.log('🔍 [API SHARED GET] Key original:', association.student.avatar);
+            console.log('🔍 [API SHARED GET] Key original:', originalAvatar);
             
             try {
               const { generateSignedUrl } = require('./config/s3.config');
               console.log('🔍 [API SHARED GET] Función generateSignedUrl importada correctamente');
               
-              const signedUrl = await generateSignedUrl(association.student.avatar, 172800); // 2 días
+              const signedUrl = await generateSignedUrl(originalAvatar, 172800); // 2 días
               console.log('🔍 [API SHARED GET] URL firmada generada exitosamente:', signedUrl);
               console.log('🔍 [API SHARED GET] Tipo de URL firmada:', typeof signedUrl);
               console.log('🔍 [API SHARED GET] Longitud de URL firmada:', signedUrl ? signedUrl.length : 'null');
               
-              association.student.avatar = signedUrl;
-              console.log('🔍 [API SHARED GET] Avatar actualizado en la asociación');
+              processedAvatar = signedUrl || originalAvatar; // Fallback si signedUrl es null
+              console.log('🔍 [API SHARED GET] Avatar procesado:', processedAvatar);
             } catch (s3Error) {
               console.error('❌ [API SHARED GET] Error generando URL firmada:', s3Error);
               console.error('❌ [API SHARED GET] Error details:', {
@@ -12691,25 +12989,32 @@ app.get('/api/shared/user', authenticateToken, async (req, res) => {
                 name: s3Error.name
               });
               // Mantener la key original si falla
-              console.log('🔍 [API SHARED GET] Manteniendo key original:', association.student.avatar);
+              console.log('🔍 [API SHARED GET] Manteniendo key original:', originalAvatar);
+              processedAvatar = originalAvatar;
             }
           } else {
             // Es una key local, generar URL local
-            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${association.student.avatar.split('/').pop()}`;
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${originalAvatar.split('/').pop()}`;
             console.log('🔍 [API SHARED GET] URL local generada:', localUrl);
-            association.student.avatar = localUrl;
+            processedAvatar = localUrl;
           }
+          
+          // Asignar el avatar procesado
+          associationObj.student.avatar = processedAvatar;
+          console.log('✅ [API SHARED GET] Avatar procesado asignado:', associationObj.student.avatar);
         } catch (error) {
-          console.error('❌ [API SHARED GET] Error procesando avatar del estudiante:', association.student._id, error);
+          console.error('❌ [API SHARED GET] Error procesando avatar del estudiante:', associationObj.student?._id, error);
           // Si falla, usar URL directa
-          const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${association.student.avatar.split('/').pop()}`;
-          console.log('🔍 [API SHARED GET] Usando URL de fallback:', fallbackUrl);
-          association.student.avatar = fallbackUrl;
+          if (associationObj.student && associationObj.student.avatar) {
+            const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${associationObj.student.avatar.split('/').pop()}`;
+            console.log('🔍 [API SHARED GET] Usando URL de fallback:', fallbackUrl);
+            associationObj.student.avatar = fallbackUrl;
+          }
         }
       } else {
-        console.log('🔍 [API SHARED GET] Estudiante sin avatar:', association.student?._id);
+        console.log('🔍 [API SHARED GET] Estudiante sin avatar:', associationObj.student?._id);
       }
-      return association;
+      return associationObj;
     }));
     
     console.log('📦 [API SHARED GET] ===== RESULTADO FINAL =====');
@@ -14418,7 +14723,15 @@ app.get('/api/student-actions/log/student/:studentId', authenticateToken, setUse
     // Para coordinadores: verificar que el estudiante está en su división
     let hasAccess = false;
     
-    if (currentUser.role.nombre === 'familyadmin' || currentUser.role.nombre === 'familyview') {
+    // Obtener el nombre del rol de manera flexible
+    let roleName = null;
+    if (typeof currentUser.role === 'string') {
+      roleName = currentUser.role;
+    } else if (currentUser.role?.nombre) {
+      roleName = currentUser.role.nombre;
+    }
+
+    if (roleName === 'familyadmin' || roleName === 'familyview' || roleName === 'familyviewer') {
       // Para familias, verificar que el estudiante está en sus asociaciones
       const association = await Shared.findOne({ 
         user: currentUser._id, 
@@ -14426,10 +14739,10 @@ app.get('/api/student-actions/log/student/:studentId', authenticateToken, setUse
         status: 'active' 
       });
       hasAccess = !!association;
-    } else if (currentUser.role.nombre === 'coordinador') {
+    } else if (roleName === 'coordinador') {
       // Para coordinadores, verificar que el estudiante está en su división
       hasAccess = student.division._id.toString() === currentUser.division?.toString();
-    } else if (currentUser.role.nombre === 'adminaccount') {
+    } else if (roleName === 'adminaccount') {
       // Para adminaccount, verificar que pertenece a la misma institución
       hasAccess = student.division.cuenta.toString() === req.userInstitution._id.toString();
     }
@@ -14438,23 +14751,41 @@ app.get('/api/student-actions/log/student/:studentId', authenticateToken, setUse
       return res.status(403).json({ success: false, message: 'No tienes acceso a este estudiante' });
     }
 
-    // Construir filtros de fecha
+    // Construir filtros de fecha - Usar UTC para evitar problemas de timezone
     let dateFilter = {};
     if (fecha) {
-      // Filtro por fecha específica
-      const startDate = new Date(fecha);
-      startDate.setHours(0, 0, 0, 0);
-      const endDate = new Date(fecha);
-      endDate.setHours(23, 59, 59, 999);
+      // Crear fechas en UTC para evitar problemas de zona horaria
+      const startDate = new Date(fecha + 'T00:00:00.000Z');
+      const endDate = new Date(fecha + 'T23:59:59.999Z');
       dateFilter = { fechaAccion: { $gte: startDate, $lte: endDate } };
+      
+      console.log('📅 [STUDENT ACTION LOG] Filtro por fecha específica (student):', {
+        fecha,
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString()
+      });
     } else if (fechaInicio && fechaFin) {
-      // Filtro por rango de fechas
+      // Crear fechas en UTC para el rango, expandido para considerar timezone
+      const startDate = new Date(fechaInicio + 'T00:00:00.000Z');
+      startDate.setUTCDate(startDate.getUTCDate() - 1); // Un día antes para timezone negativo
+      
+      const endDate = new Date(fechaFin + 'T23:59:59.999Z');
+      endDate.setUTCDate(endDate.getUTCDate() + 1); // Un día después para timezone positivo
+      endDate.setUTCHours(23, 59, 59, 999);
+      
       dateFilter = { 
         fechaAccion: { 
-          $gte: new Date(fechaInicio), 
-          $lte: new Date(fechaFin) 
+          $gte: startDate, 
+          $lte: endDate 
         } 
       };
+      
+      console.log('📅 [STUDENT ACTION LOG] Filtro por rango de fechas (student, expandido para timezone):', {
+        fechaInicio,
+        fechaFin,
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString()
+      });
     }
 
     // Buscar las acciones
@@ -14505,34 +14836,83 @@ app.get('/api/student-actions/log/division/:divisionId', authenticateToken, setU
       return res.status(403).json({ success: false, message: 'No tienes acceso a esta división' });
     }
 
-    // Construir filtros de fecha
+    // Construir filtros de fecha - Usar UTC para evitar problemas de timezone
     let dateFilter = {};
     if (fecha) {
-      const startDate = new Date(fecha);
-      startDate.setHours(0, 0, 0, 0);
-      const endDate = new Date(fecha);
-      endDate.setHours(23, 59, 59, 999);
+      // Crear fechas en UTC para evitar problemas de zona horaria
+      // Si fecha viene como "2025-10-31", crear fecha en UTC
+      const startDate = new Date(fecha + 'T00:00:00.000Z');
+      const endDate = new Date(fecha + 'T23:59:59.999Z');
       dateFilter = { fechaAccion: { $gte: startDate, $lte: endDate } };
+      
+      console.log('📅 [STUDENT ACTION LOG] Filtro por fecha específica:', {
+        fecha,
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString()
+      });
     } else if (fechaInicio && fechaFin) {
+      // Crear fechas en UTC para el rango
+      // Expandir el rango para incluir el día completo considerando timezone
+      // Usar un día antes y después para asegurar que capturemos todas las acciones
+      const startDate = new Date(fechaInicio + 'T00:00:00.000Z');
+      startDate.setUTCDate(startDate.getUTCDate() - 1); // Un día antes para timezone negativo
+      
+      const endDate = new Date(fechaFin + 'T23:59:59.999Z');
+      endDate.setUTCDate(endDate.getUTCDate() + 1); // Un día después para timezone positivo
+      endDate.setUTCHours(23, 59, 59, 999);
+      
       dateFilter = { 
         fechaAccion: { 
-          $gte: new Date(fechaInicio), 
-          $lte: new Date(fechaFin) 
+          $gte: startDate, 
+          $lte: endDate 
         } 
       };
+      
+      console.log('📅 [STUDENT ACTION LOG] Filtro por rango de fechas (expandido para timezone):', {
+        fechaInicio,
+        fechaFin,
+        startDate: startDate.toISOString(),
+        endDate: endDate.toISOString()
+      });
     }
 
-    // Buscar las acciones
-    const actions = await StudentActionLog.find({
+    // Construir query de búsqueda
+    const query = {
       division: divisionId,
       ...dateFilter
-    })
+    };
+    
+    console.log('🔍 [STUDENT ACTION LOG] Query de búsqueda:', JSON.stringify(query, null, 2));
+    
+    // DEBUG: Buscar TODAS las acciones de esta división sin filtro de fecha para ver qué fechas tienen
+    const allDivisionActions = await StudentActionLog.find({ division: divisionId })
+      .select('_id fechaAccion')
+      .sort({ fechaAccion: -1 })
+      .limit(10)
+      .lean();
+    
+    console.log('🔍 [STUDENT ACTION LOG] DEBUG - Todas las acciones de la división (primeras 10):');
+    allDivisionActions.forEach((action, index) => {
+      const fechaAccion = new Date(action.fechaAccion);
+      console.log(`   ${index + 1}. ID: ${action._id} | FechaAccion: ${fechaAccion.toISOString()} | Local: ${fechaAccion.toLocaleString()}`);
+    });
+    
+    // Buscar las acciones
+    const actions = await StudentActionLog.find(query)
     .populate('estudiante', 'nombre apellido avatar')
     .populate('accion', 'nombre descripcion color categoria icono')
     .populate('registradoPor', 'name email')
     .sort({ fechaAccion: -1 });
 
     console.log('✅ [STUDENT ACTION LOG] Acciones obtenidas:', actions.length);
+    if (actions.length > 0) {
+      console.log('📋 [STUDENT ACTION LOG] Primeras acciones:', actions.slice(0, 3).map(a => ({
+        id: a._id,
+        fechaAccion: a.fechaAccion,
+        estudiante: a.estudiante?.nombre,
+        accion: a.accion?.nombre
+      })));
+    }
 
     res.json({
       success: true,

@@ -1,4 +1,5 @@
 const rateLimit = require('express-rate-limit');
+const { ipKeyGenerator } = require('express-rate-limit');
 const Redis = require('redis');
 
 // Configuración de Redis para rate limiting (opcional)
@@ -26,8 +27,10 @@ const loginRateLimit = rateLimit({
   // Función para generar clave personalizada
   keyGenerator: (req) => {
     // Usar IP + email para rate limiting más granular
+    // ipKeyGenerator maneja correctamente IPv6 con subnet masking
+    const ip = ipKeyGenerator(req.ip);
     const email = req.body?.email || 'unknown';
-    return `login:${req.ip}:${email}`;
+    return `login:${ip}:${email}`;
   },
   // Función para saltar rate limiting en desarrollo
   skip: (req) => {
