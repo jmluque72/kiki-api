@@ -1,11 +1,6 @@
 const mongoose = require('mongoose');
-require('dotenv').config();
-
-// Conectar a MongoDB
-mongoose.connect(process.env.MONGODB_URI || 'mongodb://admin:password@localhost:27017/kiki?authSource=admin', {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
-});
+const path = require('path');
+require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 // Importar modelo de Usuario
 const User = require('./shared/models/User');
@@ -13,13 +8,19 @@ const User = require('./shared/models/User');
 async function fixAdminPassword() {
   try {
     console.log('🔧 [FIX ADMIN] Corrigiendo contraseña del admin...');
+    console.log('📦 [FIX ADMIN] Conectando a MongoDB...');
     
-    // Esperar a que se conecte
-    await new Promise((resolve, reject) => {
-      mongoose.connection.once('connected', resolve);
-      mongoose.connection.once('error', reject);
-      setTimeout(() => reject(new Error('Timeout')), 5000);
-    });
+    // Usar la URI del .env que tiene las credenciales correctas
+    const mongoUri = process.env.MONGODB_URI;
+    
+    if (!mongoUri) {
+      throw new Error('MONGODB_URI no está definida en el archivo .env');
+    }
+    
+    console.log('🔗 [FIX ADMIN] URI:', mongoUri.replace(/:[^:@]+@/, ':****@')); // Ocultar password en logs
+    
+    // Conectar a MongoDB y esperar
+    await mongoose.connect(mongoUri);
     
     console.log('✅ [FIX ADMIN] Conectado a MongoDB');
     

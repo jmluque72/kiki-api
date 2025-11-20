@@ -197,7 +197,7 @@ notificationSchema.statics.getUserNotifications = async function(userId, options
   console.log('🔔 [MODEL] Query final:', JSON.stringify(query, null, 2));
 
   const notifications = await this.find(query)
-    .populate('sender', 'nombre email')
+    .populate('sender', 'name email')
     .populate('account', 'nombre')
     .populate('division', 'nombre')
     .sort({ sentAt: -1 })

@@ -73,7 +73,7 @@ class EmailService {
       
       <div style="text-align: center; margin: 30px 0;">
         <div style="margin-bottom: 15px;">
-          <a href="https://apps.apple.com/app/kiki-app" 
+          <a href="https://apps.apple.com/ar/app/id1494945181" 
              style="display: inline-block; margin: 0 10px; text-decoration: none;">
             <img src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" 
                  alt="Download on the App Store" 
@@ -81,7 +81,7 @@ class EmailService {
           </a>
         </div>
         <div>
-          <a href="https://play.google.com/store/apps/details?id=com.kikiapp" 
+          <a href="https://play.google.com/store/apps/details?id=com.kikiapp.katter" 
              style="display: inline-block; margin: 0 10px; text-decoration: none;">
             <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" 
                  alt="Get it on Google Play" 
@@ -207,10 +207,10 @@ class EmailService {
   // Template para nuevo usuario creado desde Excel
   getNewUserCreatedTemplate(userData, password, institutionName, role) {
     // Determinar si es un rol administrativo (backoffice) o de usuario móvil
+    // Nota: coordinador, familyadmin y familyviewer usan la app móvil
     const isAdminRole = role && (
-      role.toLowerCase().includes('admin') || 
-      role.toLowerCase().includes('administrador') ||
-      role.toLowerCase().includes('coordinador')
+      role.toLowerCase().includes('adminaccount') || 
+      role.toLowerCase().includes('superadmin')
     );
 
     let accessSection = '';
@@ -255,7 +255,7 @@ class EmailService {
         
         <div style="text-align: center; margin: 30px 0;">
           <div style="margin-bottom: 15px;">
-            <a href="https://apps.apple.com/app/kiki-app" 
+            <a href="https://apps.apple.com/ar/app/id1494945181" 
                style="display: inline-block; margin: 0 10px; text-decoration: none;">
               <img src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" 
                    alt="Download on the App Store" 
@@ -263,7 +263,7 @@ class EmailService {
             </a>
           </div>
           <div>
-            <a href="https://play.google.com/store/apps/details?id=com.kikiapp" 
+            <a href="https://play.google.com/store/apps/details?id=com.kikiapp.katter" 
                style="display: inline-block; margin: 0 10px; text-decoration: none;">
               <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" 
                    alt="Get it on Google Play" 

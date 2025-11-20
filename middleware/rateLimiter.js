@@ -98,6 +98,47 @@ const passwordChangeRateLimit = rateLimit({
   }
 });
 
+// Función para detectar si una IP es privada
+const isPrivateIP = (ip) => {
+  // Eliminar prefijo ::ffff: si es IPv4 mapeada a IPv6
+  const cleanIP = ip.replace(/^::ffff:/, '');
+  
+  // Rangos de IPs privadas:
+  // 10.0.0.0/8 (10.0.0.0 - 10.255.255.255)
+  // 172.16.0.0/12 (172.16.0.0 - 172.31.255.255)
+  // 192.168.0.0/16 (192.168.0.0 - 192.168.255.255)
+  // 127.0.0.0/8 (localhost)
+  // 169.254.0.0/16 (link-local)
+  
+  if (cleanIP.startsWith('10.') ||
+      cleanIP.startsWith('192.168.') ||
+      cleanIP.startsWith('127.') ||
+      cleanIP.startsWith('169.254.')) {
+    return true;
+  }
+  
+  // Verificar rango 172.16.0.0/12
+  if (cleanIP.startsWith('172.')) {
+    const parts = cleanIP.split('.');
+    if (parts.length >= 2) {
+      const secondOctet = parseInt(parts[1], 10);
+      if (secondOctet >= 16 && secondOctet <= 31) {
+        return true;
+      }
+    }
+  }
+  
+  return false;
+};
+
+// IPs específicas a excluir del rate limiting (desde variable de entorno)
+const getExcludedIPs = () => {
+  if (process.env.RATE_LIMIT_EXCLUDED_IPS) {
+    return process.env.RATE_LIMIT_EXCLUDED_IPS.split(',').map(ip => ip.trim());
+  }
+  return [];
+};
+
 // Rate limiter general para API
 const generalRateLimit = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutos
@@ -109,8 +150,32 @@ const generalRateLimit = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  // Excluir IPs privadas y IPs específicas del rate limiting
+  skip: (req) => {
+    const ip = req.ip;
+    const excludedIPs = getExcludedIPs();
+    
+    // Excluir IPs privadas (servicios internos, balanceadores, etc.)
+    if (isPrivateIP(ip)) {
+      return true;
+    }
+    
+    // Excluir IPs específicas configuradas
+    if (excludedIPs.includes(ip)) {
+      return true;
+    }
+    
+    // En desarrollo, excluir localhost
+    if (process.env.NODE_ENV === 'development' && (ip === '127.0.0.1' || ip === '::1')) {
+      return true;
+    }
+    
+    return false;
+  },
   handler: (req, res) => {
     console.log(`🚨 [RATE LIMIT] IP ${req.ip} excedió límite general de API`);
+    console.log(`🚨 [RATE LIMIT] User-Agent: ${req.get('User-Agent')}`);
+    console.log(`🚨 [RATE LIMIT] URL: ${req.method} ${req.url}`);
     
     res.status(429).json({
       success: false,

@@ -57,8 +57,8 @@ const userSchema = new mongoose.Schema({
   // Campos adicionales para registro mobile
   telefono: {
     type: String,
-    trim: true,
-    match: [/^[\+]?[0-9\s\-\(\)]{7,15}$/, 'Número de teléfono inválido']
+    trim: true
+    // Validación removida: aceptamos cualquier valor que el usuario ingrese
   },
   direccion: {
     type: String,

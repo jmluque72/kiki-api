@@ -235,9 +235,20 @@ const sendInstitutionWelcomeEmail = async (email, userName, institutionName, pas
             </p>
           </div>
           
+          <div style="text-align: center; margin: 30px 0;">
+            <a href="https://backoffice.kiki.com.ar" 
+               style="display: inline-block; background-color: #0E5FCE; color: white; padding: 15px 30px; text-decoration: none; border-radius: 8px; font-weight: bold; font-size: 16px; transition: background-color 0.3s;">
+              🔗 Iniciar sesión
+            </a>
+          </div>
+          
           <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
             Como administrador de la institución, podrás gestionar usuarios, crear grupos, 
-            configurar eventos y administrar todas las funcionalidades de Kiki App.
+            configurar eventos y administrar todas las funcionalidades de Kiki App desde el backoffice.
+          </p>
+          
+          <p style="color: #666; line-height: 1.6; margin-bottom: 20px; font-size: 14px;">
+            <strong>Link de acceso:</strong> <a href="https://backoffice.kiki.com.ar" style="color: #0E5FCE; text-decoration: none;">https://backoffice.kiki.com.ar</a>
           </p>
           
           <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
@@ -351,7 +362,7 @@ const sendFamilyInvitationEmail = async (email, userName, password) => {
           
           <div style="text-align: center; margin: 30px 0;">
             <div style="margin-bottom: 15px;">
-              <a href="https://apps.apple.com/app/kiki-app" 
+              <a href="https://apps.apple.com/ar/app/id1494945181" 
                  style="display: inline-block; margin: 0 10px; text-decoration: none;">
                 <img src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" 
                      alt="Download on the App Store" 
@@ -359,7 +370,7 @@ const sendFamilyInvitationEmail = async (email, userName, password) => {
               </a>
             </div>
             <div>
-              <a href="https://play.google.com/store/apps/details?id=com.kikiapp" 
+              <a href="https://play.google.com/store/apps/details?id=com.kikiapp.katter" 
                  style="display: inline-block; margin: 0 10px; text-decoration: none;">
                 <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" 
                      alt="Get it on Google Play" 
@@ -390,6 +401,72 @@ const sendFamilyInvitationEmail = async (email, userName, password) => {
     
   } catch (error) {
     console.error('Error enviando email de invitación familiar:', error);
+    throw error;
+  }
+};
+
+// Función para enviar email de notificación de invitación familiar (sin credenciales)
+const sendFamilyInvitationNotificationEmail = async (email, userName, studentName) => {
+  try {
+    const htmlContent = `
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fa;">
+        <div style="background-color: #0E5FCE; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
+          <svg width="120" height="48" xmlns="http://www.w3.org/2000/svg" style="margin-bottom: 15px;">
+            <rect width="120" height="48" fill="#0E5FCE"/>
+            <text x="60" y="27" font-family="Arial, sans-serif" font-size="17" font-weight="bold" text-anchor="middle" fill="white">KIKI</text>
+            <text x="60" y="39" font-family="Arial, sans-serif" font-size="7" text-anchor="middle" fill="white" opacity="0.8">APP</text>
+          </svg>
+          <h1 style="margin: 0; font-size: 24px;">¡Nueva Invitación a Kiki App!</h1>
+        </div>
+        
+        <div style="background-color: white; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+          <h2 style="color: #333; margin-bottom: 20px;">Hola ${userName},</h2>
+          
+          <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
+            Has sido invitado a formar parte de Kiki App como familiar para <strong>${studentName}</strong>.
+          </p>
+          
+          <div style="background-color: #e8f4fd; border-left: 4px solid #0E5FCE; padding: 15px; margin: 20px 0;">
+            <p style="margin: 0; color: #0E5FCE; font-weight: bold;">
+              📱 Inicia sesión con tu cuenta existente para acceder a la información del estudiante
+            </p>
+          </div>
+          
+          <div style="text-align: center; margin: 30px 0;">
+            <div style="margin-bottom: 15px;">
+              <a href="https://apps.apple.com/ar/app/id1494945181" 
+                 style="display: inline-block; margin: 0 10px; text-decoration: none;">
+                <img src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" 
+                     alt="Download on the App Store" 
+                     style="height: 40px; border-radius: 8px;">
+              </a>
+            </div>
+            <div>
+              <a href="https://play.google.com/store/apps/details?id=com.kikiapp.katter" 
+                 style="display: inline-block; margin: 0 10px; text-decoration: none;">
+                <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" 
+                     alt="Get it on Google Play" 
+                     style="height: 40px; border-radius: 8px;">
+              </a>
+            </div>
+          </div>
+          
+          <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
+          
+          <p style="color: #999; font-size: 12px; text-align: center; margin: 0;">
+            Este es un email automático, por favor no respondas a este mensaje.<br>
+            © ${new Date().getFullYear()} Kiki App. Todos los derechos reservados.
+          </p>
+        </div>
+      </div>
+    `;
+
+    const result = await sendEmail(email, 'Nueva Invitación a Kiki App', htmlContent);
+    console.log(`📧 [EMAIL] Email de notificación de invitación familiar enviado a ${email}`);
+    return result;
+    
+  } catch (error) {
+    console.error('Error enviando email de notificación de invitación familiar:', error);
     throw error;
   }
 };
@@ -450,6 +527,7 @@ module.exports = {
   sendWelcomeEmail,
   sendInstitutionWelcomeEmail,
   sendFamilyInvitationEmail,
+  sendFamilyInvitationNotificationEmail,
   sendNotificationEmail,
   sendEmail,
   generateRandomPassword,

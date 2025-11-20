@@ -28,6 +28,7 @@ const Grupo = require('./shared/models/Grupo');
 const Asistencia = require('./shared/models/Asistencia');
 const Activity = require('./shared/models/Activity');
 const ActivityFavorite = require('./shared/models/ActivityFavorite');
+const AccountConfig = require('./shared/models/AccountConfig');
 const Student = require('./shared/models/Student');
 const Notification = require('./shared/models/Notification');
 const Device = require('./shared/models/Device');
@@ -43,7 +44,7 @@ const RefreshTokenService = require('./services/refreshTokenService');
 const TwoFactorAuthService = require('./services/twoFactorAuthService');
 const LoginMonitorService = require('./services/loginMonitorService');
 const PasswordExpirationService = require('./services/passwordExpirationService');
-const { sendPasswordResetEmail, sendWelcomeEmail, sendInstitutionWelcomeEmail, sendFamilyInvitationEmail, sendNotificationEmail, generateRandomPassword, sendEmailAsync } = require('./config/email.config');
+const { sendPasswordResetEmail, sendWelcomeEmail, sendInstitutionWelcomeEmail, sendFamilyInvitationEmail, sendFamilyInvitationNotificationEmail, sendNotificationEmail, generateRandomPassword, sendEmailAsync } = require('./config/email.config');
 const emailService = require('./services/emailService');
 
 // Importar middleware de autenticación REAL con Cognito
@@ -405,6 +406,9 @@ app.use((req, res, next) => {
 });
 
 // Body parsing
+// IMPORTANTE: express.json() debe estar ANTES de las rutas de upload
+// para que multer pueda procesar multipart/form-data correctamente
+// express.json() solo parsea requests con Content-Type: application/json
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -749,8 +753,10 @@ app.use((req, res, next) => {
       !req.path.startsWith('/api/student-actions') &&
       !req.path.startsWith('/api/test-actions') &&
       !req.path.startsWith('/api/debug') &&
-      !req.path.startsWith('/api/documents')) {
-    // Remover el /api duplicado del inicio, excepto para student-actions, test-actions, debug, documents y coordinators
+      !req.path.startsWith('/api/documents') &&
+      !req.path.startsWith('/api/events/export') &&
+      !req.path.match(/^\/api\/accounts\/[^\/]+\/(config|admin-users)$/)) {
+    // Remover el /api duplicado del inicio, excepto para student-actions, test-actions, debug, documents, events/export, accounts config y accounts admin-users
     const newPath = req.path.replace(/^\/api/, '');
     console.log(`🔄 [REDIRECT] Redirigiendo ${req.method} ${req.path} -> ${newPath}`);
     req.url = newPath;
@@ -986,10 +992,18 @@ app.post('/users/login', loginRateLimit, async (req, res) => {
     }
     
     // Crear objeto usuario con avatar procesado
+    const userObject = user.toObject();
+    console.log('🔑 [LOGIN] isFirstLogin del usuario (raw):', userObject.isFirstLogin);
+    console.log('🔑 [LOGIN] Tipo de isFirstLogin:', typeof userObject.isFirstLogin);
+    console.log('🔑 [LOGIN] isFirstLogin === true:', userObject.isFirstLogin === true);
+    
     const userWithProcessedAvatar = {
-      ...user.toObject(),
-      avatar: avatarUrl || user.avatar
+      ...userObject,
+      avatar: avatarUrl || user.avatar,
+      isFirstLogin: userObject.isFirstLogin !== undefined ? userObject.isFirstLogin : true // Asegurar que siempre esté presente
     };
+    
+    console.log('🔑 [LOGIN] userWithProcessedAvatar.isFirstLogin:', userWithProcessedAvatar.isFirstLogin);
     
     // Obtener asociaciones del usuario
     const associations = await Shared.find({ user: user._id, status: 'active' })
@@ -1270,7 +1284,7 @@ app.post('/auth/revoke', async (req, res) => {
 });
 
 // Cambiar contraseña
-app.post('/users/change-password', /* authenticateToken, */ async (req, res) => {
+app.post('/users/change-password', authenticateToken, async (req, res) => {
   try {
     const { currentPassword, newPassword, isFirstLogin } = req.body;
     const userId = req.user.userId;
@@ -2851,72 +2865,338 @@ app.get('/users', authenticateToken, setUserInstitution, async (req, res) => {
     const limit = parseInt(req.query.limit) || 10;
     const search = req.query.search || '';
 
-    // Construir query de búsqueda
-    const query = {};
-    if (search) {
-      query.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { email: { $regex: search, $options: 'i' } }
-      ];
-    }
-
     // Filtrar según el rol del usuario
     const currentUser = req.user;
-    console.log('🔍 Usuario actual:', currentUser.email, 'Rol:', currentUser.role?.nombre);
+    console.log('🔍 [USERS] Usuario actual:', currentUser.email, 'Rol:', currentUser.role?.nombre);
+
+    let users = [];
+    let total = 0;
 
     // Si el usuario es superadmin, puede ver todos los usuarios
     if (currentUser.role?.nombre === 'superadmin') {
-      console.log('👑 Superadmin: mostrando todos los usuarios');
+      console.log('👑 [USERS] Superadmin: mostrando todos los usuarios');
+      
+      // Construir query de búsqueda
+      const query = {};
+      if (search) {
+        query.$or = [
+          { name: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      total = await User.countDocuments(query);
+      const userDocs = await User.find(query)
+        .populate('role')
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .sort({ createdAt: -1 });
+
+      users = userDocs.map(user => ({
+        _id: user._id,
+        email: user.email,
+        nombre: user.name,
+        role: user.role,
+        activo: user.status === 'approved',
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt
+      }));
     } 
-    // Si el usuario es adminaccount, solo puede ver usuarios de su cuenta
+    // Si el usuario es adminaccount, buscar usuarios a través de Shared
     else if (currentUser.role?.nombre === 'adminaccount') {
-      console.log('🏢 Adminaccount: filtrando usuarios por cuenta');
-      console.log('👤 Usuario actual ID:', currentUser._id);
+      console.log('🏢 [USERS] Adminaccount: filtrando usuarios por cuenta usando Shared');
+      console.log('👤 [USERS] Usuario actual ID:', currentUser._id);
       
       // Usar el middleware global para obtener la institución
       if (req.userInstitution) {
-        console.log('🏢 Institución del usuario:', req.userInstitution.nombre, req.userInstitution._id);
+        console.log('🏢 [USERS] Institución del usuario:', req.userInstitution.nombre, req.userInstitution._id);
         
-        // Filtrar usuarios que pertenecen a esta cuenta
-        query.account = req.userInstitution._id;
-        console.log('👥 Filtrando usuarios de la cuenta:', req.userInstitution._id);
+        // Buscar todas las asociaciones (Shared) de esta cuenta
+        // Esto incluye todos los usuarios: adminaccount, familyadmin, familyviewer y coordinadores
+        const sharedAssociations = await Shared.find({
+          account: req.userInstitution._id,
+          status: { $in: ['active', 'pending'] }
+        })
+        .populate('user')
+        .populate('role')
+        .sort({ createdAt: -1 });
+
+        console.log('👥 [USERS] Asociaciones encontradas:', sharedAssociations.length);
+
+        // Obtener usuarios únicos (un usuario puede tener múltiples asociaciones)
+        const uniqueUsersMap = new Map();
+        sharedAssociations.forEach(shared => {
+          if (shared.user && !uniqueUsersMap.has(shared.user._id.toString())) {
+            // Aplicar filtro de búsqueda si existe
+            if (!search || 
+                shared.user.name?.toLowerCase().includes(search.toLowerCase()) ||
+                shared.user.email?.toLowerCase().includes(search.toLowerCase())) {
+              uniqueUsersMap.set(shared.user._id.toString(), {
+                _id: shared.user._id,
+                email: shared.user.email,
+                nombre: shared.user.name,
+                role: shared.role, // Usar el rol de la asociación Shared
+                activo: shared.user.status === 'approved',
+                createdAt: shared.user.createdAt,
+                updatedAt: shared.user.updatedAt
+              });
+            }
+          }
+        });
+
+        // Convertir a array y aplicar paginación
+        const allUsers = Array.from(uniqueUsersMap.values());
+        total = allUsers.length;
+        const startIndex = (page - 1) * limit;
+        users = allUsers.slice(startIndex, startIndex + limit);
+
+        console.log('👥 [USERS] Usuarios únicos encontrados:', total);
       } else {
-        console.log('⚠️ Usuario sin institución asignada');
-        query._id = null; // No mostrar usuarios
+        console.log('⚠️ [USERS] Usuario sin institución asignada');
+        users = [];
+        total = 0;
       }
     }
     // Para otros roles, no mostrar usuarios
     else {
-      console.log('🚫 Rol no autorizado:', currentUser.role?.nombre);
+      console.log('🚫 [USERS] Rol no autorizado:', currentUser.role?.nombre);
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para ver usuarios'
       });
     }
 
-    // Obtener datos reales de la base de datos
-    const total = await User.countDocuments(query);
-    const users = await User.find(query)
-      .populate('role')
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .sort({ createdAt: -1 });
+    res.json({
+      success: true,
+      data: {
+        users,
+        total,
+        page,
+        limit
+      }
+    });
+  } catch (error) {
+    console.error('Error listando usuarios:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Endpoint /api/users para compatibilidad con el backoffice
+app.get('/api/users', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const search = req.query.search || '';
+
+    // Filtrar según el rol del usuario
+    const currentUser = req.user;
+    console.log('🔍 [API/USERS] Usuario actual:', currentUser.email, 'Rol:', currentUser.role?.nombre);
+
+    let users = [];
+    let total = 0;
+
+    // Si el usuario es superadmin, puede ver todos los usuarios
+    if (currentUser.role?.nombre === 'superadmin') {
+      console.log('👑 [API/USERS] Superadmin: mostrando todos los usuarios');
+      
+      // Construir query de búsqueda
+      const query = {};
+      if (search) {
+        query.$or = [
+          { name: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      total = await User.countDocuments(query);
+      const userDocs = await User.find(query)
+        .populate('role')
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .sort({ createdAt: -1 });
+
+      users = userDocs.map(user => ({
+        _id: user._id,
+        email: user.email,
+        nombre: user.name,
+        role: user.role,
+        activo: user.status === 'approved',
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt
+      }));
+    } 
+    // Si el usuario es adminaccount, buscar usuarios a través de Shared
+    else if (currentUser.role?.nombre === 'adminaccount') {
+      console.log('🏢 [API/USERS] Adminaccount: filtrando usuarios por cuenta usando Shared');
+      console.log('👤 [API/USERS] Usuario actual ID:', currentUser._id);
+      
+      // Usar el middleware global para obtener la institución
+      if (req.userInstitution) {
+        console.log('🏢 [API/USERS] Institución del usuario:', req.userInstitution.nombre, req.userInstitution._id);
+        
+        // Buscar todas las asociaciones (Shared) de esta cuenta
+        // Esto incluye todos los usuarios: adminaccount, familyadmin, familyviewer y coordinadores
+        const sharedAssociations = await Shared.find({
+          account: req.userInstitution._id,
+          status: { $in: ['active', 'pending'] }
+        })
+        .populate('user')
+        .populate('role')
+        .sort({ createdAt: -1 });
+
+        console.log('👥 [API/USERS] Asociaciones encontradas:', sharedAssociations.length);
+
+        // Obtener usuarios únicos (un usuario puede tener múltiples asociaciones)
+        const uniqueUsersMap = new Map();
+        sharedAssociations.forEach(shared => {
+          if (shared.user && !uniqueUsersMap.has(shared.user._id.toString())) {
+            // Aplicar filtro de búsqueda si existe
+            if (!search || 
+                shared.user.name?.toLowerCase().includes(search.toLowerCase()) ||
+                shared.user.email?.toLowerCase().includes(search.toLowerCase())) {
+              uniqueUsersMap.set(shared.user._id.toString(), {
+                _id: shared.user._id,
+                email: shared.user.email,
+                nombre: shared.user.name,
+                role: shared.role, // Usar el rol de la asociación Shared
+                activo: shared.user.status === 'approved',
+                createdAt: shared.user.createdAt,
+                updatedAt: shared.user.updatedAt
+              });
+            }
+          }
+        });
+
+        // Convertir a array y aplicar paginación
+        const allUsers = Array.from(uniqueUsersMap.values());
+        total = allUsers.length;
+        const startIndex = (page - 1) * limit;
+        users = allUsers.slice(startIndex, startIndex + limit);
+
+        console.log('👥 [API/USERS] Usuarios únicos encontrados:', total);
+      } else {
+        console.log('⚠️ [API/USERS] Usuario sin institución asignada');
+        users = [];
+        total = 0;
+      }
+    }
+    // Para otros roles, no mostrar usuarios
+    else {
+      console.log('🚫 [API/USERS] Rol no autorizado:', currentUser.role?.nombre);
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver usuarios'
+      });
+    }
+
+    // Calcular estadísticas totales (no solo de la página actual)
+    let stats = {
+      total: total,
+      active: 0,
+      inactive: 0,
+      coordinadores: 0,
+      familiares: 0,
+      tutores: 0,
+      familyadmin: 0
+    };
+
+    console.log('📊 [API/USERS] Calculando estadísticas...');
+    console.log('📊 [API/USERS] Rol del usuario:', currentUser.role?.nombre);
+    console.log('📊 [API/USERS] Total usuarios encontrados:', total);
+
+    if (currentUser.role?.nombre === 'superadmin') {
+      console.log('📊 [API/USERS] Calculando stats para superadmin');
+      // Para superadmin, calcular desde User - SIN filtro de búsqueda para stats
+      // Las estadísticas siempre deben ser del total, no filtradas por búsqueda
+      
+      stats.active = await User.countDocuments({ status: 'approved' });
+      stats.inactive = await User.countDocuments({ status: { $ne: 'approved' } });
+      
+      // Contar por roles - SIN filtro de búsqueda
+      const Role = require('./shared/models/Role');
+      const coordinadorRole = await Role.findOne({ nombre: 'coordinador' });
+      const familyadminRole = await Role.findOne({ nombre: 'familyadmin' });
+      const familyviewerRole = await Role.findOne({ nombre: 'familyviewer' });
+      
+      console.log('📊 [API/USERS] Roles encontrados:', {
+        coordinador: coordinadorRole?._id,
+        familyadmin: familyadminRole?._id,
+        familyviewer: familyviewerRole?._id
+      });
+      
+      if (coordinadorRole) {
+        stats.coordinadores = await User.countDocuments({ role: coordinadorRole._id });
+        console.log('📊 [API/USERS] Coordinadores encontrados:', stats.coordinadores);
+      }
+      
+      if (familyadminRole) {
+        stats.tutores = await User.countDocuments({ role: familyadminRole._id });
+        stats.familyadmin = stats.tutores; // Los tutores son familyadmin
+        console.log('📊 [API/USERS] Tutores (familyadmin) encontrados:', stats.tutores);
+      }
+      if (familyviewerRole) {
+        stats.familiares = await User.countDocuments({ role: familyviewerRole._id });
+        console.log('📊 [API/USERS] Familiares (familyviewer) encontrados:', stats.familiares);
+      }
+      console.log('📊 [API/USERS] Stats calculadas (superadmin):', stats);
+    } else if (currentUser.role?.nombre === 'adminaccount' && req.userInstitution) {
+      console.log('📊 [API/USERS] Calculando stats para adminaccount');
+      // Para adminaccount, calcular desde Shared - SIN filtro de búsqueda para stats
+      // Las estadísticas siempre deben ser del total, no filtradas por búsqueda
+      const sharedForStats = await Shared.find({
+        account: req.userInstitution._id,
+        status: { $in: ['active', 'pending'] }
+      }).populate('user').populate('role');
+      
+      console.log('📊 [API/USERS] Shared associations encontradas:', sharedForStats.length);
+      
+      const uniqueUsersForStats = new Map();
+      sharedForStats.forEach(shared => {
+        if (shared.user && !uniqueUsersForStats.has(shared.user._id.toString())) {
+          // NO aplicar filtro de búsqueda para estadísticas - siempre contar todos
+          uniqueUsersForStats.set(shared.user._id.toString(), {
+            user: shared.user,
+            role: shared.role
+          });
+        }
+      });
+      
+      const allUsersForStats = Array.from(uniqueUsersForStats.values());
+      console.log('📊 [API/USERS] Usuarios únicos para stats:', allUsersForStats.length);
+      
+      stats.total = allUsersForStats.length;
+      stats.active = allUsersForStats.filter(u => u.user.status === 'approved').length;
+      stats.inactive = allUsersForStats.filter(u => u.user.status !== 'approved').length;
+      stats.coordinadores = allUsersForStats.filter(u => u.role?.nombre === 'coordinador').length;
+      stats.tutores = allUsersForStats.filter(u => u.role?.nombre === 'familyadmin').length;
+      stats.familyadmin = stats.tutores; // Los tutores son familyadmin
+      stats.familiares = allUsersForStats.filter(u => u.role?.nombre === 'familyviewer').length;
+      
+      console.log('📊 [API/USERS] Desglose por rol:', {
+        coordinadores: stats.coordinadores,
+        tutores: stats.tutores,
+        familiares: stats.familiares,
+        total: stats.total
+      });
+      
+      console.log('📊 [API/USERS] Stats calculadas (adminaccount):', stats);
+    } else {
+      console.log('⚠️ [API/USERS] No se calcularon stats - rol no reconocido o sin institución');
+    }
+
+    console.log('📊 [API/USERS] Stats finales a enviar:', stats);
 
     res.json({
       success: true,
       data: {
-        users: users.map(user => ({
-          _id: user._id,
-          email: user.email,
-          nombre: user.name,
-          role: user.role,
-          activo: user.status === 'approved',
-          createdAt: user.createdAt,
-          updatedAt: user.updatedAt
-        })),
+        users,
         total,
         page,
-        limit
+        limit,
+        stats
       }
     });
   } catch (error) {
@@ -3623,20 +3903,52 @@ app.post('/accounts', authenticateToken, async (req, res) => {
 });
 
 // Endpoint para crear usuario adminaccount adicional para una cuenta existente (solo superadmin)
-app.post('/accounts/:accountId/admin-users', authenticateToken, async (req, res) => {
+// IMPORTANTE: Este endpoint debe estar antes de rutas más genéricas
+app.post('/api/accounts/:accountId/admin-users', authenticateToken, async (req, res) => {
   try {
+    console.log('🔍 [CREATE ADMIN USER] Request recibida');
+    console.log('🔍 [CREATE ADMIN USER] req.params:', req.params);
+    console.log('🔍 [CREATE ADMIN USER] req.body:', req.body);
+    console.log('🔍 [CREATE ADMIN USER] req.user:', req.user ? 'Presente' : 'No presente');
+    
     const { accountId } = req.params;
     const { nombre, apellido, email } = req.body;
-    const { userId } = req.user;
+    
+    if (!req.user) {
+      console.log('❌ [CREATE ADMIN USER] req.user no está presente');
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no autenticado'
+      });
+    }
+    
+    const userId = req.user.userId || req.user._id;
+    
+    if (!userId) {
+      console.log('❌ [CREATE ADMIN USER] userId no encontrado en req.user');
+      return res.status(401).json({
+        success: false,
+        message: 'ID de usuario no encontrado'
+      });
+    }
 
     console.log('👤 [CREATE ADMIN USER] Iniciando creación de usuario adminaccount...');
     console.log('👤 [CREATE ADMIN USER] Usuario solicitante ID:', userId);
     console.log('🏫 [CREATE ADMIN USER] Cuenta ID:', accountId);
     console.log('📋 [CREATE ADMIN USER] Datos recibidos:', { nombre, apellido, email });
+    console.log('📋 [CREATE ADMIN USER] Tipo de datos:', { 
+      nombre: typeof nombre, 
+      apellido: typeof apellido, 
+      email: typeof email 
+    });
 
     // Verificar que el usuario sea superadmin
     const currentUser = await User.findById(userId).populate('role');
+    console.log('👤 [CREATE ADMIN USER] Usuario encontrado:', currentUser ? 'Sí' : 'No');
+    console.log('👤 [CREATE ADMIN USER] Rol del usuario:', currentUser?.role?.nombre);
+    
     if (!currentUser || currentUser.role?.nombre !== 'superadmin') {
+      console.log('❌ [CREATE ADMIN USER] Usuario no es superadmin o no existe');
       return res.status(403).json({
         success: false,
         message: 'Solo los superadministradores pueden crear usuarios adminaccount'
@@ -3644,30 +3956,43 @@ app.post('/accounts/:accountId/admin-users', authenticateToken, async (req, res)
     }
 
     // Validar campos requeridos
+    console.log('✅ [CREATE ADMIN USER] Validando campos requeridos...');
     if (!nombre || !apellido || !email) {
+      console.log('❌ [CREATE ADMIN USER] Campos faltantes:', {
+        nombre: !nombre,
+        apellido: !apellido,
+        email: !email
+      });
       return res.status(400).json({
         success: false,
         message: 'Nombre, apellido y email son requeridos'
       });
     }
+    console.log('✅ [CREATE ADMIN USER] Campos validados correctamente');
 
     // Verificar que la cuenta existe
+    console.log('✅ [CREATE ADMIN USER] Verificando que la cuenta existe...');
     const account = await Account.findById(accountId);
     if (!account) {
+      console.log('❌ [CREATE ADMIN USER] Cuenta no encontrada:', accountId);
       return res.status(404).json({
         success: false,
         message: 'Cuenta no encontrada'
       });
     }
+    console.log('✅ [CREATE ADMIN USER] Cuenta encontrada:', account.nombre);
 
     // Verificar si ya existe un usuario con ese email
+    console.log('✅ [CREATE ADMIN USER] Verificando si el email ya existe...');
     const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
+      console.log('❌ [CREATE ADMIN USER] Email ya existe:', email);
       return res.status(400).json({
         success: false,
         message: 'Ya existe un usuario con ese email'
       });
     }
+    console.log('✅ [CREATE ADMIN USER] Email disponible');
 
     // Obtener el rol de adminaccount
     const adminRole = await Role.findOne({ nombre: 'adminaccount' });
@@ -3746,10 +4071,29 @@ app.post('/accounts/:accountId/admin-users', authenticateToken, async (req, res)
     res.status(201).json(responseData);
 
   } catch (error) {
-    console.error('❌ [CREATE ADMIN USER] Error:', error);
+    console.error('❌ [CREATE ADMIN USER] Error completo:', error);
+    console.error('❌ [CREATE ADMIN USER] Error stack:', error.stack);
+    console.error('❌ [CREATE ADMIN USER] Error message:', error.message);
+    
+    // Si es un error de validación de Mongoose, devolver 400
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        success: false,
+        message: 'Error de validación: ' + Object.values(error.errors).map((e) => e.message).join(', ')
+      });
+    }
+    
+    // Si es un error de duplicado, devolver 400
+    if (error.code === 11000) {
+      return res.status(400).json({
+        success: false,
+        message: 'Ya existe un registro con estos datos'
+      });
+    }
+    
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor'
+      message: 'Error interno del servidor: ' + error.message
     });
   }
 });
@@ -3898,6 +4242,134 @@ app.get('/dashboard/recent-activities', authenticateToken, setUserInstitution, a
     res.status(500).json({
       success: false,
       message: 'Error al obtener actividades recientes'
+    });
+  }
+});
+
+// ===== ENDPOINTS DE CONFIGURACIÓN DE CUENTA =====
+// IMPORTANTE: Estos endpoints deben estar ANTES de /accounts/:id para evitar conflictos de rutas
+
+// Obtener configuración de una cuenta
+app.get('/api/accounts/:accountId/config', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    console.log('⚙️ [CONFIG] GET /api/accounts/:accountId/config llamado');
+    const { accountId } = req.params;
+    console.log('⚙️ [CONFIG] accountId recibido:', accountId);
+    const currentUser = req.user;
+    console.log('⚙️ [CONFIG] Usuario actual:', currentUser?.email, 'Rol:', currentUser?.role?.nombre);
+
+    // Verificar permisos: solo superadmin o adminaccount de esa cuenta
+    if (currentUser.role?.nombre === 'superadmin') {
+      // Superadmin puede ver cualquier configuración
+    } else if (currentUser.role?.nombre === 'adminaccount' && req.userInstitution) {
+      // Adminaccount solo puede ver configuración de su cuenta
+      if (accountId !== req.userInstitution._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes permisos para ver la configuración de esta cuenta'
+        });
+      }
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver la configuración'
+      });
+    }
+
+    // Obtener o crear configuración por defecto
+    console.log('⚙️ [CONFIG] Obteniendo configuración para accountId:', accountId);
+    const config = await AccountConfig.getOrCreateConfig(accountId);
+    console.log('⚙️ [CONFIG] Configuración obtenida:', {
+      _id: config._id,
+      account: config.account,
+      requiereAprobarActividades: config.requiereAprobarActividades
+    });
+
+    res.json({
+      success: true,
+      data: {
+        config: {
+          _id: config._id,
+          account: config.account,
+          requiereAprobarActividades: config.requiereAprobarActividades,
+          createdAt: config.createdAt,
+          updatedAt: config.updatedAt
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error obteniendo configuración de cuenta:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Actualizar configuración de una cuenta
+app.put('/api/accounts/:accountId/config', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const { requiereAprobarActividades } = req.body;
+    const currentUser = req.user;
+
+    // Verificar permisos: solo superadmin o adminaccount de esa cuenta
+    if (currentUser.role?.nombre === 'superadmin') {
+      // Superadmin puede actualizar cualquier configuración
+    } else if (currentUser.role?.nombre === 'adminaccount' && req.userInstitution) {
+      // Adminaccount solo puede actualizar configuración de su cuenta
+      if (accountId !== req.userInstitution._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes permisos para actualizar la configuración de esta cuenta'
+        });
+      }
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para actualizar la configuración'
+      });
+    }
+
+    // Obtener o crear configuración
+    let config = await AccountConfig.findOne({ account: accountId });
+    
+    if (!config) {
+      config = new AccountConfig({
+        account: accountId,
+        requiereAprobarActividades: requiereAprobarActividades !== undefined ? requiereAprobarActividades : true
+      });
+    } else {
+      if (requiereAprobarActividades !== undefined) {
+        config.requiereAprobarActividades = requiereAprobarActividades;
+      }
+    }
+
+    await config.save();
+
+    console.log('⚙️ [CONFIG] Configuración actualizada:', {
+      accountId,
+      requiereAprobarActividades: config.requiereAprobarActividades
+    });
+
+    res.json({
+      success: true,
+      message: 'Configuración actualizada exitosamente',
+      data: {
+        config: {
+          _id: config._id,
+          account: config.account,
+          requiereAprobarActividades: config.requiereAprobarActividades,
+          createdAt: config.createdAt,
+          updatedAt: config.updatedAt
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error actualizando configuración de cuenta:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
     });
   }
 });
@@ -5755,6 +6227,8 @@ app.get('/activities/mobile', authenticateToken, async (req, res) => {
     console.log('👤 [ACTIVITIES MOBILE] Usuario:', userId);
     console.log('🏢 [ACTIVITIES MOBILE] AccountId:', accountId);
     console.log('📚 [ACTIVITIES MOBILE] DivisionId:', divisionId);
+    console.log('📅 [ACTIVITIES MOBILE] selectedDate recibido (raw):', selectedDate);
+    console.log('📅 [ACTIVITIES MOBILE] Tipo de selectedDate:', typeof selectedDate);
 
     if (!accountId) {
       return res.status(400).json({
@@ -5799,18 +6273,31 @@ app.get('/activities/mobile', authenticateToken, async (req, res) => {
       ]
     };
 
-    // Filtrar por fecha: cuando hay fecha seleccionada, buscar actividades de esa fecha primero
+    // Filtrar por fecha: cuando hay fecha seleccionada, devolver actividades menores a esa fecha
+    // (porque las actividades se muestran ordenadas por fecha más grande primero)
     let dateFilter = null;
     if (selectedDate) {
+      // Parsear la fecha desde el string ISO
       const selected = new Date(selectedDate);
-      const startDate = new Date(selected.getFullYear(), selected.getMonth(), selected.getDate(), 0, 0, 0, 0);
-      const endDate = new Date(selected.getFullYear(), selected.getMonth(), selected.getDate(), 23, 59, 59, 999);
+      console.log('📅 [ACTIVITIES MOBILE] Fecha parseada desde string:', selected.toISOString());
+      
+      // Extraer año, mes y día de la fecha parseada
+      // Usar métodos UTC para evitar problemas de zona horaria
+      const year = selected.getUTCFullYear();
+      const month = selected.getUTCMonth();
+      const day = selected.getUTCDate();
+      
+      console.log('📅 [ACTIVITIES MOBILE] Año:', year, 'Mes:', month, 'Día:', day);
+      
+      // Crear fecha límite al inicio del día seleccionado en UTC
+      const endDate = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+      
       dateFilter = {
-        startDate,
         endDate
       };
-      console.log('📅 [ACTIVITIES MOBILE] Fecha seleccionada:', selectedDate);
-      console.log('📅 [ACTIVITIES MOBILE] Rango de fecha:', startDate.toISOString(), 'a', endDate.toISOString());
+      console.log('📅 [ACTIVITIES MOBILE] Límite superior UTC (actividades menores a):', endDate.toISOString());
+      console.log('📅 [ACTIVITIES MOBILE] Límite superior timestamp:', endDate.getTime());
+      console.log('📅 [ACTIVITIES MOBILE] Filtro aplicado: createdAt <', endDate.toISOString());
     } else {
       console.log('📅 [ACTIVITIES MOBILE] Sin filtro de fecha - mostrando todas las actividades');
     }
@@ -5849,46 +6336,59 @@ app.get('/activities/mobile', authenticateToken, async (req, res) => {
 
     if (dateFilter) {
       // CASO 1: Hay fecha seleccionada
-      // 1. Primero obtener actividades de la fecha seleccionada
+      // Devolver solo actividades menores a la fecha seleccionada
+      // (porque las actividades se muestran ordenadas por fecha más grande primero)
       const dateQuery = {
         ...query,
         createdAt: {
-          $gte: dateFilter.startDate,
-          $lte: dateFilter.endDate
+          $lt: dateFilter.endDate
         }
       };
       
-      const activitiesOnDate = await Activity.find(dateQuery)
-        .populate('usuario', 'name email')
-        .populate('account', 'nombre razonSocial')
-        .populate('division', 'nombre descripcion')
-        .populate('participantes', 'nombre apellido dni')
-        .sort({ createdAt: -1 }); // Orden cronológico descendente (más recientes primero)
-      
-      console.log('📅 [ACTIVITIES MOBILE] Actividades de la fecha seleccionada:', activitiesOnDate.length);
-      
-      // 2. Obtener las 25 actividades más cercanas anteriores a la fecha seleccionada
-      const previousQuery = {
+      console.log('📅 [ACTIVITIES MOBILE] Query completo con filtro de fecha:');
+      console.log(JSON.stringify({
         ...query,
         createdAt: {
-          $lt: dateFilter.startDate
+          $lt: dateFilter.endDate.toISOString()
         }
-      };
+      }, null, 2));
+      console.log('📅 [ACTIVITIES MOBILE] dateQuery object (para MongoDB):', {
+        account: dateQuery.account,
+        activo: dateQuery.activo,
+        'createdAt.$lt': dateQuery.createdAt.$lt,
+        'createdAt.$lt ISO': dateQuery.createdAt.$lt.toISOString(),
+        'createdAt.$lt timestamp': dateQuery.createdAt.$lt.getTime()
+      });
+      console.log('📅 [ACTIVITIES MOBILE] Buscando actividades con createdAt <', dateFilter.endDate.toISOString());
+      console.log('📅 [ACTIVITIES MOBILE] Timestamp límite:', dateFilter.endDate.getTime());
       
-      const previousActivities = await Activity.find(previousQuery)
+      // Verificar que el filtro esté presente antes de ejecutar la consulta
+      if (!dateQuery.createdAt || !dateQuery.createdAt.$lt) {
+        console.error('❌ [ACTIVITIES MOBILE] ERROR: El filtro de fecha no está presente en la consulta!');
+      }
+      
+      activities = await Activity.find(dateQuery)
         .populate('usuario', 'name email')
         .populate('account', 'nombre razonSocial')
         .populate('division', 'nombre descripcion')
         .populate('participantes', 'nombre apellido dni')
-        .sort({ createdAt: -1 }) // Orden cronológico descendente
-        .limit(25); // Máximo 25 actividades
+        .sort({ createdAt: -1 }) // Orden cronológico descendente (más recientes primero)
+        .limit(100); // Limitar a las últimas 100 actividades
       
-      console.log('📅 [ACTIVITIES MOBILE] Actividades anteriores (máximo 25):', previousActivities.length);
-      
-      // 3. Combinar: primero las de la fecha seleccionada, luego las anteriores
-      activities = [...activitiesOnDate, ...previousActivities];
-      
-      console.log('📊 [ACTIVITIES MOBILE] Total actividades combinadas:', activities.length);
+      console.log('📅 [ACTIVITIES MOBILE] Actividades encontradas:', activities.length);
+      // Log de las primeras 5 actividades para verificar las fechas
+      if (activities.length > 0) {
+        console.log('📅 [ACTIVITIES MOBILE] Primeras 5 actividades encontradas:');
+        const limitTimestamp = dateFilter.endDate.getTime();
+        activities.slice(0, 5).forEach((act, idx) => {
+          const actTimestamp = act.createdAt.getTime();
+          const isBeforeLimit = actTimestamp < limitTimestamp;
+          console.log(`  ${idx + 1}. createdAt: ${act.createdAt.toISOString()}, Timestamp: ${actTimestamp}, Límite: ${limitTimestamp}, ¿Es menor? ${isBeforeLimit}`);
+          if (!isBeforeLimit) {
+            console.error(`  ⚠️ ERROR: Actividad ${idx + 1} tiene fecha mayor o igual al límite!`);
+          }
+        });
+      }
     } else {
       // CASO 2: No hay fecha seleccionada - mostrar las últimas actividades
       const totalActivities = await Activity.countDocuments(query);
@@ -6043,6 +6543,19 @@ app.post('/activities', authenticateToken, setUserInstitution, async (req, res) 
       });
     }
 
+    // Obtener configuración de la cuenta para determinar el estado inicial
+    const accountConfig = await AccountConfig.getOrCreateConfig(accountId);
+    console.log('⚙️ [ACTIVITIES] Configuración de cuenta:', {
+      accountId,
+      requiereAprobarActividades: accountConfig.requiereAprobarActividades
+    });
+
+    // Determinar el estado inicial según la configuración
+    // Si requiereAprobarActividades es true: 'borrador' (debe ser aprobada)
+    // Si requiereAprobarActividades es false: 'publicada' (se publica directamente)
+    const estadoInicial = accountConfig.requiereAprobarActividades ? 'borrador' : 'publicada';
+    console.log('⚙️ [ACTIVITIES] Estado inicial de la actividad:', estadoInicial);
+
     // Crear la actividad
     const activity = new Activity({
       titulo,
@@ -6055,7 +6568,7 @@ app.post('/activities', authenticateToken, setUserInstitution, async (req, res) 
       usuario: userId,
       tipo: 'create',
       entidad: 'event',
-      estado: 'borrador' // Las actividades se crean en estado borrador
+      estado: estadoInicial
     });
 
     await activity.save();
@@ -7821,14 +8334,16 @@ app.get('/coordinators/by-division/:divisionId', authenticateToken, setUserInsti
           nombre: division.nombre,
           descripcion: division.descripcion
         },
-        coordinadores: coordinadores.map(association => ({
-          _id: association.user._id,
-          nombre: association.user.name,
-          email: association.user.email,
-          activo: association.user.status === 'approved',
-          asociacionId: association._id,
-          fechaAsociacion: association.createdAt
-        }))
+        coordinadores: coordinadores
+          .filter(association => association.user)
+          .map(association => ({
+            _id: association.user._id,
+            nombre: association.user.name,
+            email: association.user.email,
+            activo: association.user.status === 'approved',
+            asociacionId: association._id,
+            fechaAsociacion: association.createdAt
+          }))
       }
     });
 
@@ -8897,20 +9412,20 @@ app.get('/pickups/by-student/:studentId', authenticateToken, async (req, res) =>
     }
 
     // Buscar contactos autorizados para el estudiante
-    const pickups = await Pickup.find({ student: studentId })
-      .select('nombre telefono relacion activo')
+    const pickups = await Pickup.find({ 
+      student: studentId,
+      status: 'active' // Filtrar solo los activos
+    })
+      .select('nombre apellido dni status')
       .sort({ nombre: 1 });
-
-    // Filtrar solo los activos
-    const activePickups = pickups.filter(pickup => pickup.activo !== false);
 
     res.json({
       success: true,
-      data: activePickups.map(pickup => ({
+      data: pickups.map(pickup => ({
         _id: pickup._id,
         nombre: pickup.nombre,
-        telefono: pickup.telefono,
-        relacion: pickup.relacion
+        apellido: pickup.apellido || '',
+        dni: pickup.dni || ''
       }))
     });
 
@@ -8952,7 +9467,7 @@ app.get('/students/:studentId', authenticateToken, async (req, res) => {
       student: studentId,
       status: 'active'
     })
-    .populate('user', 'name email')
+    .populate('user', 'name email dni')
     .populate('role', 'nombre descripcion');
 
     // Organizar tutores por rol
@@ -8967,13 +9482,15 @@ app.get('/students/:studentId', authenticateToken, async (req, res) => {
           tutorInfo.familyadmin = {
             _id: tutor.user._id,
             name: tutor.user.name,
-            email: tutor.user.email
+            email: tutor.user.email,
+            dni: tutor.user.dni || null
           };
         } else if (tutor.role.nombre === 'familyviewer') {
           tutorInfo.familyviewer = {
             _id: tutor.user._id,
             name: tutor.user.name,
-            email: tutor.user.email
+            email: tutor.user.email,
+            dni: tutor.user.dni || null
           };
         }
       }
@@ -9424,9 +9941,67 @@ app.get('/notifications', authenticateToken, setUserInstitution, async (req, res
       isCoordinador: effectiveIsCoordinador
     };
     
-    const notifications = await Notification.getUserNotifications(userId, options);
+    let notifications = await Notification.getUserNotifications(userId, options);
     
     console.log('🔔 [GET NOTIFICATIONS] Notificaciones encontradas:', notifications.length);
+    
+    // Si el usuario es familyadmin o familyviewer, poblar recipients con información del estudiante
+    if (effectiveRole === 'familyadmin' || effectiveRole === 'familyviewer') {
+      // Recopilar todos los recipient IDs de todas las notificaciones
+      const allRecipientIds = [];
+      notifications.forEach(notification => {
+        if (notification.recipients && notification.recipients.length > 0) {
+          allRecipientIds.push(...notification.recipients.map(r => r._id || r));
+        }
+      });
+      
+      // Hacer consultas en batch para estudiantes y usuarios
+      const uniqueRecipientIds = [...new Set(allRecipientIds.map(id => id.toString()))];
+      
+      const [students, users] = await Promise.all([
+        Student.find({ _id: { $in: uniqueRecipientIds } }).select('_id nombre apellido email'),
+        User.find({ _id: { $in: uniqueRecipientIds } }).select('_id name email')
+      ]);
+      
+      // Crear mapas para búsqueda rápida
+      const studentsMap = new Map(students.map(s => [s._id.toString(), s]));
+      const usersMap = new Map(users.map(u => [u._id.toString(), u]));
+      
+      // Poblar recipients para cada notificación
+      const populatedNotifications = notifications.map(notification => {
+        let notificationObj = notification.toObject();
+        
+        if (notification.recipients && notification.recipients.length > 0) {
+          const populatedRecipients = notification.recipients.map(recipientId => {
+            const id = recipientId._id ? recipientId._id.toString() : recipientId.toString();
+            
+            // Buscar primero en estudiantes
+            let recipient = studentsMap.get(id);
+            if (recipient) {
+              const recipientObj = recipient.toObject();
+              recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
+              return recipientObj;
+            }
+            
+            // Si no es estudiante, buscar en usuarios
+            recipient = usersMap.get(id);
+            if (recipient) {
+              const recipientObj = recipient.toObject();
+              recipientObj.nombre = recipientObj.name;
+              return recipientObj;
+            }
+            
+            return null;
+          }).filter(r => r !== null);
+          
+          notificationObj.recipients = populatedRecipients;
+        }
+        
+        return notificationObj;
+      });
+      
+      notifications = populatedNotifications;
+    }
     
     res.json({
       success: true,
@@ -9544,7 +10119,7 @@ app.get('/notifications/family', authenticateToken, async (req, res) => {
     console.log('🔔 [GET FAMILY NOTIFICATIONS] Query final:', JSON.stringify(query, null, 2));
     
     // Buscar notificaciones
-    const notifications = await Notification.find(query)
+    let notifications = await Notification.find(query)
       .populate('sender', 'name email')
       .populate('account', 'nombre')
       .populate('division', 'nombre')
@@ -9554,9 +10129,71 @@ app.get('/notifications/family', authenticateToken, async (req, res) => {
     
     console.log('🔔 [GET FAMILY NOTIFICATIONS] Notificaciones encontradas:', notifications.length);
     
+    // Poblar recipients con información del estudiante (optimizado con consultas en batch)
+    // Recopilar todos los recipient IDs de todas las notificaciones
+    const allRecipientIds = [];
+    notifications.forEach(notification => {
+      if (notification.recipients && notification.recipients.length > 0) {
+        allRecipientIds.push(...notification.recipients.map(r => r._id || r));
+      }
+    });
+    
+    // Hacer consultas en batch para estudiantes y usuarios
+    const uniqueRecipientIds = [...new Set(allRecipientIds.map(id => id.toString()))];
+    
+    const [students, users] = await Promise.all([
+      Student.find({ _id: { $in: uniqueRecipientIds } }).select('_id nombre apellido email'),
+      User.find({ _id: { $in: uniqueRecipientIds } }).select('_id name email')
+    ]);
+    
+    // Crear mapas para búsqueda rápida
+    const studentsMap = new Map(students.map(s => [s._id.toString(), s]));
+    const usersMap = new Map(users.map(u => [u._id.toString(), u]));
+    
+    // Poblar recipients para cada notificación
+    // IMPORTANTE: Solo incluir los recipients que son estudiantes asociados al usuario actual
+    const populatedNotifications = notifications.map(notification => {
+      let notificationObj = notification.toObject();
+      
+      if (notification.recipients && notification.recipients.length > 0) {
+        // Filtrar solo los recipients que son estudiantes asociados al tutor actual
+        const relevantRecipients = notification.recipients.filter(recipientId => {
+          const id = recipientId._id ? recipientId._id.toString() : recipientId.toString();
+          // Solo incluir si el recipient es uno de los estudiantes asociados al tutor
+          return studentIds.some(studentId => studentId.toString() === id);
+        });
+        
+        const populatedRecipients = relevantRecipients.map(recipientId => {
+          const id = recipientId._id ? recipientId._id.toString() : recipientId.toString();
+          
+          // Buscar primero en estudiantes
+          let recipient = studentsMap.get(id);
+          if (recipient) {
+            const recipientObj = recipient.toObject();
+            recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
+            return recipientObj;
+          }
+          
+          // Si no es estudiante, buscar en usuarios
+          recipient = usersMap.get(id);
+          if (recipient) {
+            const recipientObj = recipient.toObject();
+            recipientObj.nombre = recipientObj.name;
+            return recipientObj;
+          }
+          
+          return null;
+        }).filter(r => r !== null);
+        
+        notificationObj.recipients = populatedRecipients;
+      }
+      
+      return notificationObj;
+    });
+    
     res.json({
       success: true,
-      data: notifications
+      data: populatedNotifications
     });
     
   } catch (error) {
@@ -10314,7 +10951,7 @@ app.get('/backoffice/notifications', authenticateToken, setUserInstitution, asyn
     
     // Obtener notificaciones con paginación
     const notifications = await Notification.find(query)
-      .populate('sender', 'nombre email')
+      .populate('sender', 'name email')
       .populate('account', 'nombre')
       .populate('division', 'nombre')
       .sort({ sentAt: -1 })
@@ -10520,10 +11157,10 @@ app.post('/notifications', authenticateToken, setUserInstitution, async (req, re
     }
 
     // Populate sender info
-    await notification.populate('sender', 'nombre email');
+    await notification.populate('sender', 'name email');
     await notification.populate('account', 'nombre');
     await notification.populate('division', 'nombre');
-    await notification.populate('recipients', 'nombre email');
+    // Recipients pueden ser estudiantes o usuarios, se poblarán según corresponda
 
     const responseData = {
       success: true,
@@ -10580,21 +11217,24 @@ app.get('/notifications/recipients', authenticateToken, async (req, res) => {
     }
     
     const associations = await Shared.find(query)
-      .populate('user', 'nombre email')
+      .populate('user', 'name email')
       .populate('account', 'nombre')
       .populate('division', 'nombre')
       .populate('role', 'nombre');
     
-    const recipients = associations.map(assoc => ({
-      _id: assoc.user._id,
-      nombre: assoc.user.nombre,
-      email: assoc.user.email,
-      role: {
-        nombre: assoc.role.nombre
-      },
-      account: assoc.account.nombre,
-      division: assoc.division?.nombre || 'Sin división'
-    }));
+    // Filtrar asociaciones que tengan usuario, cuenta y rol válidos
+    const recipients = associations
+      .filter(assoc => assoc.user && assoc.account && assoc.role)
+      .map(assoc => ({
+        _id: assoc.user._id,
+        nombre: assoc.user.name || 'Sin nombre', // User model usa 'name', no 'nombre'
+        email: assoc.user.email || 'Sin email',
+        role: {
+          nombre: assoc.role.nombre || 'Sin rol'
+        },
+        account: assoc.account.nombre || 'Sin cuenta',
+        division: assoc.division?.nombre || 'Sin división'
+      }));
     
     console.log('🔔 [GET RECIPIENTS] Destinatarios encontrados:', recipients.length);
     
@@ -10718,10 +11358,20 @@ app.post('/events/create', authenticateToken, async (req, res) => {
     console.log('📅 [CREATE EVENT] Datos recibidos:', { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId, requiereAutorizacion });
     console.log('👤 [CREATE EVENT] Usuario:', currentUser._id, currentUser.role?.nombre);
 
-    // Verificar que el usuario tiene permisos para crear eventos (usar rol efectivo)
-    const activeAssociation = await ActiveAssociation.findOne({ user: currentUser._id }).populate('role');
-    const effectiveRole = activeAssociation?.role?.nombre || currentUser.role?.nombre;
-    console.log('🔍 [CREATE EVENT] Rol efectivo:', effectiveRole);
+    // Verificar que el usuario tiene permisos para crear eventos
+    // Para adminaccount y superadmin, usar el rol directo del usuario
+    // Para coordinadores, verificar el rol efectivo desde ActiveAssociation
+    const userRole = currentUser.role?.nombre;
+    let effectiveRole = userRole;
+    
+    // Solo verificar ActiveAssociation para coordinadores
+    if (userRole === 'coordinador') {
+      const activeAssociation = await ActiveAssociation.findOne({ user: currentUser._id }).populate('role');
+      effectiveRole = activeAssociation?.role?.nombre || userRole;
+      console.log('🔍 [CREATE EVENT] Coordinador - Rol efectivo:', effectiveRole);
+    } else {
+      console.log('🔍 [CREATE EVENT] Rol del usuario:', effectiveRole);
+    }
 
     if (!['coordinador', 'adminaccount', 'superadmin'].includes(effectiveRole)) {
       return res.status(403).json({
@@ -10778,6 +11428,18 @@ app.post('/events/create', authenticateToken, async (req, res) => {
       targetAccount = userAssociation.account._id;
       targetDivision = divisionId || null;
       console.log('✅ [CREATE EVENT] Adminaccount autorizado. TargetAccount:', targetAccount, 'TargetDivision:', targetDivision);
+    } else if (currentUser.role?.nombre === 'superadmin') {
+      // Superadmin puede crear eventos en cualquier institución/división
+      console.log('🔍 [CREATE EVENT] Usuario es superadmin, usando institutionId y divisionId directamente');
+      if (!institutionId) {
+        return res.status(400).json({
+          success: false,
+          message: 'Se requiere institutionId para crear el evento'
+        });
+      }
+      targetAccount = institutionId;
+      targetDivision = divisionId || null;
+      console.log('✅ [CREATE EVENT] Superadmin autorizado. TargetAccount:', targetAccount, 'TargetDivision:', targetDivision);
     } else {
       // Para coordinadores, verificar asociación específica
       const assocFilter = {
@@ -11114,6 +11776,120 @@ app.post('/events/:eventId/authorize', authenticateToken, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor al autorizar evento'
+    });
+  }
+});
+
+// Obtener eventos del mes con autorizaciones para exportar (adminaccount y superadmin)
+app.get('/api/events/export/month', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    const { divisionId, fechaInicio, fechaFin } = req.query;
+    const currentUser = req.user;
+
+    console.log('📊 [EXPORT EVENTS] Solicitud de exportación:', { divisionId, fechaInicio, fechaFin });
+    console.log('👤 [EXPORT EVENTS] Usuario:', currentUser._id, currentUser.role?.nombre);
+
+    // Verificar permisos
+    if (!['adminaccount', 'superadmin'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para exportar eventos'
+      });
+    }
+
+    if (!divisionId || !fechaInicio || !fechaFin) {
+      return res.status(400).json({
+        success: false,
+        message: 'divisionId, fechaInicio y fechaFin son requeridos'
+      });
+    }
+
+    // Obtener todos los eventos del mes para la división
+    const startDate = new Date(fechaInicio);
+    const endDate = new Date(fechaFin);
+    endDate.setHours(23, 59, 59, 999); // Incluir todo el último día
+
+    const events = await Event.find({
+      division: divisionId,
+      fecha: {
+        $gte: startDate,
+        $lte: endDate
+      }
+    })
+    .populate('institucion', 'nombre')
+    .populate('division', 'nombre')
+    .populate('creador', 'name email')
+    .sort({ fecha: 1, hora: 1 });
+
+    console.log('📊 [EXPORT EVENTS] Eventos encontrados:', events.length);
+
+    // Obtener estudiantes de la división
+    const students = await Student.find({
+      division: divisionId,
+      activo: true
+    })
+    .select('nombre apellido')
+    .sort({ apellido: 1, nombre: 1 });
+
+    console.log('📊 [EXPORT EVENTS] Estudiantes encontrados:', students.length);
+
+    // Para cada evento que requiera autorización, obtener las autorizaciones
+    const eventsWithAuthorizations = await Promise.all(
+      events.map(async (event) => {
+        let authorizations = [];
+        let studentsPending = [];
+
+        if (event.requiereAutorizacion) {
+          // Obtener autorizaciones del evento
+          authorizations = await EventAuthorization.find({ event: event._id })
+            .populate('student', 'nombre apellido')
+            .populate('familyadmin', 'name email');
+
+          // Identificar estudiantes que aún no han respondido
+          const studentsWithResponse = authorizations.map(auth => auth.student._id.toString());
+          studentsPending = students.filter(student => 
+            !studentsWithResponse.includes(student._id.toString())
+          );
+        }
+
+        return {
+          _id: event._id,
+          titulo: event.titulo,
+          descripcion: event.descripcion,
+          fecha: event.fecha,
+          hora: event.hora,
+          lugar: event.lugar || '',
+          requiereAutorizacion: event.requiereAutorizacion,
+          institucion: event.institucion?.nombre || '',
+          division: event.division?.nombre || '',
+          authorizations: authorizations.map(auth => ({
+            estudiante: `${auth.student.nombre} ${auth.student.apellido}`,
+            tutor: auth.familyadmin?.name || '',
+            emailTutor: auth.familyadmin?.email || '',
+            autorizado: auth.autorizado,
+            fechaAutorizacion: auth.fechaAutorizacion,
+            comentarios: auth.comentarios || ''
+          })),
+          studentsPending: studentsPending.map(student => ({
+            estudiante: `${student.nombre} ${student.apellido}`
+          }))
+        };
+      })
+    );
+
+    res.json({
+      success: true,
+      data: {
+        events: eventsWithAuthorizations,
+        totalEvents: events.length,
+        totalStudents: students.length
+      }
+    });
+  } catch (error) {
+    console.error('❌ [EXPORT EVENTS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor al exportar eventos'
     });
   }
 });
@@ -13230,6 +14006,84 @@ app.post('/shared', authenticateToken, async (req, res) => {
   }
 });
 
+// Obtener familyviewers de un estudiante (solo para familyadmin del mismo estudiante)
+app.get('/shared/student/:studentId/familyviewers', authenticateToken, async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { userId } = req.user;
+
+    console.log('🔍 [FAMILYVIEWERS GET] Buscando familyviewers para estudiante:', studentId);
+    console.log('👤 [FAMILYVIEWERS GET] Usuario solicitante:', userId);
+
+    // Verificar que el usuario tiene una asociación activa con este estudiante como familyadmin
+    const userAssociation = await Shared.findOne({
+      user: userId,
+      student: studentId,
+      status: 'active'
+    }).populate('role');
+
+    if (!userAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver los familyviewers de este estudiante'
+      });
+    }
+
+    // Verificar que el usuario es familyadmin para este estudiante
+    if (userAssociation.role?.nombre !== 'familyadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los administradores familiares pueden ver los familyviewers'
+      });
+    }
+
+    // Buscar todas las asociaciones familyviewer activas para este estudiante
+    const familyviewerRole = await Role.findOne({ nombre: 'familyviewer' });
+    if (!familyviewerRole) {
+      return res.status(500).json({
+        success: false,
+        message: 'Rol familyviewer no encontrado'
+      });
+    }
+
+    const familyviewers = await Shared.find({
+      student: studentId,
+      role: familyviewerRole._id,
+      status: 'active'
+    })
+      .populate('user', 'name email')
+      .populate('role', 'nombre')
+      .sort({ createdAt: -1 });
+
+    console.log('📊 [FAMILYVIEWERS GET] Familyviewers encontrados:', familyviewers.length);
+
+    res.json({
+      success: true,
+      data: {
+        familyviewers: familyviewers.map(assoc => ({
+          _id: assoc._id,
+          user: {
+            _id: assoc.user._id,
+            name: assoc.user.name,
+            email: assoc.user.email
+          },
+          role: {
+            _id: assoc.role._id,
+            nombre: assoc.role.nombre
+          },
+          createdAt: assoc.createdAt
+        }))
+      }
+    });
+  } catch (error) {
+    console.error('Error obteniendo familyviewers:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
 // Eliminar asociación (solo familyadmin)
 app.delete('/shared/:id', authenticateToken, async (req, res) => {
   try {
@@ -13237,41 +14091,54 @@ app.delete('/shared/:id', authenticateToken, async (req, res) => {
     const { userId } = req.user;
     const { id } = req.params;
     
-    // Verificar que el usuario es familyadmin
-    const user = await User.findById(userId).populate('role');
-    if (user.role?.nombre !== 'familyadmin') {
+    // Buscar la asociación a eliminar
+    const associationToDelete = await Shared.findById(id).populate('role', 'nombre');
+    if (!associationToDelete) {
+      return res.status(404).json({
+        success: false,
+        message: 'Asociación no encontrada'
+      });
+    }
+
+    // Verificar que la asociación a eliminar es de un familyviewer
+    if (associationToDelete.role?.nombre !== 'familyviewer') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo se pueden eliminar asociaciones de familyviewer'
+      });
+    }
+
+    // Verificar que el usuario tiene una asociación familyadmin con el mismo estudiante
+    const userAssociation = await Shared.findOne({
+      user: userId,
+      student: associationToDelete.student,
+      status: 'active'
+    }).populate('role', 'nombre');
+
+    if (!userAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para eliminar esta asociación. Solo puedes eliminar familyviewers de tu estudiante.'
+      });
+    }
+
+    // Verificar que el usuario es familyadmin para este estudiante
+    if (userAssociation.role?.nombre !== 'familyadmin') {
       return res.status(403).json({
         success: false,
         message: 'Solo los administradores familiares pueden eliminar asociaciones'
       });
     }
     
-    // Buscar la asociación
-    const association = await Shared.findById(id);
-    if (!association) {
-      return res.status(404).json({
-        success: false,
-        message: 'Asociación no encontrada'
-      });
-    }
-    
-    // Verificar que el usuario es el propietario de la asociación
-    if (association.user.toString() !== userId) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para eliminar esta asociación'
-      });
-    }
-    
     // Eliminar la asociación (soft delete)
-    association.status = 'inactive';
-    await association.save();
+    associationToDelete.status = 'inactive';
+    await associationToDelete.save();
     
     console.log('✅ [SHARED DELETE] Asociación eliminada correctamente');
     
     res.json({
       success: true,
-      message: 'Asociación eliminada correctamente'
+      message: 'Familyviewer eliminado correctamente'
     });
   } catch (error) {
     console.error('Error al eliminar asociación:', error);
@@ -13315,12 +14182,38 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
       .populate('account division student role');
     
     // Verificar que el estudiante pertenece al familyadmin
-    if (userAssociation.student?._id.toString() !== studentId) {
+    // IMPORTANTE: Verificar todas las asociaciones del usuario, no solo la activa
+    // porque un familyadmin puede tener múltiples estudiantes
+    const allUserAssociations = await Shared.find({
+      user: userId,
+      role: userAssociation.role._id,
+      status: 'active'
+    }).populate('student');
+    
+    const hasPermission = allUserAssociations.some(assoc => 
+      assoc.student?._id.toString() === studentId.toString()
+    );
+    
+    if (!hasPermission) {
+      console.log('❌ [SHARED REQUEST] Permiso denegado - El estudiante no pertenece al familyadmin');
+      console.log('🔍 [SHARED REQUEST] StudentId solicitado:', studentId);
+      console.log('🔍 [SHARED REQUEST] Estudiantes del usuario:', allUserAssociations.map(a => ({
+        id: a.student?._id?.toString(),
+        nombre: a.student?.nombre
+      })));
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para agregar familiares a este estudiante'
       });
     }
+    
+    // Obtener la asociación específica del estudiante solicitado para usar sus datos (account, division)
+    const studentAssociation = allUserAssociations.find(assoc => 
+      assoc.student?._id.toString() === studentId.toString()
+    );
+    
+    // Usar la asociación del estudiante específico si existe, sino usar la activa
+    const associationToUse = studentAssociation || userAssociation;
     
     // Verificar si el email ya existe en users
     const existingUser = await User.findOne({ email: email.toLowerCase() });
@@ -13328,17 +14221,19 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
     if (existingUser) {
       console.log('✅ [SHARED REQUEST] Usuario encontrado, creando asociación directa');
       
-      // Verificar si ya existe una asociación para este usuario en la misma cuenta
+      // Verificar si ya existe una asociación para este usuario con este estudiante específico
+      // Permitimos múltiples asociaciones para familyviewers (pueden ser visualizadores de varios hijos)
+      // pero no permitimos duplicados para el mismo estudiante
       const existingShared = await Shared.findOne({
         user: existingUser._id,
-        account: userAssociation.account._id,
+        student: studentId,
         status: 'active'
       });
       
       if (existingShared) {
         return res.status(400).json({
           success: false,
-          message: 'El usuario ya tiene una asociación activa en esta institución'
+          message: 'El usuario ya tiene una asociación activa con este estudiante'
         });
       }
       
@@ -13354,8 +14249,8 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
       // Crear la asociación directamente
       const newShared = new Shared({
         user: existingUser._id,
-        account: userAssociation.account._id,
-        division: userAssociation.division?._id,
+        account: associationToUse.account._id,
+        division: associationToUse.division?._id,
         student: studentId,
         role: familyviewerRole._id,
         status: 'active',
@@ -13379,11 +14274,19 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
         console.log(`ℹ️ [AUTO-ACTIVE] Usuario ${existingUser._id} ya tiene una asociación activa, no se cambia automáticamente`);
       }
       
+      // Obtener información del estudiante para el email
+      const student = await Student.findById(studentId).select('nombre apellido');
+      const studentName = student ? `${student.nombre} ${student.apellido}` : 'el estudiante';
+      
+      // Enviar email de notificación de invitación (sin credenciales)
+      sendEmailAsync(sendFamilyInvitationNotificationEmail, null, existingUser.email, existingUser.name, studentName);
+      console.log('📧 [SHARED REQUEST] Email de notificación de invitación familiar programado para envío asíncrono a:', existingUser.email);
+      
       console.log('✅ [SHARED REQUEST] Asociación creada exitosamente');
       
       res.status(201).json({
         success: true,
-        message: 'Asociación creada exitosamente',
+        message: 'Asociación creada exitosamente. Se envió un email de notificación.',
         data: {
           user: {
             _id: existingUser._id,
@@ -13440,8 +14343,8 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
           // Crear la asociación inmediatamente
           const newShared = new Shared({
             user: newUser._id,
-            account: userAssociation.account._id,
-            division: userAssociation.division?._id,
+            account: associationToUse.account._id,
+            division: associationToUse.division?._id,
             student: studentId,
             role: familyviewerRole._id,
             status: 'active',
@@ -13492,10 +14395,10 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
           const requestedShared = new RequestedShared({
             requestedBy: userId,
             requestedEmail: email.toLowerCase(),
-            account: userAssociation.account._id,
-            division: userAssociation.division?._id,
-            student: userAssociation.student?._id,
-            role: userAssociation.role._id,
+            account: associationToUse.account._id,
+            division: associationToUse.division?._id,
+            student: studentId,
+            role: associationToUse.role._id,
             status: 'pending'
           });
           
@@ -13530,10 +14433,10 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
         const requestedShared = new RequestedShared({
           requestedBy: userId,
           requestedEmail: email.toLowerCase(),
-          account: userAssociation.account._id,
-          division: userAssociation.division?._id,
-          student: userAssociation.student?._id,
-          role: userAssociation.role._id,
+          account: associationToUse.account._id,
+          division: associationToUse.division?._id,
+          student: studentId,
+          role: associationToUse.role._id,
           status: 'pending'
         });
         
@@ -14189,6 +15092,10 @@ app.get('/students/:studentId/favorites', authenticateToken, async (req, res) =>
         { path: 'usuario', select: 'name email' }
       ]
     })
+    .populate({
+      path: 'student',
+      select: 'nombre apellido'
+    })
     .sort({ addedAt: -1 });
 
     console.log('🔍 [FAVORITES] Favoritos encontrados:', favorites.length);
@@ -14201,6 +15108,11 @@ app.get('/students/:studentId/favorites', authenticateToken, async (req, res) =>
     // Generar URLs firmadas para las imágenes de las actividades
     const favoritesWithSignedUrls = await Promise.all(favorites.map(async (favorite) => {
       const favoriteObj = favorite.toObject();
+      
+      // Asegurar que el campo student esté disponible (como ID o como objeto poblado)
+      if (!favoriteObj.student) {
+        favoriteObj.student = studentId;
+      }
       
       // Si la actividad tiene imágenes, generar URLs firmadas
       if (favoriteObj.activity && favoriteObj.activity.imagenes && Array.isArray(favoriteObj.activity.imagenes)) {
@@ -15083,11 +15995,17 @@ app.use('/*', (req, res) => {
   });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 API de Kiki corriendo en puerto ${PORT}`);
   console.log(`📡 Health check disponible en http://localhost:${PORT}/health`);
   console.log(`📖 Documentación disponible en http://localhost:${PORT}/api`);
   console.log(`🌐 API accesible desde la red local en http://0.0.0.0:${PORT}`);
 });
+
+// Configurar timeouts extendidos para uploads de archivos grandes
+// Timeout para mantener la conexión viva (10 minutos)
+server.keepAliveTimeout = 600000; // 10 minutos
+// Timeout para headers (debe ser mayor que keepAliveTimeout)
+server.headersTimeout = 610000; // 10 minutos + 10 segundos
 
 module.exports = app;

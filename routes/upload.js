@@ -25,7 +25,7 @@ const uploadToMemory = multer({
 const uploadVideoToMemory = multer({
   storage: memoryStorage,
   limits: {
-    fileSize: 10 * 1024 * 1024, // 10MB máximo para videos
+    fileSize: 50 * 1024 * 1024, // 50MB máximo para videos (coincide con el límite del cliente)
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('video/')) {
@@ -328,13 +328,21 @@ router.post('/s3/image', authenticateToken, uploadToMemory.single('image'), asyn
 
 // Upload de video a S3
 router.post('/s3/video', authenticateToken, uploadVideoToMemory.single('video'), async (req, res) => {
+  const startTime = Date.now();
   try {
+    console.log('📹 [UPLOAD] Iniciando upload de video a S3');
+    console.log('📹 [UPLOAD] Request recibido, tamaño del body:', req.headers['content-length'] || 'desconocido');
+    
     if (!req.file) {
+      console.error('❌ [UPLOAD] No se proporcionó ningún video');
       return res.status(400).json({
         success: false,
         message: 'No se proporcionó ningún video'
       });
     }
+
+    const fileSizeMB = (req.file.buffer.length / (1024 * 1024)).toFixed(2);
+    console.log(`📹 [UPLOAD] Video recibido: ${fileSizeMB}MB`);
 
     // Upload directo a S3 sin multer-s3
     const { v4: uuidv4 } = require('uuid');
@@ -344,6 +352,8 @@ router.post('/s3/video', authenticateToken, uploadVideoToMemory.single('video'),
     const fileName = `${uuidv4()}.mp4`;
     const key = `uploads/${fileName}`;
 
+    console.log(`📹 [UPLOAD] Iniciando upload a S3: ${key}`);
+
     const uploadParams = {
       Bucket: process.env.AWS_S3_BUCKET_NAME,
       Key: key,
@@ -351,7 +361,12 @@ router.post('/s3/video', authenticateToken, uploadVideoToMemory.single('video'),
       ContentType: 'video/mp4' // Forzar content type MP4
     };
 
+    const s3StartTime = Date.now();
     const result = await s3.upload(uploadParams).promise();
+    const s3UploadTime = ((Date.now() - s3StartTime) / 1000).toFixed(1);
+    
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.log(`✅ [UPLOAD] Video subido exitosamente a S3 en ${s3UploadTime}s (total: ${totalTime}s)`);
     
     res.status(200).json({
       success: true,
@@ -363,7 +378,11 @@ router.post('/s3/video', authenticateToken, uploadVideoToMemory.single('video'),
       }
     });
   } catch (error) {
-    console.error('Error en upload S3 video:', error);
+    const totalTime = ((Date.now() - startTime) / 1000).toFixed(1);
+    console.error(`❌ [UPLOAD] Error en upload S3 video después de ${totalTime}s:`, error);
+    console.error(`❌ [UPLOAD] Error message:`, error.message);
+    console.error(`❌ [UPLOAD] Error stack:`, error.stack);
+    
     res.status(500).json({
       success: false,
       message: 'Error al subir el video a S3',
