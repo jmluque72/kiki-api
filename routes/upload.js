@@ -36,6 +36,31 @@ const uploadVideoToMemory = multer({
   }
 });
 
+// Configurar multer para archivos genéricos en memoria (para S3) - para formularios
+const uploadFileToMemory = multer({
+  storage: memoryStorage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB máximo para archivos
+  },
+  fileFilter: (req, file, cb) => {
+    // Permitir imágenes, PDFs, documentos de Office, etc.
+    const allowedMimes = [
+      'image/', // Todas las imágenes
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/'
+    ];
+    if (allowedMimes.some(mime => file.mimetype.startsWith(mime))) {
+      cb(null, true);
+    } else {
+      cb(new Error('Tipo de archivo no permitido'), false);
+    }
+  }
+});
+
 // Upload de un solo archivo
 router.post('/single', authenticateToken, (req, res) => {
   uploadSingle(req, res, async (err) => {
@@ -386,6 +411,71 @@ router.post('/s3/video', authenticateToken, uploadVideoToMemory.single('video'),
     res.status(500).json({
       success: false,
       message: 'Error al subir el video a S3',
+      error: error.message
+    });
+  }
+});
+
+// Upload de archivo genérico a S3 (para formularios)
+router.post('/s3/file', authenticateToken, uploadFileToMemory.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No se proporcionó ningún archivo'
+      });
+    }
+
+    // Upload directo a S3 sin multer-s3
+    const { v4: uuidv4 } = require('uuid');
+    const { s3 } = require('../config/s3.config');
+
+    // Obtener extensión del archivo original o del mimetype
+    let fileExtension = '';
+    if (req.file.originalname && req.file.originalname.includes('.')) {
+      fileExtension = req.file.originalname.split('.').pop();
+    } else {
+      // Intentar obtener extensión del mimetype
+      const mimeToExt = {
+        'image/jpeg': 'jpg',
+        'image/png': 'png',
+        'image/gif': 'gif',
+        'application/pdf': 'pdf',
+        'application/msword': 'doc',
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document': 'docx',
+        'application/vnd.ms-excel': 'xls',
+        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': 'xlsx',
+        'text/plain': 'txt'
+      };
+      fileExtension = mimeToExt[req.file.mimetype] || 'bin';
+    }
+
+    const fileName = `${uuidv4()}.${fileExtension}`;
+    const key = `form-requests/${fileName}`;
+
+    const uploadParams = {
+      Bucket: process.env.AWS_S3_BUCKET_NAME,
+      Key: key,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype
+    };
+
+    const result = await s3.upload(uploadParams).promise();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Archivo subido exitosamente',
+      fileKey: key,
+      data: {
+        fileKey: key,
+        fileUrl: result.Location
+      }
+    });
+  } catch (error) {
+    console.error('Error en upload S3 file:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al subir el archivo a S3',
       error: error.message
     });
   }
