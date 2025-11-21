@@ -86,9 +86,67 @@ const requireRole = (roles) => (req, res, next) => {
 const requireAdmin = requireRole(['adminaccount', 'superadmin']);
 const requireSuperAdmin = requireRole(['superadmin']);
 
+// Middleware para establecer la institución del usuario
+const setUserInstitution = async (req, res, next) => {
+  try {
+    console.log('🔧 [MIDDLEWARE] setUserInstitution ejecutándose...');
+    console.log('🔧 [MIDDLEWARE] req.user:', req.user ? 'Usuario presente' : 'Sin usuario');
+    console.log('🔧 [MIDDLEWARE] req.user.role?.nombre:', req.user?.role?.nombre);
+    console.log('🔧 [MIDDLEWARE] req.user.account:', req.user?.account);
+    
+    // Obtener el nombre del rol de manera flexible
+    let roleName = null;
+    if (typeof req.user.role === 'string') {
+      roleName = req.user.role;
+    } else if (req.user.role?.nombre) {
+      roleName = req.user.role.nombre;
+    }
+    
+    console.log('🔧 [MIDDLEWARE] Nombre del rol detectado:', roleName);
+    console.log('🔧 [MIDDLEWARE] ¿Es adminaccount o accountadmin?:', roleName === 'adminaccount' || roleName === 'accountadmin');
+    
+    if (req.user && (roleName === 'adminaccount' || roleName === 'accountadmin')) {
+      console.log('🔧 [MIDDLEWARE] Usuario adminaccount/accountadmin detectado...');
+      
+      // Si no tiene cuenta asignada, usar la cuenta BAMBINO por defecto
+      let accountId = req.user.account;
+      if (!accountId) {
+        console.log('🔧 [MIDDLEWARE] Usuario adminaccount sin cuenta, asignando BAMBINO por defecto...');
+        accountId = '68dc5f1a626391464e2bcb3c';
+        
+        // Actualizar el usuario en la base de datos
+        const User = require('../shared/models/User');
+        await User.findByIdAndUpdate(req.user._id, { account: accountId });
+        console.log('✅ [MIDDLEWARE] Cuenta BAMBINO asignada al usuario');
+      }
+      
+      // Buscar la cuenta
+      const Account = require('../shared/models/Account');
+      const account = await Account.findById(accountId);
+      
+      if (account) {
+        req.userInstitution = {
+          _id: account._id,
+          nombre: account.nombre
+        };
+        console.log('🏢 [MIDDLEWARE] Institución establecida para adminaccount:', account.nombre);
+      } else {
+        console.log('❌ [MIDDLEWARE] Cuenta no encontrada para ID:', accountId);
+      }
+    } else {
+      console.log('🔧 [MIDDLEWARE] No es adminaccount');
+    }
+    next();
+  } catch (error) {
+    console.error('❌ [MIDDLEWARE] Error en setUserInstitution:', error);
+    next(error);
+  }
+};
+
 module.exports = {
   authenticateToken,
   requireRole,
   requireAdmin,
-  requireSuperAdmin
+  requireSuperAdmin,
+  setUserInstitution
 };

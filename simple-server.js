@@ -236,6 +236,10 @@ const uploadRoutes = require('./routes/upload');
 
 // Importar rutas de documentos
 const documentRoutes = require('./routes/documents');
+// Importar rutas de notificaciones
+const notificationsRoutes = require('./routes/notifications.routes');
+// Importar rutas de eventos
+const eventsRoutes = require('./routes/events.routes');
 
 // Configurar multer para subida de archivos
 const storage = multer.diskStorage({
@@ -4718,367 +4722,8 @@ app.get('/groups/account/:accountId', authenticateToken, async (req, res) => {
 });
 
 // ===== RUTAS DE EVENTOS =====
-
-// Endpoint de debug para verificar eventos
-app.get('/debug/eventos', authenticateToken, async (req, res) => {
-  try {
-    const { divisionId, fechaInicio, fechaFin } = req.query;
-    
-    console.log('🔍 [DEBUG EVENTOS] Parámetros:', { divisionId, fechaInicio, fechaFin });
-    
-    // Query simple para ver todos los eventos
-    let query = {};
-    
-    if (divisionId) {
-      query.division = divisionId;
-    }
-    
-    if (fechaInicio && fechaFin) {
-      query.fecha = {
-        $gte: fechaInicio,
-        $lte: fechaFin
-      };
-    }
-    
-    console.log('🔍 [DEBUG EVENTOS] Query:', JSON.stringify(query, null, 2));
-    
-    const eventos = await Event.find(query)
-      .populate('institucion', 'nombre')
-      .populate('division', 'nombre')
-      .lean();
-    
-    console.log('🔍 [DEBUG EVENTOS] Total eventos encontrados:', eventos.length);
-    
-    res.json({
-      success: true,
-      data: {
-        total: eventos.length,
-        eventos: eventos.map(e => ({
-          _id: e._id,
-          titulo: e.titulo,
-          fecha: e.fecha,
-          fechaISO: e.fecha.toISOString(),
-          division: e.division?.nombre || 'Sin división',
-          institucion: e.institucion?.nombre || 'Sin institución'
-        }))
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ [DEBUG EVENTOS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener eventos de debug'
-    });
-  }
-});
-
-// Obtener datos del calendario de eventos
-app.get('/backoffice/eventos/calendar', authenticateToken, async (req, res) => {
-  try {
-    // Verificar permisos del usuario
-    let currentUser;
-    if (req.user.isCognitoUser) {
-      currentUser = await User.findOne({ email: req.user.email }).populate('role');
-    } else {
-      const { userId } = req.user;
-      currentUser = await User.findById(userId).populate('role');
-    }
-    
-    if (!currentUser) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    const userId = currentUser._id;
-    const { 
-      divisionId,
-      fechaInicio,
-      fechaFin
-    } = req.query;
-    
-    console.log('📅 [CALENDAR EVENTOS] Usuario:', userId);
-    console.log('📅 [CALENDAR EVENTOS] Parámetros:', { divisionId, fechaInicio, fechaFin });
-    console.log('📅 [CALENDAR EVENTOS] Fechas convertidas:', { 
-      fechaInicioDate: new Date(fechaInicio), 
-      fechaFinDate: new Date(fechaFin) 
-    });
-    
-    // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    // Construir query base
-    let query = {};
-    
-    // Lógica según el rol
-    if (user.role?.nombre === 'superadmin') {
-      // Superadmin ve todos los eventos
-    } else if (user.role?.nombre === 'adminaccount') {
-      // Adminaccount ve todos los eventos de su cuenta
-      if (user.account?._id) {
-        query.institucion = user.account._id;
-      } else {
-        // Si no tiene account, usar cuenta por defecto
-        query.institucion = '68d47433390104381d43c0ca';
-      }
-    } else {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para acceder a esta sección'
-      });
-    }
-    
-    // Filtros adicionales
-    if (divisionId) {
-      query.division = divisionId;
-    }
-    
-    if (fechaInicio && fechaFin) {
-      // Crear fechas UTC para evitar problemas de zona horaria
-      const startDate = new Date(fechaInicio + 'T00:00:00.000Z');
-      const endDate = new Date(fechaFin + 'T23:59:59.999Z');
-      
-      query.fecha = {
-        $gte: startDate,
-        $lte: endDate
-      };
-      
-      console.log('📅 [CALENDAR EVENTOS] Filtro de fechas:', {
-        fechaInicio: startDate.toISOString(),
-        fechaFin: endDate.toISOString()
-      });
-    }
-    
-    console.log('📅 [CALENDAR EVENTOS] Query:', JSON.stringify(query, null, 2));
-    
-    // DEBUG: Buscar TODOS los eventos de la división sin filtro de fecha
-    const allEvents = await Event.find({
-      institucion: query.institucion,
-      division: query.division
-    }).lean();
-    
-    console.log('📅 [CALENDAR EVENTOS] TODOS los eventos de la división:', allEvents.map(e => ({
-      id: e._id,
-      titulo: e.titulo,
-      fecha: e.fecha,
-      institucion: e.institucion,
-      division: e.division
-    })));
-    
-    // Buscar eventos
-    const eventos = await Event.find(query)
-      .populate('institucion', 'nombre')
-      .populate('division', 'nombre')
-      .populate('creador', 'name email')
-      .lean();
-    
-    console.log('📅 [CALENDAR EVENTOS] Eventos encontrados:', eventos.length);
-    console.log('📅 [CALENDAR EVENTOS] Eventos detallados:', eventos.map(e => ({
-      id: e._id,
-      titulo: e.titulo,
-      fecha: e.fecha,
-      division: e.division?.nombre || 'Sin división'
-    })));
-    
-    // Buscar autorizaciones para cada evento
-    const eventosConAutorizaciones = await Promise.all(eventos.map(async (evento) => {
-      const autorizaciones = await EventAuthorization.find({ event: evento._id })
-        .populate('student', 'nombre email')
-        .populate('familyadmin', 'name email')
-        .lean();
-      
-      return {
-        ...evento,
-        autorizaciones: autorizaciones.map(auth => ({
-          _id: auth._id,
-          tipo: 'Autorización de evento',
-          estado: auth.autorizado ? 'aprobada' : 'pendiente',
-          estudiante: {
-            _id: auth.student?._id,
-            nombre: auth.student?.nombre,
-            email: auth.student?.email
-          },
-          autorizadoPor: {
-            _id: auth.familyadmin?._id,
-            nombre: auth.familyadmin?.name
-          },
-          fechaAutorizacion: auth.fechaAutorizacion,
-          observaciones: auth.comentarios
-        }))
-      };
-    }));
-    
-    // Agrupar eventos por fecha
-    const calendarData = {};
-    
-    eventosConAutorizaciones.forEach(evento => {
-      const fecha = evento.fecha.toISOString().split('T')[0]; // YYYY-MM-DD
-      
-      if (!calendarData[fecha]) {
-        calendarData[fecha] = {
-          fecha: fecha,
-          totalEventos: 0,
-          eventos: []
-        };
-      }
-      
-      calendarData[fecha].totalEventos++;
-      calendarData[fecha].eventos.push({
-        _id: evento._id,
-        titulo: evento.titulo,
-        descripcion: evento.descripcion,
-        fecha: evento.fecha,
-        hora: evento.hora,
-        lugar: evento.lugar,
-        estado: evento.estado,
-        participantes: evento.participantes || [],
-        creador: evento.creador,
-        institucion: evento.institucion,
-        division: evento.division,
-        autorizaciones: evento.autorizaciones || []
-      });
-    });
-    
-    console.log('📅 [CALENDAR EVENTOS] Datos del calendario generados:', Object.keys(calendarData).length, 'fechas');
-    
-    res.json({
-      success: true,
-      data: calendarData
-    });
-    
-  } catch (error) {
-    console.error('❌ [CALENDAR EVENTOS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener datos del calendario de eventos'
-    });
-  }
-});
-
-// Listar eventos
-app.get('/events', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    const { accountId, search, page = 1, limit = 20 } = req.query;
-    const currentUser = req.user;
-
-    console.log('📅 [EVENTS] Usuario:', currentUser._id, currentUser.role?.nombre);
-    console.log('📅 [EVENTS] Query params:', { accountId, search, page, limit });
-
-    // Verificar permisos
-    if (!['adminaccount', 'superadmin', 'coordinador'].includes(currentUser.role?.nombre)) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para ver eventos'
-      });
-    }
-
-    let query = {};
-
-    // Filtro por institución según el rol del usuario
-    if (currentUser.role?.nombre === 'superadmin') {
-      // Superadmin puede ver todos los eventos
-      if (accountId) {
-        query.institucion = accountId;
-      }
-    } else if (currentUser.role?.nombre === 'adminaccount') {
-      // Adminaccount solo puede ver eventos de sus cuentas
-      try {
-        const userAccounts = await Shared.find({ 
-          user: currentUser._id, 
-          status: { $in: ['active', 'pending'] }
-        }).select('account');
-        
-        const accountIds = userAccounts.map(ah => ah.account);
-        query.institucion = { $in: accountIds };
-        
-        if (accountId) {
-          // Verificar que la cuenta solicitada pertenece al usuario
-          if (!accountIds.includes(accountId)) {
-            return res.status(403).json({
-              success: false,
-              message: 'No tienes permisos para ver eventos de esta cuenta'
-            });
-          }
-          query.institucion = accountId;
-        }
-      } catch (error) {
-        console.error('Error obteniendo cuentas del usuario:', error);
-        return res.status(500).json({
-          success: false,
-          message: 'Error interno del servidor'
-        });
-      }
-    } else if (currentUser.role?.nombre === 'coordinador') {
-      // Coordinador puede ver eventos de sus cuentas
-      if (accountId) {
-        query.institucion = accountId;
-      }
-    }
-
-    // Búsqueda por título o descripción
-    if (search) {
-      query.$or = [
-        { titulo: { $regex: search, $options: 'i' } },
-        { descripcion: { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    console.log('📅 [EVENTS] Query final:', JSON.stringify(query, null, 2));
-
-    // Obtener datos reales de la base de datos
-    const total = await Event.countDocuments(query);
-    console.log('📅 [EVENTS] Total eventos:', total);
-    
-    const events = await Event.find(query)
-      .populate('creador', 'name email')
-      .populate('institucion', 'nombre razonSocial')
-      .populate('division', 'nombre descripcion')
-      .skip((page - 1) * limit)
-      .limit(limit)
-      .sort({ fecha: 1 });
-
-    console.log('📅 [EVENTS] Eventos encontrados:', events.length);
-
-    res.json({
-      success: true,
-      data: {
-        events: events.map(event => ({
-          _id: event._id,
-          titulo: event.titulo,
-          descripcion: event.descripcion,
-          fecha: event.fecha,
-          hora: event.hora,
-          lugar: event.lugar,
-          estado: event.estado,
-          requiereAutorizacion: event.requiereAutorizacion,
-          creador: event.creador,
-          institucion: event.institucion,
-          division: event.division,
-          participantes: event.participantes,
-          createdAt: event.createdAt,
-          updatedAt: event.updatedAt
-        })),
-        total,
-        page: parseInt(page),
-        limit: parseInt(limit)
-      }
-    });
-  } catch (error) {
-    console.error('Error listando eventos:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor'
-    });
-  }
-});
+// NOTA: Las rutas de eventos han sido movidas a routes/events.routes.js
+// Las rutas están registradas arriba con: app.use('/', eventsRoutes);
 
 // ===== RUTAS DE ROLES =====
 
@@ -6491,6 +6136,16 @@ app.use('/upload', uploadRoutes);
 console.log('🔍 Registrando rutas de documentos...');
 app.use('/api/documents', documentRoutes);
 console.log('✅ Rutas de documentos registradas');
+
+// Rutas de notificaciones
+console.log('🔍 Registrando rutas de notificaciones...');
+app.use('/', notificationsRoutes);
+console.log('✅ Rutas de notificaciones registradas');
+
+// Rutas de eventos
+console.log('🔍 Registrando rutas de eventos...');
+app.use('/', eventsRoutes);
+console.log('✅ Rutas de eventos registradas');
 
 // Endpoint para subir imágenes
 app.post('/upload-image', authenticateToken, upload.single('image'), async (req, res) => {
@@ -9758,1496 +9413,8 @@ app.post('/push/unregister-token', authenticateToken, async (req, res) => {
 });
 
 // ==================== ENDPOINTS DE NOTIFICACIONES ====================
-
-// Obtener datos del calendario de notificaciones
-app.get('/backoffice/notifications/calendar', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    const { 
-      divisionId,
-      fechaInicio,
-      fechaFin
-    } = req.query;
-    
-    console.log('📅 [CALENDAR NOTIFICATIONS] Parámetros:', { divisionId, fechaInicio, fechaFin });
-    
-    // Verificar permisos del usuario
-    let currentUser;
-    if (req.user.isCognitoUser) {
-      currentUser = await User.findOne({ email: req.user.email }).populate('role');
-    } else {
-      const { userId } = req.user;
-      currentUser = await User.findById(userId).populate('role');
-    }
-    
-    if (!currentUser) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    console.log('📅 [CALENDAR NOTIFICATIONS] Rol del usuario:', currentUser.role?.nombre);
-    
-    // Construir query base
-    let query = {};
-    
-    // Lógica según el rol
-    if (currentUser.role?.nombre === 'superadmin') {
-      // Superadmin ve todas las notificaciones de todas las cuentas
-      // No filtrar por cuenta específica
-    } else if (currentUser.role?.nombre === 'adminaccount') {
-      // Adminaccount ve todas las notificaciones de su cuenta
-      if (req.userInstitution) {
-        query.account = req.userInstitution._id;
-      } else {
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes una institución asignada'
-        });
-      }
-    } else {
-      // Otros roles no tienen acceso al backoffice
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para acceder a esta sección'
-      });
-    }
-    
-    // Filtros adicionales
-    if (divisionId) {
-      query.division = divisionId;
-    }
-    
-    if (fechaInicio && fechaFin) {
-      // Crear fechas UTC para evitar problemas de zona horaria
-      const startDate = new Date(fechaInicio + 'T00:00:00.000Z');
-      const endDate = new Date(fechaFin + 'T23:59:59.999Z');
-      
-      query.sentAt = {
-        $gte: startDate,
-        $lte: endDate
-      };
-      
-      console.log('📅 [CALENDAR NOTIFICATIONS] Filtro de fechas:', {
-        fechaInicio: startDate.toISOString(),
-        fechaFin: endDate.toISOString()
-      });
-    }
-    
-    console.log('📅 [CALENDAR NOTIFICATIONS] Query:', JSON.stringify(query, null, 2));
-    
-    // Buscar notificaciones
-    const notifications = await Notification.find(query)
-      .populate('account', 'nombre')
-      .populate('division', 'nombre')
-      .populate('sender', 'name email')
-      .sort({ sentAt: -1 })
-      .lean();
-    
-    console.log('📅 [CALENDAR NOTIFICATIONS] Notificaciones encontradas:', notifications.length);
-    console.log('📅 [CALENDAR NOTIFICATIONS] Notificaciones detalladas:', notifications.map(n => ({
-      id: n._id,
-      title: n.title,
-      sentAt: n.sentAt,
-      division: n.division?.nombre || 'Sin división'
-    })));
-    
-    // Agrupar notificaciones por fecha
-    const calendarData = {};
-    
-    notifications.forEach(notification => {
-      // Usar fecha local en lugar de UTC para evitar problemas de zona horaria
-      const sentAtDate = new Date(notification.sentAt);
-      const year = sentAtDate.getFullYear();
-      const month = String(sentAtDate.getMonth() + 1).padStart(2, '0');
-      const day = String(sentAtDate.getDate()).padStart(2, '0');
-      const fecha = `${year}-${month}-${day}`;
-      
-      console.log('📅 [CALENDAR NOTIFICATIONS] Notificación fecha original:', notification.sentAt);
-      console.log('📅 [CALENDAR NOTIFICATIONS] Notificación fecha local:', fecha);
-      
-      if (!calendarData[fecha]) {
-        calendarData[fecha] = {
-          fecha: fecha,
-          totalNotificaciones: 0,
-          notificaciones: []
-        };
-      }
-      
-      calendarData[fecha].totalNotificaciones++;
-      calendarData[fecha].notificaciones.push(notification);
-    });
-    
-    console.log('📅 [CALENDAR NOTIFICATIONS] Datos del calendario:', Object.keys(calendarData).length, 'días');
-    
-    res.json({
-      success: true,
-      data: calendarData
-    });
-    
-  } catch (error) {
-    console.error('❌ [CALENDAR NOTIFICATIONS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener datos del calendario'
-    });
-  }
-});
-
-// Obtener notificaciones del usuario (endpoint general)
-app.get('/notifications', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const { 
-      limit = 20, 
-      skip = 0, 
-      unreadOnly = false,
-      accountId,
-      divisionId,
-      userRole,
-      isCoordinador
-    } = req.query;
-    
-    console.log('🔔 [GET NOTIFICATIONS] Usuario:', userId);
-    console.log('🔔 [GET NOTIFICATIONS] Parámetros:', { accountId, divisionId, userRole, isCoordinador });
-    
-    // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    console.log('🔔 [GET NOTIFICATIONS] Rol del usuario (base):', user.role?.nombre);
-
-    // Usar rol de la asociación activa si existe
-    const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
-    const effectiveRole = activeAssociation?.role?.nombre || user.role?.nombre;
-    const effectiveIsCoordinador = effectiveRole === 'coordinador';
-    console.log('🔔 [GET NOTIFICATIONS] Rol efectivo:', effectiveRole);
-    
-    const options = {
-      limit: parseInt(limit),
-      skip: parseInt(skip),
-      unreadOnly: unreadOnly === 'true',
-      accountId,
-      divisionId,
-      userRole: effectiveRole,
-      isCoordinador: effectiveIsCoordinador
-    };
-    
-    let notifications = await Notification.getUserNotifications(userId, options);
-    
-    console.log('🔔 [GET NOTIFICATIONS] Notificaciones encontradas:', notifications.length);
-    
-    // Si el usuario es familyadmin o familyviewer, poblar recipients con información del estudiante
-    if (effectiveRole === 'familyadmin' || effectiveRole === 'familyviewer') {
-      // Recopilar todos los recipient IDs de todas las notificaciones
-      const allRecipientIds = [];
-      notifications.forEach(notification => {
-        if (notification.recipients && notification.recipients.length > 0) {
-          allRecipientIds.push(...notification.recipients.map(r => r._id || r));
-        }
-      });
-      
-      // Hacer consultas en batch para estudiantes y usuarios
-      const uniqueRecipientIds = [...new Set(allRecipientIds.map(id => id.toString()))];
-      
-      const [students, users] = await Promise.all([
-        Student.find({ _id: { $in: uniqueRecipientIds } }).select('_id nombre apellido email'),
-        User.find({ _id: { $in: uniqueRecipientIds } }).select('_id name email')
-      ]);
-      
-      // Crear mapas para búsqueda rápida
-      const studentsMap = new Map(students.map(s => [s._id.toString(), s]));
-      const usersMap = new Map(users.map(u => [u._id.toString(), u]));
-      
-      // Poblar recipients para cada notificación
-      const populatedNotifications = notifications.map(notification => {
-        let notificationObj = notification.toObject();
-        
-        if (notification.recipients && notification.recipients.length > 0) {
-          const populatedRecipients = notification.recipients.map(recipientId => {
-            const id = recipientId._id ? recipientId._id.toString() : recipientId.toString();
-            
-            // Buscar primero en estudiantes
-            let recipient = studentsMap.get(id);
-            if (recipient) {
-              const recipientObj = recipient.toObject();
-              recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
-              return recipientObj;
-            }
-            
-            // Si no es estudiante, buscar en usuarios
-            recipient = usersMap.get(id);
-            if (recipient) {
-              const recipientObj = recipient.toObject();
-              recipientObj.nombre = recipientObj.name;
-              return recipientObj;
-            }
-            
-            return null;
-          }).filter(r => r !== null);
-          
-          notificationObj.recipients = populatedRecipients;
-        }
-        
-        return notificationObj;
-      });
-      
-      notifications = populatedNotifications;
-    }
-    
-    res.json({
-      success: true,
-      data: notifications
-    });
-    
-  } catch (error) {
-    console.error('❌ [GET NOTIFICATIONS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener notificaciones'
-    });
-  }
-});
-
-// Obtener notificaciones para usuarios familia (familyadmin/familyviewer)
-app.get('/notifications/family', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const { 
-      limit = 20, 
-      skip = 0, 
-      unreadOnly = false,
-      accountId,
-      divisionId
-    } = req.query;
-    
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] Usuario:', userId);
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] Parámetros:', { accountId, divisionId, unreadOnly });
-    
-    // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    // Obtener la asociación activa del usuario
-    const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] Buscando ActiveAssociation para userId:', userId);
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] ActiveAssociation encontrada:', activeAssociation ? {
-      id: activeAssociation._id,
-      activeShared: activeAssociation.activeShared,
-      role: activeAssociation.role?.nombre
-    } : null);
-    
-    if (!activeAssociation) {
-      console.log('❌ [GET FAMILY NOTIFICATIONS] No se encontró ActiveAssociation para userId:', userId);
-      return res.status(404).json({
-        success: false,
-        message: 'No se encontró asociación activa'
-      });
-    }
-    
-    // Verificar que el rol activo sea familyadmin o familyviewer
-    if (!['familyadmin', 'familyviewer'].includes(activeAssociation.role?.nombre)) {
-      console.log('❌ [GET FAMILY NOTIFICATIONS] Rol activo no es familyadmin/familyviewer:', activeAssociation.role?.nombre);
-      return res.status(403).json({
-        success: false,
-        message: 'Este endpoint es solo para usuarios familia'
-      });
-    }
-    
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] Rol del usuario base:', user.role?.nombre);
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] Rol activo:', activeAssociation.role?.nombre);
-    
-    // Buscar estudiantes asociados al usuario
-    const associations = await Shared.find({
-      user: userId,
-      account: accountId,
-      status: 'active'
-    }).populate('student', 'nombre apellido');
-    
-    if (associations.length === 0) {
-      console.log('🔔 [GET FAMILY NOTIFICATIONS] No se encontraron estudiantes asociados');
-      return res.json({
-        success: true,
-        data: []
-      });
-    }
-    
-    // Obtener IDs de estudiantes asociados
-    const studentIds = associations
-      .map(assoc => assoc.student?._id)
-      .filter(id => id);
-    
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] Estudiantes asociados:', studentIds.length);
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] IDs de estudiantes:', studentIds);
-    
-    if (studentIds.length === 0) {
-      console.log('🔔 [GET FAMILY NOTIFICATIONS] No hay estudiantes válidos asociados');
-      return res.json({
-        success: true,
-        data: []
-      });
-    }
-    
-    // Construir query para buscar notificaciones
-    let query = {
-      account: accountId,
-      recipients: { $in: studentIds }
-    };
-    
-    if (divisionId) {
-      query.division = divisionId;
-    }
-    
-    // Filtrar por no leídas si se solicita
-    if (unreadOnly === 'true') {
-      query['readBy.user'] = { $ne: userId };
-    }
-    
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] Query final:', JSON.stringify(query, null, 2));
-    
-    // Buscar notificaciones
-    let notifications = await Notification.find(query)
-      .populate('sender', 'name email')
-      .populate('account', 'nombre')
-      .populate('division', 'nombre')
-      .sort({ sentAt: -1 })
-      .limit(parseInt(limit))
-      .skip(parseInt(skip));
-    
-    console.log('🔔 [GET FAMILY NOTIFICATIONS] Notificaciones encontradas:', notifications.length);
-    
-    // Poblar recipients con información del estudiante (optimizado con consultas en batch)
-    // Recopilar todos los recipient IDs de todas las notificaciones
-    const allRecipientIds = [];
-    notifications.forEach(notification => {
-      if (notification.recipients && notification.recipients.length > 0) {
-        allRecipientIds.push(...notification.recipients.map(r => r._id || r));
-      }
-    });
-    
-    // Hacer consultas en batch para estudiantes y usuarios
-    const uniqueRecipientIds = [...new Set(allRecipientIds.map(id => id.toString()))];
-    
-    const [students, users] = await Promise.all([
-      Student.find({ _id: { $in: uniqueRecipientIds } }).select('_id nombre apellido email'),
-      User.find({ _id: { $in: uniqueRecipientIds } }).select('_id name email')
-    ]);
-    
-    // Crear mapas para búsqueda rápida
-    const studentsMap = new Map(students.map(s => [s._id.toString(), s]));
-    const usersMap = new Map(users.map(u => [u._id.toString(), u]));
-    
-    // Poblar recipients para cada notificación
-    // IMPORTANTE: Solo incluir los recipients que son estudiantes asociados al usuario actual
-    const populatedNotifications = notifications.map(notification => {
-      let notificationObj = notification.toObject();
-      
-      if (notification.recipients && notification.recipients.length > 0) {
-        // Filtrar solo los recipients que son estudiantes asociados al tutor actual
-        const relevantRecipients = notification.recipients.filter(recipientId => {
-          const id = recipientId._id ? recipientId._id.toString() : recipientId.toString();
-          // Solo incluir si el recipient es uno de los estudiantes asociados al tutor
-          return studentIds.some(studentId => studentId.toString() === id);
-        });
-        
-        const populatedRecipients = relevantRecipients.map(recipientId => {
-          const id = recipientId._id ? recipientId._id.toString() : recipientId.toString();
-          
-          // Buscar primero en estudiantes
-          let recipient = studentsMap.get(id);
-          if (recipient) {
-            const recipientObj = recipient.toObject();
-            recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
-            return recipientObj;
-          }
-          
-          // Si no es estudiante, buscar en usuarios
-          recipient = usersMap.get(id);
-          if (recipient) {
-            const recipientObj = recipient.toObject();
-            recipientObj.nombre = recipientObj.name;
-            return recipientObj;
-          }
-          
-          return null;
-        }).filter(r => r !== null);
-        
-        notificationObj.recipients = populatedRecipients;
-      }
-      
-      return notificationObj;
-    });
-    
-    res.json({
-      success: true,
-      data: populatedNotifications
-    });
-    
-  } catch (error) {
-    console.error('❌ [GET FAMILY NOTIFICATIONS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener notificaciones familia'
-    });
-  }
-});
-
-// Obtener detalles completos de una notificación específica
-app.get('/notifications/:id/details', authenticateToken, async (req, res) => {
-  try {
-    const notificationId = req.params.id;
-    const userId = req.user._id;
-    
-    console.log('🔔 [GET NOTIFICATION DETAILS] ID:', notificationId);
-    console.log('🔔 [GET NOTIFICATION DETAILS] Usuario:', userId);
-    
-    // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    // Buscar la notificación con detalles básicos
-    const notification = await Notification.findById(notificationId)
-      .populate('sender', 'name email')
-      .populate('account', 'nombre')
-      .populate('division', 'nombre')
-      .populate('readBy.user', 'name email');
-    
-    if (!notification) {
-      return res.status(404).json({
-        success: false,
-        message: 'Notificación no encontrada'
-      });
-    }
-    
-    // Verificar que el usuario tenga acceso a esta notificación
-    // Usar rol efectivo de ActiveAssociation si existe
-    const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
-    const effectiveRole = activeAssociation?.role?.nombre || user.role?.nombre;
-    const isCoordinador = effectiveRole === 'coordinador';
-    const hasAccess = isCoordinador || 
-                     notification.recipients.some(recipient => recipient.toString() === userId);
-    
-    if (!hasAccess) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para ver esta notificación'
-      });
-    }
-    
-    // Poblar destinatarios manualmente (usuarios y estudiantes)
-    let notificationObj = notification.toObject();
-    
-    if (notification.recipients && notification.recipients.length > 0) {
-      const populatedRecipients = [];
-      
-      for (let recipientId of notification.recipients) {
-        // Intentar buscar como usuario
-        let recipient = await User.findById(recipientId).select('name email');
-        
-        // Si no es usuario, buscar como estudiante
-        if (!recipient) {
-          recipient = await Student.findById(recipientId).select('nombre apellido email');
-        }
-        
-        if (recipient) {
-          // Normalizar el nombre para usuarios y estudiantes
-          const recipientObj = recipient.toObject();
-          if (recipientObj.name) {
-            // Es un usuario, usar 'name' como 'nombre'
-            recipientObj.nombre = recipientObj.name;
-          } else if (recipientObj.nombre && recipientObj.apellido) {
-            // Es un estudiante, combinar nombre y apellido
-            recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
-          }
-          populatedRecipients.push(recipientObj);
-        }
-      }
-      
-      notificationObj.recipients = populatedRecipients;
-    }
-
-    // Poblar readBy.user manualmente para asegurar que tenga el campo nombre
-    if (notificationObj.readBy && notificationObj.readBy.length > 0) {
-      const populatedReadBy = [];
-      
-      for (let readEntry of notificationObj.readBy) {
-        if (readEntry.user && readEntry.user._id) {
-          // Buscar el usuario completo
-          const user = await User.findById(readEntry.user._id).select('name email');
-          if (user) {
-            populatedReadBy.push({
-              user: {
-                _id: user._id,
-                nombre: user.name, // User model usa 'name', no 'nombre'
-                email: user.email
-              },
-              readAt: readEntry.readAt,
-              _id: readEntry._id
-            });
-          } else {
-            // Si no se encuentra el usuario, mantener la entrada original
-            populatedReadBy.push(readEntry);
-          }
-        } else {
-          populatedReadBy.push(readEntry);
-        }
-      }
-      
-      notificationObj.readBy = populatedReadBy;
-    }
-    
-    // Calcular estadísticas corregidas
-    const totalRecipients = notificationObj.recipients?.length || 0;
-    
-    // Filtrar readBy para excluir coordinadores
-    const readByParents = notificationObj.readBy?.filter(readEntry => {
-      if (!readEntry.user) return false;
-      // Verificar si el usuario que leyó es coordinador
-      return readEntry.user.role?.nombre !== 'coordinador';
-    }) || [];
-    
-    // Para la lista de pendientes, necesitamos encontrar qué estudiantes tienen padres que ya leyeron
-    const studentsWithParentsRead = new Set();
-    
-    if (readByParents.length > 0) {
-      // Buscar asociaciones de los usuarios que leyeron para encontrar sus estudiantes
-      for (let readEntry of readByParents) {
-        const associations = await Shared.find({
-          user: readEntry.user._id,
-          status: 'active'
-        }).populate('student', '_id');
-        
-        associations.forEach(assoc => {
-          if (assoc.student) {
-            studentsWithParentsRead.add(assoc.student._id.toString());
-          }
-        });
-      }
-    }
-    
-    // Filtrar destinatarios pendientes (estudiantes cuyos padres NO han leído)
-    const pendingRecipients = [];
-    
-    if (notificationObj.recipients && notificationObj.recipients.length > 0) {
-      for (let recipient of notificationObj.recipients) {
-        // Si es un estudiante, verificar si sus padres ya leyeron
-        if (recipient._id && !studentsWithParentsRead.has(recipient._id.toString())) {
-          // Buscar el tutor (familyadmin) de este estudiante
-          const tutorAssociation = await Shared.findOne({
-            student: recipient._id,
-            status: 'active'
-          }).populate('user', 'name email').populate('role', 'nombre');
-          
-          // Solo incluir si el tutor es familyadmin
-          if (tutorAssociation && tutorAssociation.role?.nombre === 'familyadmin') {
-            pendingRecipients.push({
-              ...recipient,
-              tutor: {
-                name: tutorAssociation.user?.name,
-                email: tutorAssociation.user?.email
-              }
-            });
-          } else {
-            // Si no tiene tutor familyadmin, incluir sin tutor
-            pendingRecipients.push({
-              ...recipient,
-              tutor: null
-            });
-          }
-        }
-      }
-    }
-    
-    // Agregar estadísticas corregidas al objeto de respuesta
-    notificationObj.stats = {
-      totalRecipients,
-      readByParents: readByParents.length,
-      pendingRecipients: pendingRecipients.length
-    };
-    
-    // Agregar lista de pendientes corregida
-    notificationObj.pendingRecipients = pendingRecipients;
-    
-    console.log('🔔 [GET NOTIFICATION DETAILS] Notificación encontrada:', notification.title);
-    console.log('🔔 [GET NOTIFICATION DETAILS] Total destinatarios:', totalRecipients);
-    console.log('🔔 [GET NOTIFICATION DETAILS] Leídas por padres:', readByParents.length);
-    console.log('🔔 [GET NOTIFICATION DETAILS] Pendientes:', pendingRecipients.length);
-    
-    res.json({
-      success: true,
-      data: notificationObj
-    });
-    
-  } catch (error) {
-    console.error('❌ [GET NOTIFICATION DETAILS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener detalles de la notificación'
-    });
-  }
-});
-
-// Marcar notificación como leída
-app.put('/notifications/:id/read', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const notificationId = req.params.id;
-    
-    console.log('🔔 [MARK READ] Usuario:', userId, 'Notificación:', notificationId);
-    
-    const notification = await Notification.findById(notificationId);
-    
-    if (!notification) {
-      return res.status(404).json({
-        success: false,
-        message: 'Notificación no encontrada'
-      });
-    }
-    
-    await notification.markAsRead(userId);
-    
-    console.log('🔔 [MARK READ] Notificación marcada como leída');
-    
-    res.json({
-      success: true,
-      message: 'Notificación marcada como leída'
-    });
-    
-  } catch (error) {
-    console.error('❌ [MARK READ] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al marcar notificación como leída'
-    });
-  }
-});
-
-// Eliminar notificación
-app.delete('/notifications/:id', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const notificationId = req.params.id;
-    
-    console.log('🔔 [DELETE] Usuario:', userId, 'Notificación:', notificationId);
-    
-    const notification = await Notification.findById(notificationId);
-    
-    if (!notification) {
-      return res.status(404).json({
-        success: false,
-        message: 'Notificación no encontrada'
-      });
-    }
-    
-    // Verificar permisos: remitente, superadmin, coordinador o adminaccount puede eliminar
-    const user = await User.findById(userId).populate('role');
-    const isSuperAdmin = user?.role?.nombre === 'superadmin';
-    const isCoordinador = user?.role?.nombre === 'coordinador';
-    const isAdminAccount = user?.role?.nombre === 'adminaccount';
-    const isSender = notification.sender.toString() === userId;
-    
-    console.log('🔔 [DELETE] Verificando permisos:', {
-      userId,
-      userRole: user?.role?.nombre,
-      isSuperAdmin,
-      isCoordinador,
-      isAdminAccount,
-      isSender,
-      notificationSender: notification.sender.toString()
-    });
-    
-    if (!isSuperAdmin && !isCoordinador && !isAdminAccount && !isSender) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para eliminar esta notificación'
-      });
-    }
-    
-    await Notification.findByIdAndDelete(notificationId);
-    
-    console.log('🔔 [DELETE] Notificación eliminada');
-    
-    res.json({
-      success: true,
-      message: 'Notificación eliminada correctamente'
-    });
-    
-  } catch (error) {
-    console.error('❌ [DELETE] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al eliminar notificación'
-    });
-  }
-});
-
-// Endpoint de prueba para verificar que el servidor funciona
-app.get('/test', (req, res) => {
-  res.json({
-    success: true,
-    message: 'Servidor funcionando correctamente',
-    timestamp: new Date().toISOString()
-  });
-});
-
-// Endpoint para obtener datos de ejemplo del usuario (sin autenticación)
-app.get('/users/example', (req, res) => {
-  const exampleUser = {
-    _id: 'juan-perez-id',
-    name: 'Juan Pérez',
-    email: 'juan.perez@test.com',
-    telefono: '+54 9 11 5555-1234',
-    avatar: undefined,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  
-  res.json({
-    success: true,
-    data: exampleUser
-  });
-});
-
-// Endpoint para obtener datos del usuario actual
-app.get('/users/me', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    const userId = req.user.userId;
-    const user = await User.findById(userId).select('-password');
-    
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
-    }
-
-    res.json({
-      success: true,
-      data: user
-    });
-  } catch (error) {
-    console.error('Error al obtener usuario:', error);
-    res.status(500).json({ success: false, message: 'Error interno del servidor' });
-  }
-});
-
-// Endpoint para obtener un usuario por ID
-app.get('/users/:id', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    const { id } = req.params;
-    console.log('🔍 [GET USER BY ID] Obteniendo usuario con ID:', id);
-    
-    // Buscar el usuario por ID
-    const user = await User.findById(id).select('-password').populate('role');
-    
-    if (!user) {
-      console.log('❌ [GET USER BY ID] Usuario no encontrado:', id);
-      return res.status(404).json({ 
-        success: false, 
-        message: 'Usuario no encontrado' 
-      });
-    }
-
-    console.log('✅ [GET USER BY ID] Usuario encontrado:', user.name);
-    
-    res.json({
-      success: true,
-      data: user
-    });
-  } catch (error) {
-    console.error('❌ [GET USER BY ID] Error al obtener usuario:', error);
-    res.status(500).json({ 
-      success: false, 
-      message: 'Error interno del servidor' 
-    });
-  }
-});
-
-// Endpoint para actualizar datos del usuario (sin autenticación para testing)
-app.put('/users/:userId', async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { name, phone, telefono } = req.body;
-
-    // Log para debuggear qué datos llegan
-    console.log('🔍 [Server] Datos recibidos:', {
-      userId,
-      body: req.body,
-      name,
-      phone,
-      telefono
-    });
-
-    // Para testing, simular actualización con datos de ejemplo
-    const updatedUser = {
-      _id: userId,
-      name: name || 'Juan Pérez',
-      email: 'juan.perez@test.com',
-      telefono: phone || telefono || '+54 9 11 5555-1234',
-      avatar: undefined,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-
-    console.log('🔍 [Server] Usuario actualizado (simulado):', updatedUser);
-
-    res.json({
-      success: true,
-      data: updatedUser
-    });
-  } catch (error) {
-    console.error('Error al actualizar usuario:', error);
-    res.status(500).json({ success: false, message: 'Error interno del servidor' });
-  }
-});
-
-// Endpoint para subir avatar del usuario (sin autenticación para testing)
-app.post('/users/:userId/avatar', upload.single('avatar'), async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: 'No se proporcionó imagen' });
-    }
-
-    // Para testing, simular subida a S3
-    const avatarUrl = `https://s3.amazonaws.com/ki-bucket/avatars/${userId}/${Date.now()}-${req.file.originalname}`;
-    
-    console.log('🔍 [Server] Avatar simulado:', avatarUrl);
-
-    res.json({
-      success: true,
-      avatarUrl: avatarUrl,
-      message: 'Avatar actualizado correctamente'
-    });
-  } catch (error) {
-    console.error('Error al subir avatar:', error);
-    res.status(500).json({ success: false, message: 'Error interno del servidor' });
-  }
-});
-
-// Endpoint para eliminar avatar del usuario
-app.delete('/users/:userId/avatar', authenticateToken, async (req, res) => {
-  try {
-    const { userId } = req.params;
-
-    // Verificar que el usuario solo puede eliminar su propio avatar
-    if (req.user.userId !== userId) {
-      return res.status(403).json({ success: false, message: 'No tienes permisos para actualizar este usuario' });
-    }
-
-    const user = await User.findById(userId);
-    if (!user) {
-      return res.status(404).json({ success: false, message: 'Usuario no encontrado' });
-    }
-
-    // Eliminar avatar anterior de S3 si existe
-    if (user.avatar) {
-      const key = user.avatar.split('/').pop();
-      try {
-        await s3.deleteObject({
-          Bucket: S3_BUCKET_NAME,
-          Key: `avatars/${userId}/${key}`
-        }).promise();
-      } catch (s3Error) {
-        console.error('Error al eliminar archivo de S3:', s3Error);
-      }
-    }
-
-    // Limpiar avatar del usuario
-    user.avatar = undefined;
-    await user.save();
-
-    res.json({
-      success: true,
-      message: 'Avatar eliminado correctamente'
-    });
-  } catch (error) {
-    console.error('Error al eliminar avatar:', error);
-    res.status(500).json({ success: false, message: 'Error interno del servidor' });
-  }
-});
-
-// Obtener conteo de notificaciones sin leer
-app.get('/notifications/unread-count', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user._id;
-    
-    console.log('🔔 [UNREAD COUNT] Usuario:', userId);
-    
-    // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    // Solo familyadmin y familyviewer pueden ver notificaciones
-    if (!['familyadmin', 'familyviewer'].includes(user.role?.nombre)) {
-      return res.json({
-        success: true,
-        data: { count: 0 }
-      });
-    }
-    
-    console.log('🔔 [UNREAD COUNT] Rol del usuario:', user.role?.nombre);
-    
-    // Para familyadmin/familyviewer: buscar estudiantes asociados y obtener sus notificaciones
-    console.log('🔔 [UNREAD COUNT] Usuario es familyadmin/familyviewer - buscando notificaciones de estudiantes asociados');
-    
-    // Obtener todas las asociaciones del usuario
-    const userAssociations = await Shared.find({ 
-      user: userId, 
-      status: 'active' 
-    }).populate('account division student');
-    
-    if (userAssociations.length === 0) {
-      console.log('🔔 [UNREAD COUNT] No se encontraron asociaciones activas');
-      return res.json({
-        success: true,
-        data: { count: 0 }
-      });
-    }
-    
-    // Obtener IDs de estudiantes asociados
-    const studentIds = userAssociations
-      .map(assoc => assoc.student?._id)
-      .filter(id => id); // Filtrar IDs válidos
-    
-    console.log('🔔 [UNREAD COUNT] Estudiantes asociados:', studentIds);
-    
-    if (studentIds.length === 0) {
-      console.log('🔔 [UNREAD COUNT] No hay estudiantes válidos asociados');
-      return res.json({
-        success: true,
-        data: { count: 0 }
-      });
-    }
-    
-    // Obtener IDs de cuentas del usuario
-    const accountIds = userAssociations.map(assoc => assoc.account._id);
-    
-    console.log('🔔 [UNREAD COUNT] Cuentas del usuario:', accountIds);
-    
-    // Construir query para notificaciones
-    const query = {
-      account: { $in: accountIds },
-      recipients: { $in: studentIds }, // Notificaciones dirigidas a los estudiantes asociados
-      'readBy.user': { $ne: userId } // Excluir las que ya fueron leídas por este usuario
-    };
-    
-    console.log('🔔 [UNREAD COUNT] Query:', JSON.stringify(query, null, 2));
-    
-    // Contar notificaciones sin leer
-    const unreadCount = await Notification.countDocuments(query);
-    
-    console.log('🔔 [UNREAD COUNT] Conteo sin leer:', unreadCount);
-    
-    res.json({
-      success: true,
-      data: { count: unreadCount }
-    });
-    
-  } catch (error) {
-    console.error('❌ [UNREAD COUNT] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor'
-    });
-  }
-});
-
-// Obtener conteo de notificaciones sin leer para usuarios familia (endpoint específico)
-app.get('/notifications/family/unread-count', authenticateToken, async (req, res) => {
-  try {
-    const userId = req.user._id;
-    const { accountId } = req.query;
-    
-    console.log('🔔 [FAMILY UNREAD COUNT] Usuario:', userId);
-    console.log('🔔 [FAMILY UNREAD COUNT] AccountId:', accountId);
-    
-    // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    // Obtener la asociación activa del usuario
-    const activeAssociation = await ActiveAssociation.findOne({ user: userId });
-    if (!activeAssociation) {
-      return res.status(404).json({
-        success: false,
-        message: 'No se encontró asociación activa'
-      });
-    }
-    
-    // Verificar que el rol activo sea familyadmin o familyviewer
-    if (!['familyadmin', 'familyviewer'].includes(activeAssociation.role?.nombre)) {
-      return res.status(403).json({
-        success: false,
-        message: 'Este endpoint es solo para usuarios familia'
-      });
-    }
-    
-    console.log('🔔 [FAMILY UNREAD COUNT] Rol del usuario:', user.role?.nombre);
-    
-    // Buscar estudiantes asociados al usuario en la cuenta específica
-    const associations = await Shared.find({
-      user: userId,
-      account: accountId,
-      status: 'active'
-    }).populate('student', 'nombre apellido');
-    
-    if (associations.length === 0) {
-      console.log('🔔 [FAMILY UNREAD COUNT] No se encontraron estudiantes asociados');
-      return res.json({
-        success: true,
-        data: { count: 0 }
-      });
-    }
-    
-    // Obtener IDs de estudiantes asociados
-    const studentIds = associations
-      .map(assoc => assoc.student?._id)
-      .filter(id => id);
-    
-    console.log('🔔 [FAMILY UNREAD COUNT] Estudiantes asociados:', studentIds.length);
-    console.log('🔔 [FAMILY UNREAD COUNT] IDs de estudiantes:', studentIds);
-    
-    if (studentIds.length === 0) {
-      console.log('🔔 [FAMILY UNREAD COUNT] No hay estudiantes válidos asociados');
-      return res.json({
-        success: true,
-        data: { count: 0 }
-      });
-    }
-    
-    // Buscar notificaciones no leídas para estos estudiantes
-    const unreadCount = await Notification.countDocuments({
-      account: accountId,
-      recipients: { $in: studentIds },
-      'readBy.user': { $ne: userId }
-    });
-    
-    console.log('🔔 [FAMILY UNREAD COUNT] Notificaciones no leídas:', unreadCount);
-    
-    res.json({
-      success: true,
-      data: { count: unreadCount }
-    });
-    
-  } catch (error) {
-    console.error('❌ [FAMILY UNREAD COUNT] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener conteo de notificaciones familia'
-    });
-  }
-});
-
-// Obtener notificaciones para el backoffice (servicio específico)
-app.get('/backoffice/notifications', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    // Verificar permisos del usuario
-    let currentUser;
-    if (req.user.isCognitoUser) {
-      currentUser = await User.findOne({ email: req.user.email }).populate('role');
-    } else {
-      const { userId } = req.user;
-      currentUser = await User.findById(userId).populate('role');
-    }
-    
-    if (!currentUser) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    const userId = currentUser._id;
-    const { 
-      limit = 100, 
-      skip = 0, 
-      accountId,
-      divisionId,
-      type,
-      search
-    } = req.query;
-    
-    console.log('🔔 [BACKOFFICE NOTIFICATIONS] Usuario:', userId);
-    console.log('🔔 [BACKOFFICE NOTIFICATIONS] Parámetros:', { accountId, divisionId, type, search });
-    
-    // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    console.log('🔔 [BACKOFFICE NOTIFICATIONS] Rol del usuario:', user.role?.nombre);
-    
-    // Construir query base
-    let query = {};
-    
-    // Lógica según el rol
-    if (user.role?.nombre === 'superadmin') {
-      // Superadmin ve todas las notificaciones de todas las cuentas
-      if (accountId) {
-        query.account = accountId;
-      }
-    } else if (user.role?.nombre === 'adminaccount') {
-      // Adminaccount ve todas las notificaciones de su cuenta
-      query.account = user.account?._id;
-    } else {
-      // Otros roles no tienen acceso al backoffice
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para acceder a esta sección'
-      });
-    }
-    
-    // Filtros adicionales
-    if (divisionId) {
-      query.division = divisionId;
-    }
-    
-    if (type && type !== 'all') {
-      query.type = type;
-    }
-    
-    if (search) {
-      query.$or = [
-        { title: { $regex: search, $options: 'i' } },
-        { message: { $regex: search, $options: 'i' } }
-      ];
-    }
-    
-    console.log('🔔 [BACKOFFICE NOTIFICATIONS] Query final:', JSON.stringify(query, null, 2));
-    
-    // Obtener total de notificaciones para la paginación
-    const total = await Notification.countDocuments(query);
-    
-    // Obtener notificaciones con paginación
-    const notifications = await Notification.find(query)
-      .populate('sender', 'name email')
-      .populate('account', 'nombre')
-      .populate('division', 'nombre')
-      .sort({ sentAt: -1 })
-      .limit(parseInt(limit))
-      .skip(parseInt(skip));
-
-    // Poblar destinatarios manualmente (usuarios y estudiantes)
-    const populatedNotifications = [];
-    
-    for (let notification of notifications) {
-      // Convertir a objeto plano primero
-      let notificationObj = notification.toObject();
-      
-      if (notification.recipients && notification.recipients.length > 0) {
-        const populatedRecipients = [];
-        
-        for (let recipientId of notification.recipients) {
-          // Intentar buscar como usuario
-          let recipient = await User.findById(recipientId).select('name email');
-          
-          // Si no es usuario, buscar como estudiante
-          if (!recipient) {
-            recipient = await Student.findById(recipientId).select('nombre apellido email');
-          }
-          
-          if (recipient) {
-            // Normalizar el nombre para usuarios y estudiantes
-            const recipientObj = recipient.toObject();
-            if (recipientObj.name) {
-              // Es un usuario, usar 'name' como 'nombre'
-              recipientObj.nombre = recipientObj.name;
-            } else if (recipientObj.nombre && recipientObj.apellido) {
-              // Es un estudiante, combinar nombre y apellido
-              recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
-            }
-            populatedRecipients.push(recipientObj);
-          }
-        }
-        
-        notificationObj.recipients = populatedRecipients;
-      }
-      
-      populatedNotifications.push(notificationObj);
-    }
-    
-    // Calcular información de paginación
-    const currentPage = Math.floor(parseInt(skip) / parseInt(limit)) + 1;
-    const totalPages = Math.ceil(total / parseInt(limit));
-    const hasNextPage = currentPage < totalPages;
-    const hasPrevPage = currentPage > 1;
-    
-    console.log('🔔 [BACKOFFICE NOTIFICATIONS] Notificaciones encontradas:', populatedNotifications.length);
-    console.log('🔔 [BACKOFFICE NOTIFICATIONS] Paginación:', { currentPage, totalPages, total });
-    
-    res.json({
-      success: true,
-      data: populatedNotifications,
-      pagination: {
-        currentPage,
-        totalPages,
-        totalItems: total,
-        itemsPerPage: parseInt(limit),
-        hasNextPage,
-        hasPrevPage
-      }
-    });
-    
-  } catch (error) {
-    console.error('❌ [BACKOFFICE NOTIFICATIONS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener notificaciones'
-    });
-  }
-});
-
-// Enviar nueva notificación
-app.post('/notifications', authenticateToken, setUserInstitution, async (req, res) => {
-  try {
-    console.log('🔔 [SEND NOTIFICATION] Iniciando...');
-    const { title, message, type, accountId, divisionId, recipients = [] } = req.body;
-    const userId = req.user._id;
-
-    console.log('🔔 [SEND NOTIFICATION] Datos recibidos:', { title, message, type, accountId, divisionId, recipients });
-
-    // Validar campos requeridos
-    if (!title || !message || !type || !accountId) {
-      console.log('❌ [SEND NOTIFICATION] Campos faltantes');
-      return res.status(400).json({
-        success: false,
-        message: 'Faltan campos requeridos: título, mensaje, tipo y cuenta'
-      });
-    }
-
-    // Validar tipo de notificación
-    if (!['informacion', 'comunicacion', 'institucion', 'coordinador'].includes(type)) {
-      console.log('❌ [SEND NOTIFICATION] Tipo inválido:', type);
-      return res.status(400).json({
-        success: false,
-        message: 'Tipo de notificación inválido. Debe ser "informacion", "comunicacion", "institucion" o "coordinador"'
-      });
-    }
-
-    // Verificar que el usuario tiene permisos para la cuenta
-    console.log('🔔 [SEND NOTIFICATION] Verificando permisos...');
-    
-    // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      console.log('❌ [SEND NOTIFICATION] Usuario no encontrado');
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-    
-    console.log('🔔 [SEND NOTIFICATION] Usuario:', user.email, 'Rol:', user.role?.nombre);
-    
-    // Verificar permisos según el rol
-    if (user.role?.nombre === 'adminaccount') {
-      // Adminaccount puede enviar notificaciones a su cuenta
-      if (user.account?._id?.toString() !== accountId) {
-        // Si no tiene cuenta asignada directamente, verificar asociación en Shared
-        console.log('🔔 [SEND NOTIFICATION] Adminaccount sin cuenta directa, verificando asociación en Shared...');
-        const userAssociation = await Shared.findOne({
-          user: userId,
-          account: accountId,
-          status: 'active'
-        });
-
-        if (!userAssociation) {
-          console.log('❌ [SEND NOTIFICATION] Adminaccount no tiene permisos para esta cuenta');
-          return res.status(403).json({
-            success: false,
-            message: 'No tienes permisos para enviar notificaciones a esta cuenta'
-          });
-        }
-        console.log('✅ [SEND NOTIFICATION] Adminaccount tiene asociación activa en Shared');
-      } else {
-        console.log('✅ [SEND NOTIFICATION] Adminaccount tiene cuenta asignada directamente');
-      }
-    } else if (user.role?.nombre === 'superadmin') {
-      // Superadmin puede enviar a cualquier cuenta
-      console.log('🔔 [SEND NOTIFICATION] Superadmin - permisos otorgados');
-    } else {
-      // Para otros roles, verificar asociación en Shared
-      const userAssociation = await Shared.findOne({
-        user: userId,
-        account: accountId,
-        status: 'active'
-      });
-
-      if (!userAssociation) {
-        console.log('❌ [SEND NOTIFICATION] Sin permisos - no hay asociación activa');
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes permisos para enviar notificaciones a esta cuenta'
-        });
-      }
-    }
-
-    console.log('🔔 [SEND NOTIFICATION] Creando notificación...');
-    // Crear la notificación
-    const notification = new Notification({
-      title,
-      message,
-      type,
-      sender: userId,
-      account: accountId,
-      division: divisionId,
-      recipients,
-      status: 'sent',
-      priority: 'normal',
-      readBy: [],
-      sentAt: new Date()
-    });
-
-    await notification.save();
-    console.log('🔔 [SEND NOTIFICATION] Notificación guardada:', notification._id);
-
-    // Enviar push notifications a usuarios familiares de estudiantes
-    if (recipients && recipients.length > 0) {
-      console.log('🔔 [SEND NOTIFICATION] Enviando push notifications a familiares...');
-      
-      // Verificar si los destinatarios son estudiantes
-      const students = await Student.find({ _id: { $in: recipients } });
-      
-      if (students.length > 0) {
-        console.log('🔔 [SEND NOTIFICATION] Encontrados', students.length, 'estudiantes destinatarios');
-        
-        // Enviar push notification a cada estudiante
-        for (const student of students) {
-          try {
-            const pushResult = await sendPushNotificationToStudentFamily(student._id, notification);
-            console.log('🔔 [SEND NOTIFICATION] Push para estudiante', student.nombre, '- Enviados:', pushResult.sent, 'Fallidos:', pushResult.failed);
-          } catch (pushError) {
-            console.error('🔔 [SEND NOTIFICATION] Error enviando push para estudiante', student.nombre, ':', pushError.message);
-          }
-        }
-      } else {
-        console.log('🔔 [SEND NOTIFICATION] No se encontraron estudiantes en los destinatarios');
-      }
-    }
-
-    // Populate sender info
-    await notification.populate('sender', 'name email');
-    await notification.populate('account', 'nombre');
-    await notification.populate('division', 'nombre');
-    // Recipients pueden ser estudiantes o usuarios, se poblarán según corresponda
-
-    const responseData = {
-      success: true,
-      message: 'Notificación enviada exitosamente',
-      data: {
-        _id: notification._id,
-        title: notification.title,
-        message: notification.message,
-        type: notification.type,
-        sender: notification.sender,
-        account: notification.account,
-        division: notification.division,
-        recipients: notification.recipients,
-        readBy: notification.readBy,
-        status: notification.status,
-        priority: notification.priority,
-        sentAt: notification.sentAt,
-        createdAt: notification.createdAt,
-        updatedAt: notification.updatedAt
-      }
-    };
-
-    console.log('🔔 [SEND NOTIFICATION] Respuesta exitosa:', JSON.stringify(responseData, null, 2));
-    res.status(201).json(responseData);
-
-  } catch (error) {
-    console.error('❌ [SEND NOTIFICATION] Error completo:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error interno del servidor al enviar notificación'
-    });
-  }
-});
-
-// Obtener usuarios disponibles para enviar notificaciones
-app.get('/notifications/recipients', authenticateToken, async (req, res) => {
-  try {
-    const { accountId, divisionId } = req.query;
-    
-    console.log('🔔 [GET RECIPIENTS] Parámetros:', { accountId, divisionId });
-    
-    if (!accountId) {
-      return res.status(400).json({
-        success: false,
-        message: 'accountId es requerido'
-      });
-    }
-    
-    // Buscar usuarios asociados a la cuenta/división
-    let query = { account: accountId };
-    
-    if (divisionId) {
-      query.division = divisionId;
-    }
-    
-    const associations = await Shared.find(query)
-      .populate('user', 'name email')
-      .populate('account', 'nombre')
-      .populate('division', 'nombre')
-      .populate('role', 'nombre');
-    
-    // Filtrar asociaciones que tengan usuario, cuenta y rol válidos
-    const recipients = associations
-      .filter(assoc => assoc.user && assoc.account && assoc.role)
-      .map(assoc => ({
-        _id: assoc.user._id,
-        nombre: assoc.user.name || 'Sin nombre', // User model usa 'name', no 'nombre'
-        email: assoc.user.email || 'Sin email',
-        role: {
-          nombre: assoc.role.nombre || 'Sin rol'
-        },
-        account: assoc.account.nombre || 'Sin cuenta',
-        division: assoc.division?.nombre || 'Sin división'
-      }));
-    
-    console.log('🔔 [GET RECIPIENTS] Destinatarios encontrados:', recipients.length);
-    
-    res.json({
-      success: true,
-      data: recipients
-    });
-    
-  } catch (error) {
-    console.error('❌ [GET RECIPIENTS] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error al obtener destinatarios'
-    });
-  }
-});
+// NOTA: Las rutas de notificaciones han sido movidas a routes/notifications.routes.js
+// Las rutas están registradas arriba con: app.use('/', notificationsRoutes);
 
 // ===== NUEVOS ENDPOINTS DE EVENTOS =====
 
@@ -11394,75 +9561,42 @@ app.post('/events/create', authenticateToken, async (req, res) => {
     console.log('🔍 [CREATE EVENT] Rol del usuario:', currentUser.role?.nombre);
     console.log('🔍 [CREATE EVENT] InstitutionId recibido:', institutionId);
     console.log('🔍 [CREATE EVENT] DivisionId recibido:', divisionId);
-
-    if (currentUser.role?.nombre === 'adminaccount') {
-      console.log('🔍 [CREATE EVENT] Usuario es adminaccount, verificando acceso a cuenta:', institutionId);
-      
-      // Para adminaccount, buscar cualquier asociación activa con la cuenta
-      userAssociation = await Shared.findOne({
-        user: currentUser._id,
-        account: institutionId,
-        status: { $in: ['active', 'pending'] }
-      }).populate('account division');
-
-      console.log('🔍 [CREATE EVENT] Asociación encontrada:', userAssociation ? 'Sí' : 'No');
-      if (userAssociation) {
-        console.log('🔍 [CREATE EVENT] Asociación details:', {
-          account: userAssociation.account?._id,
-          division: userAssociation.division?._id,
-          status: userAssociation.status
-        });
-      }
-
-      if (!userAssociation) {
-        console.log('❌ [CREATE EVENT] No se encontró asociación para adminaccount');
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes acceso a la institución indicada'
-        });
-      }
-
-      targetAccount = userAssociation.account._id;
-      targetDivision = divisionId || null;
-      console.log('✅ [CREATE EVENT] Adminaccount autorizado. TargetAccount:', targetAccount, 'TargetDivision:', targetDivision);
-    } else if (currentUser.role?.nombre === 'superadmin') {
-      // Superadmin puede crear eventos en cualquier institución/división
-      console.log('🔍 [CREATE EVENT] Usuario es superadmin, usando institutionId y divisionId directamente');
-      if (!institutionId) {
-        return res.status(400).json({
-          success: false,
-          message: 'Se requiere institutionId para crear el evento'
-        });
-      }
+    
+    if (effectiveRole === 'adminaccount' || effectiveRole === 'superadmin') {
+      // Para adminaccount y superadmin, usar los IDs directamente sin verificar ActiveAssociation
       targetAccount = institutionId;
-      targetDivision = divisionId || null;
-      console.log('✅ [CREATE EVENT] Superadmin autorizado. TargetAccount:', targetAccount, 'TargetDivision:', targetDivision);
+      targetDivision = divisionId;
+      
+      if (effectiveRole === 'adminaccount') {
+        // Verificar que la cuenta pertenece al usuario
+        const user = await User.findById(currentUser._id).populate('role');
+        if (user.account?.toString() !== institutionId) {
+          return res.status(403).json({
+            success: false,
+            message: 'No tienes permisos para crear eventos en esta institución'
+          });
+        }
+      }
     } else {
-      // Para coordinadores, verificar asociación específica
-      const assocFilter = {
-        user: currentUser._id,
-        status: { $in: ['active', 'pending'] }
-      };
-      if (institutionId) {
-        assocFilter.account = institutionId;
-      }
-      if (divisionId) {
-        assocFilter.division = divisionId;
-      }
-
-      userAssociation = await Shared.findOne(assocFilter).populate('account division');
-
-      if (!userAssociation) {
+      // Para coordinadores, verificar ActiveAssociation
+      userAssociation = await ActiveAssociation.findOne({ user: currentUser._id });
+      
+      if (!userAssociation || !userAssociation.activeShared) {
         return res.status(403).json({
           success: false,
-          message: institutionId || divisionId
-            ? 'No tienes acceso a la institución/división indicada'
-            : 'Usuario no tiene asociaciones activas'
+          message: 'No tienes una asociación activa'
         });
       }
+      
+      targetAccount = userAssociation.activeShared.account;
+      targetDivision = divisionId || userAssociation.activeShared.division;
+    }
 
-      targetAccount = userAssociation.account._id;
-      targetDivision = userAssociation.division?._id || null;
+    if (!targetAccount || !targetDivision) {
+      return res.status(400).json({
+        success: false,
+        message: 'Institución y división son requeridos'
+      });
     }
 
     // Crear el evento
@@ -11482,91 +9616,29 @@ app.post('/events/create', authenticateToken, async (req, res) => {
     await newEvent.save();
     console.log('📅 [CREATE EVENT] Evento creado:', newEvent._id);
 
-    // Si el evento requiere autorización, generar notificaciones para todos los estudiantes de la división
-    if (newEvent.requiereAutorizacion && targetDivision) {
-      try {
-        console.log('📢 [CREATE EVENT] Generando notificaciones para evento que requiere autorización');
-        
-        // Obtener todos los estudiantes de la división
-        const students = await Student.find({
-          division: targetDivision,
-          activo: true
-        });
-
-        console.log('📢 [CREATE EVENT] Estudiantes encontrados para notificar:', students.length);
-
-        // Crear una sola notificación para todos los estudiantes
-        const studentIds = students.map(student => student._id);
-        const notification = new Notification({
-          title: `Nuevo evento: ${newEvent.titulo}`,
-          message: `${newEvent.descripcion}\n\n📅 Fecha: ${new Date(newEvent.fecha).toLocaleDateString('es-ES', { 
-            weekday: 'long', 
-            day: 'numeric', 
-            month: 'long' 
-          })} a las ${newEvent.hora}${newEvent.lugar ? `\n📍 Lugar: ${newEvent.lugar}` : ''}\n\n⚠️ Este evento requiere tu autorización. Por favor, autoriza o rechaza la participación de tu hijo.`,
-          type: 'informacion',
-          sender: currentUser._id,
-          account: newEvent.institucion,
-          division: newEvent.division,
-          recipients: studentIds, // Todos los estudiantes en una sola notificación
-          status: 'sent',
-          priority: 'high'
-        });
-
-        // Guardar la notificación
-        await notification.save();
-        console.log('📢 [CREATE EVENT] Notificación única creada para', studentIds.length, 'estudiantes');
-        
-        // Enviar push notifications a usuarios familiares de todos los estudiantes
-        console.log('📢 [CREATE EVENT] Enviando push notifications a familiares...');
-        let totalSent = 0;
-        let totalFailed = 0;
-        
-        for (const studentId of studentIds) {
-          try {
-            const pushResult = await sendPushNotificationToStudentFamily(studentId, notification);
-            totalSent += pushResult.sent;
-            totalFailed += pushResult.failed;
-            console.log('📢 [CREATE EVENT] Push para estudiante', studentId, '- Enviados:', pushResult.sent, 'Fallidos:', pushResult.failed);
-          } catch (pushError) {
-            console.error('📢 [CREATE EVENT] Error enviando push para estudiante', studentId, ':', pushError.message);
-            totalFailed++;
-          }
-        }
-        
-        console.log('📢 [CREATE EVENT] Resumen push notifications - Total enviados:', totalSent, 'Total fallidos:', totalFailed);
-
-      } catch (notificationError) {
-        console.error('❌ [CREATE EVENT] Error creando notificaciones:', notificationError);
-        // No fallar la creación del evento si fallan las notificaciones
-      }
-    }
-
     // Populate para la respuesta
     await newEvent.populate('creador', 'name email');
     await newEvent.populate('institucion', 'nombre');
     await newEvent.populate('division', 'nombre');
 
-    const responseMessage = newEvent.requiereAutorizacion 
-      ? 'Evento creado exitosamente. Se han enviado notificaciones a los padres para autorización.'
-      : 'Evento creado exitosamente';
-
     res.status(201).json({
       success: true,
-      message: responseMessage,
+      message: 'Evento creado exitosamente',
       data: {
-        _id: newEvent._id,
-        titulo: newEvent.titulo,
-        descripcion: newEvent.descripcion,
-        fecha: newEvent.fecha,
-        hora: newEvent.hora,
-        lugar: newEvent.lugar,
-        estado: newEvent.estado,
-        requiereAutorizacion: newEvent.requiereAutorizacion,
-        creador: newEvent.creador,
-        institucion: newEvent.institucion,
-        division: newEvent.division,
-        createdAt: newEvent.createdAt
+        event: {
+          _id: newEvent._id,
+          titulo: newEvent.titulo,
+          descripcion: newEvent.descripcion,
+          fecha: newEvent.fecha,
+          hora: newEvent.hora,
+          lugar: newEvent.lugar,
+          estado: newEvent.estado,
+          requiereAutorizacion: newEvent.requiereAutorizacion,
+          creador: newEvent.creador,
+          institucion: newEvent.institucion,
+          division: newEvent.division,
+          createdAt: newEvent.createdAt
+        }
       }
     });
 
@@ -11579,122 +9651,106 @@ app.post('/events/create', authenticateToken, async (req, res) => {
   }
 });
 
-// Obtener eventos por institución (para todos los roles)
+// Obtener eventos por institución
 app.get('/events/institution/:institutionId', authenticateToken, async (req, res) => {
   try {
     const { institutionId } = req.params;
-    const { page = 1, limit = 20, divisionId } = req.query;
+    const { divisionId, fechaInicio, fechaFin } = req.query;
     const currentUser = req.user;
 
-    console.log('📅 [GET EVENTS] Institución:', institutionId);
-    if (divisionId) console.log('📚 [GET EVENTS] División:', divisionId);
-    console.log('👤 [GET EVENTS] Usuario:', currentUser._id, currentUser.role?.nombre);
+    console.log('📅 [GET EVENTS BY INSTITUTION] Institución:', institutionId);
+    console.log('📅 [GET EVENTS BY INSTITUTION] Usuario:', currentUser._id, currentUser.role?.nombre);
 
-    // Verificar que el usuario tiene acceso a la institución
-    const assocFilter = {
-      user: currentUser._id,
-      account: institutionId,
-      status: { $in: ['active', 'pending'] }
-    };
-    if (divisionId) {
-      // Si se solicita una división específica, validar acceso a esa división
-      assocFilter.division = divisionId;
+    // Verificar permisos
+    const userRole = currentUser.role?.nombre;
+    let hasAccess = false;
+
+    if (userRole === 'superadmin') {
+      hasAccess = true;
+    } else if (userRole === 'adminaccount') {
+      const user = await User.findById(currentUser._id);
+      hasAccess = user.account?.toString() === institutionId;
+    } else {
+      // Para coordinadores y otros roles, verificar ActiveAssociation
+      const activeAssociation = await ActiveAssociation.findOne({ user: currentUser._id });
+      if (activeAssociation && activeAssociation.activeShared) {
+        hasAccess = activeAssociation.activeShared.account?.toString() === institutionId;
+      }
     }
-    const userAssociation = await Shared.findOne(assocFilter);
 
-    if (!userAssociation) {
-      // Requerimiento: no retornar 404/403 cuando no hay acceso o no hay datos.
-      // Responder 200 con lista vacía para mantener idempotencia del GET.
-      return res.json({
-        success: true,
-        data: {
-          events: [],
-          total: 0,
-          page: parseInt(page),
-          limit: parseInt(limit)
-        }
+    if (!hasAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver eventos de esta institución'
       });
     }
 
-    // Obtener eventos
-    const query = { institucion: institutionId };
+    // Construir query
+    let query = { institucion: institutionId };
+
     if (divisionId) {
       query.division = divisionId;
     }
-    const total = await Event.countDocuments(query);
+
+    if (fechaInicio && fechaFin) {
+      query.fecha = {
+        $gte: new Date(fechaInicio),
+        $lte: new Date(fechaFin)
+      };
+    }
+
+    // Obtener eventos
     const events = await Event.find(query)
       .populate('creador', 'name email')
       .populate('institucion', 'nombre')
       .populate('division', 'nombre')
-      .skip((page - 1) * limit)
-      .limit(limit)
       .sort({ fecha: 1 });
 
-    console.log('📅 [GET EVENTS] Eventos encontrados:', events.length);
-    
     res.json({
       success: true,
-      data: {
-        events: events.map(event => ({
-          _id: event._id,
-          titulo: event.titulo,
-          descripcion: event.descripcion,
-          fecha: event.fecha,
-          hora: event.hora,
-          lugar: event.lugar,
-          estado: event.estado,
-          requiereAutorizacion: event.requiereAutorizacion,
-          creador: event.creador,
-          institucion: event.institucion,
-          division: event.division,
-          createdAt: event.createdAt
-        })),
-        total,
-        page: parseInt(page),
-        limit: parseInt(limit)
-      }
+      data: events
     });
 
   } catch (error) {
-    console.error('❌ [GET EVENTS] Error:', error);
+    console.error('❌ [GET EVENTS BY INSTITUTION] Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor al obtener eventos'
+      message: 'Error interno del servidor'
     });
   }
 });
 
-// ===== ENDPOINTS DE AUTORIZACIÓN DE EVENTOS =====
-
-// Autorizar evento (solo familyadmin)
+// Autorizar evento para un estudiante
 app.post('/events/:eventId/authorize', authenticateToken, async (req, res) => {
   try {
     const { eventId } = req.params;
     const { studentId, autorizado, comentarios } = req.body;
     const currentUser = req.user;
 
-    console.log('✅ [AUTHORIZE EVENT] Evento:', eventId);
-    console.log('👤 [AUTHORIZE EVENT] Usuario:', currentUser._id, currentUser.role?.nombre);
-    console.log('👨‍🎓 [AUTHORIZE EVENT] Estudiante:', studentId);
-    console.log('✅ [AUTHORIZE EVENT] Autorizado:', autorizado);
+    console.log('📅 [AUTHORIZE EVENT] Evento:', eventId, 'Estudiante:', studentId);
+    console.log('📅 [AUTHORIZE EVENT] Usuario:', currentUser._id, currentUser.role?.nombre);
 
-    // Verificar que el usuario tiene asociación activa como familyadmin
-    const activeAssociation = await ActiveAssociation.getActiveAssociation(currentUser._id);
-    
-    if (!activeAssociation) {
+    // Verificar que el usuario es familyadmin
+    const userRole = currentUser.role?.nombre;
+    if (userRole !== 'familyadmin') {
       return res.status(403).json({
         success: false,
-        message: 'No tienes una asociación activa'
+        message: 'Solo los tutores pueden autorizar eventos'
       });
     }
 
-    // Obtener los detalles de la asociación activa
-    const activeShared = await Shared.findById(activeAssociation.activeShared).populate('role');
-    
-    if (activeShared.role?.nombre !== 'familyadmin') {
+    // Verificar que el estudiante está asociado al usuario
+    const association = await Shared.findOne({
+      user: currentUser._id,
+      student: studentId,
+      status: 'active',
+      'role.nombre': 'familyadmin'
+    });
+
+    if (!association) {
       return res.status(403).json({
         success: false,
-        message: 'Solo los tutores principales pueden autorizar eventos'
+        message: 'No tienes permisos para autorizar eventos de este estudiante'
       });
     }
 
@@ -11714,425 +9770,413 @@ app.post('/events/:eventId/authorize', authenticateToken, async (req, res) => {
       });
     }
 
-    // Verificar que el usuario tiene acceso al estudiante
-    const studentAssociation = await Shared.findOne({
-      user: currentUser._id,
-      student: studentId,
-      status: 'active'
-    });
-
-    if (!studentAssociation) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes acceso a este estudiante'
-      });
-    }
-
-    // Buscar o crear la autorización
+    // Crear o actualizar autorización
     let authorization = await EventAuthorization.findOne({
       event: eventId,
       student: studentId
     });
 
     if (authorization) {
-      // Actualizar autorización existente
       authorization.autorizado = autorizado;
-      authorization.fechaAutorizacion = autorizado ? new Date() : null;
-      authorization.comentarios = comentarios || '';
+      authorization.comentarios = comentarios;
+      authorization.fechaAutorizacion = new Date();
+      authorization.familyadmin = currentUser._id;
+      await authorization.save();
     } else {
-      // Crear nueva autorización
       authorization = new EventAuthorization({
         event: eventId,
         student: studentId,
         familyadmin: currentUser._id,
         autorizado: autorizado,
-        fechaAutorizacion: autorizado ? new Date() : null,
-        comentarios: comentarios || ''
+        comentarios: comentarios,
+        fechaAutorizacion: new Date()
       });
+      await authorization.save();
     }
 
-    await authorization.save();
-
-    console.log('✅ [AUTHORIZE EVENT] Autorización guardada:', authorization._id);
+    // Populate para la respuesta
+    await authorization.populate('student', 'nombre apellido');
+    await authorization.populate('familyadmin', 'name email');
+    await authorization.populate('event', 'titulo fecha');
 
     res.json({
       success: true,
-      message: autorizado ? 'Evento autorizado exitosamente' : 'Autorización revocada exitosamente',
-      data: {
-        _id: authorization._id,
-        event: eventId,
-        student: studentId,
-        autorizado: authorization.autorizado,
-        fechaAutorizacion: authorization.fechaAutorizacion,
-        comentarios: authorization.comentarios
-      }
+      message: autorizado ? 'Evento autorizado exitosamente' : 'Autorización rechazada',
+      data: authorization
     });
 
   } catch (error) {
     console.error('❌ [AUTHORIZE EVENT] Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor al autorizar evento'
+      message: 'Error interno del servidor'
     });
   }
 });
 
-// Obtener eventos del mes con autorizaciones para exportar (adminaccount y superadmin)
+// Exportar eventos del mes
 app.get('/api/events/export/month', authenticateToken, setUserInstitution, async (req, res) => {
   try {
-    const { divisionId, fechaInicio, fechaFin } = req.query;
+    const { divisionId, mes, año } = req.query;
     const currentUser = req.user;
 
-    console.log('📊 [EXPORT EVENTS] Solicitud de exportación:', { divisionId, fechaInicio, fechaFin });
-    console.log('👤 [EXPORT EVENTS] Usuario:', currentUser._id, currentUser.role?.nombre);
+    console.log('📅 [EXPORT EVENTS] Parámetros:', { divisionId, mes, año });
 
     // Verificar permisos
-    if (!['adminaccount', 'superadmin'].includes(currentUser.role?.nombre)) {
+    if (!['adminaccount', 'superadmin', 'coordinador'].includes(currentUser.role?.nombre)) {
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para exportar eventos'
       });
     }
 
-    if (!divisionId || !fechaInicio || !fechaFin) {
+    // Determinar cuenta
+    let accountId;
+    if (currentUser.role?.nombre === 'superadmin') {
+      // Superadmin puede exportar de cualquier cuenta
+      if (req.query.accountId) {
+        accountId = req.query.accountId;
+      } else {
+        return res.status(400).json({
+          success: false,
+          message: 'accountId es requerido para superadmin'
+        });
+      }
+    } else {
+      // Adminaccount y coordinador usan su cuenta
+      accountId = req.userInstitution?._id || currentUser.account;
+    }
+
+    if (!accountId) {
       return res.status(400).json({
         success: false,
-        message: 'divisionId, fechaInicio y fechaFin son requeridos'
+        message: 'No se pudo determinar la cuenta'
       });
     }
 
-    // Obtener todos los eventos del mes para la división
-    const startDate = new Date(fechaInicio);
-    const endDate = new Date(fechaFin);
-    endDate.setHours(23, 59, 59, 999); // Incluir todo el último día
+    // Construir query
+    const query = { institucion: accountId };
+    if (divisionId) {
+      query.division = divisionId;
+    }
 
-    const events = await Event.find({
-      division: divisionId,
-      fecha: {
-        $gte: startDate,
-        $lte: endDate
+    // Calcular fechas del mes
+    const year = parseInt(año) || new Date().getFullYear();
+    const month = parseInt(mes) || new Date().getMonth() + 1;
+    const startDate = new Date(year, month - 1, 1);
+    const endDate = new Date(year, month, 0, 23, 59, 59);
+
+    query.fecha = {
+      $gte: startDate,
+      $lte: endDate
+    };
+
+    // Obtener eventos
+    const events = await Event.find(query)
+      .populate('creador', 'name email')
+      .populate('institucion', 'nombre')
+      .populate('division', 'nombre')
+      .sort({ fecha: 1 });
+
+    // Obtener autorizaciones para cada evento
+    const eventsWithAuthorizations = await Promise.all(events.map(async (event) => {
+      const authorizations = await EventAuthorization.find({ event: event._id })
+        .populate('student', 'nombre apellido')
+        .populate('familyadmin', 'name email');
+
+      return {
+        ...event.toObject(),
+        autorizaciones: authorizations.map(auth => ({
+          estudiante: `${auth.student.nombre} ${auth.student.apellido}`,
+          autorizado: auth.autorizado ? 'Aprobado' : 'Rechazado',
+          autorizadoPor: auth.familyadmin?.name || 'N/A',
+          fechaAutorizacion: auth.fechaAutorizacion,
+          comentarios: auth.comentarios
+        }))
+      };
+    }));
+
+    // Generar Excel
+    const XLSX = require('xlsx');
+    const workbook = XLSX.utils.book_new();
+
+    // Crear hoja de eventos
+    // Calcular pendientes para cada evento antes del map
+    const eventsDataPromises = eventsWithAuthorizations.map(async (event) => {
+      let pendientes = 0;
+      if (event.requiereAutorizacion && event.division?._id) {
+        const totalEstudiantes = await Student.countDocuments({ division: event.division._id, activo: true });
+        pendientes = totalEstudiantes - event.autorizaciones.length;
       }
-    })
-    .populate('institucion', 'nombre')
-    .populate('division', 'nombre')
-    .populate('creador', 'name email')
-    .sort({ fecha: 1, hora: 1 });
+      
+      return {
+        'Fecha': event.fecha.toLocaleDateString('es-AR'),
+        'Hora': event.hora,
+        'Título': event.titulo,
+        'Descripción': event.descripcion,
+        'Lugar': event.lugar,
+        'División': event.division?.nombre || 'N/A',
+        'Requiere Autorización': event.requiereAutorizacion ? 'Sí' : 'No',
+        'Total Autorizaciones': event.autorizaciones.length,
+        'Aprobadas': event.autorizaciones.filter(a => a.autorizado === 'Aprobado').length,
+        'Rechazadas': event.autorizaciones.filter(a => a.autorizado === 'Rechazado').length,
+        'Pendientes': pendientes
+      };
+    });
+    
+    const eventsData = await Promise.all(eventsDataPromises);
 
-    console.log('📊 [EXPORT EVENTS] Eventos encontrados:', events.length);
+    const eventsSheet = XLSX.utils.json_to_sheet(eventsData);
+    XLSX.utils.book_append_sheet(workbook, eventsSheet, 'Eventos');
 
-    // Obtener estudiantes de la división
-    const students = await Student.find({
-      division: divisionId,
-      activo: true
-    })
-    .select('nombre apellido')
-    .sort({ apellido: 1, nombre: 1 });
-
-    console.log('📊 [EXPORT EVENTS] Estudiantes encontrados:', students.length);
-
-    // Para cada evento que requiera autorización, obtener las autorizaciones
-    const eventsWithAuthorizations = await Promise.all(
-      events.map(async (event) => {
-        let authorizations = [];
-        let studentsPending = [];
-
-        if (event.requiereAutorizacion) {
-          // Obtener autorizaciones del evento
-          authorizations = await EventAuthorization.find({ event: event._id })
-            .populate('student', 'nombre apellido')
-            .populate('familyadmin', 'name email');
-
-          // Identificar estudiantes que aún no han respondido
-          const studentsWithResponse = authorizations.map(auth => auth.student._id.toString());
-          studentsPending = students.filter(student => 
-            !studentsWithResponse.includes(student._id.toString())
-          );
-        }
-
-        return {
-          _id: event._id,
-          titulo: event.titulo,
-          descripcion: event.descripcion,
-          fecha: event.fecha,
-          hora: event.hora,
-          lugar: event.lugar || '',
-          requiereAutorizacion: event.requiereAutorizacion,
-          institucion: event.institucion?.nombre || '',
-          division: event.division?.nombre || '',
-          authorizations: authorizations.map(auth => ({
-            estudiante: `${auth.student.nombre} ${auth.student.apellido}`,
-            tutor: auth.familyadmin?.name || '',
-            emailTutor: auth.familyadmin?.email || '',
-            autorizado: auth.autorizado,
-            fechaAutorizacion: auth.fechaAutorizacion,
-            comentarios: auth.comentarios || ''
-          })),
-          studentsPending: studentsPending.map(student => ({
-            estudiante: `${student.nombre} ${student.apellido}`
-          }))
-        };
-      })
-    );
-
-    res.json({
-      success: true,
-      data: {
-        events: eventsWithAuthorizations,
-        totalEvents: events.length,
-        totalStudents: students.length
+    // Crear hoja de autorizaciones detalladas
+    const authsData = [];
+    eventsWithAuthorizations.forEach(event => {
+      if (event.requiereAutorizacion && event.autorizaciones.length > 0) {
+        event.autorizaciones.forEach(auth => {
+          authsData.push({
+            'Evento': event.titulo,
+            'Fecha Evento': event.fecha.toLocaleDateString('es-AR'),
+            'Estudiante': auth.estudiante,
+            'Estado': auth.autorizado,
+            'Autorizado Por': auth.autorizadoPor,
+            'Fecha Autorización': auth.fechaAutorizacion ? new Date(auth.fechaAutorizacion).toLocaleDateString('es-AR') : 'N/A',
+            'Comentarios': auth.comentarios || ''
+          });
+        });
       }
     });
+
+    if (authsData.length > 0) {
+      const authsSheet = XLSX.utils.json_to_sheet(authsData);
+      XLSX.utils.book_append_sheet(workbook, authsSheet, 'Autorizaciones');
+    }
+
+    // Generar buffer
+    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+
+    // Enviar respuesta
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename=eventos_${mes}_${año}.xlsx`);
+    res.send(buffer);
+
   } catch (error) {
     console.error('❌ [EXPORT EVENTS] Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor al exportar eventos'
+      message: 'Error interno del servidor'
     });
   }
 });
 
-// Obtener autorizaciones de un evento (solo coordinadores)
+// Obtener autorizaciones de un evento
 app.get('/events/:eventId/authorizations', authenticateToken, async (req, res) => {
   try {
     const { eventId } = req.params;
     const currentUser = req.user;
 
-    console.log('📋 [GET AUTHORIZATIONS] Evento:', eventId);
-    console.log('👤 [GET AUTHORIZATIONS] Usuario:', currentUser._id, currentUser.role?.nombre);
-    console.log('👤 [GET AUTHORIZATIONS] Role completo:', currentUser.role);
-    console.log('👤 [GET AUTHORIZATIONS] ¿Es coordinador?', currentUser.role?.nombre === 'coordinador');
+    console.log('📅 [GET EVENT AUTHORIZATIONS] Evento:', eventId);
 
-    // Verificar que el usuario es coordinador
-    if (currentUser.role?.nombre !== 'coordinador') {
-      console.log('📋 [GET AUTHORIZATIONS] ERROR: Usuario no es coordinador');
-      console.log('📋 [GET AUTHORIZATIONS] Role actual:', currentUser.role?.nombre);
+    // Verificar permisos
+    const userRole = currentUser.role?.nombre;
+    if (!['adminaccount', 'superadmin', 'coordinador'].includes(userRole)) {
       return res.status(403).json({
         success: false,
-        message: 'Solo los coordinadores pueden ver las autorizaciones'
+        message: 'No tienes permisos para ver autorizaciones'
       });
     }
 
-    // Verificar que el evento existe
-    const event = await Event.findById(eventId).populate('institucion division');
-    if (!event) {
-      return res.status(404).json({
-        success: false,
-        message: 'Evento no encontrado'
-      });
-    }
-
-    // Verificar que el usuario tiene acceso al evento
-    const userAssociation = await Shared.findOne({
-      user: currentUser._id,
-      account: event.institucion._id,
-      status: { $in: ['active', 'pending'] }
-    }).populate('division');
-
-    console.log('📋 [GET AUTHORIZATIONS] Evento institucion:', event.institucion._id);
-    console.log('📋 [GET AUTHORIZATIONS] Usuario asociaciones:', userAssociation);
-    console.log('📋 [GET AUTHORIZATIONS] ¿Tiene acceso?', !!userAssociation);
-
-    if (!userAssociation) {
-      console.log('📋 [GET AUTHORIZATIONS] ERROR: No tiene acceso al evento');
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes acceso a este evento'
-      });
-    }
-
-    console.log('📋 [GET AUTHORIZATIONS] Asociación del coordinador:', {
-      account: userAssociation.account,
-      division: userAssociation.division?._id,
-      divisionName: userAssociation.division?.nombre
-    });
-
-    // Obtener todas las autorizaciones del evento
+    // Obtener autorizaciones
     const authorizations = await EventAuthorization.find({ event: eventId })
-      .populate('student', 'nombre apellido')
+      .populate('student', 'nombre apellido email')
       .populate('familyadmin', 'name email')
-      .sort({ createdAt: 1 });
-
-    // Obtener todos los estudiantes de la división del coordinador
-    let allStudents = [];
-    if (userAssociation.division) {
-      allStudents = await Student.find({ 
-        division: userAssociation.division._id,
-        activo: true 
-      }).select('nombre apellido');
-      console.log('📋 [GET AUTHORIZATIONS] División del coordinador:', userAssociation.division._id);
-      console.log('📋 [GET AUTHORIZATIONS] Estudiantes encontrados en división del coordinador:', allStudents.length);
-    } else {
-      console.log('📋 [GET AUTHORIZATIONS] Coordinador sin división específica');
-    }
-
-    // Separar estudiantes con y sin autorización
-    const studentsWithAuth = authorizations.map(auth => auth.student._id.toString());
-    const studentsWithoutAuth = allStudents.filter(student => 
-      !studentsWithAuth.includes(student._id.toString())
-    );
-
-    // Crear lista completa de estudiantes pendientes (todos los de la división)
-    const allStudentsForPending = allStudents.map(student => {
-      const existingAuth = authorizations.find(auth => 
-        auth.student._id.toString() === student._id.toString()
-      );
-      
-      return {
-        _id: student._id,
-        nombre: student.nombre,
-        apellido: student.apellido,
-        hasResponse: !!existingAuth,
-        autorizado: existingAuth?.autorizado || false
-      };
-    });
-
-    const autorizados = authorizations.filter(auth => auth.autorizado).length;
-    const rechazados = authorizations.filter(auth => !auth.autorizado).length;
-    const sinRespuesta = allStudents.length - authorizations.length;
-    const pendientes = allStudents.length - autorizados;
-
-    console.log('📋 [GET AUTHORIZATIONS] Autorizaciones encontradas:', authorizations.length);
-    console.log('📋 [GET AUTHORIZATIONS] Estudiantes sin autorización:', studentsWithoutAuth.length);
-    console.log('📋 [GET AUTHORIZATIONS] Total estudiantes en división:', allStudents.length);
-    console.log('📋 [GET AUTHORIZATIONS] Autorizaciones aprobadas:', autorizados);
-    console.log('📋 [GET AUTHORIZATIONS] Autorizaciones rechazadas:', rechazados);
-    console.log('📋 [GET AUTHORIZATIONS] Sin respuesta:', sinRespuesta);
-    console.log('📋 [GET AUTHORIZATIONS] Pendientes (total - autorizados):', pendientes);
-    console.log('📋 [GET AUTHORIZATIONS] Verificación: autorizados + rechazados + sinRespuesta =', autorizados + rechazados + sinRespuesta, 'vs total =', allStudents.length);
+      .populate('event', 'titulo fecha');
 
     res.json({
       success: true,
-      data: {
-        event: {
-          _id: event._id,
-          titulo: event.titulo,
-          fecha: event.fecha,
-          hora: event.hora,
-          institucion: event.institucion,
-          division: event.division
-        },
-        authorizations: authorizations.map(auth => ({
-          _id: auth._id,
-          student: {
-            _id: auth.student._id,
-            nombre: auth.student.nombre,
-            apellido: auth.student.apellido
-          },
-          familyadmin: {
-            _id: auth.familyadmin._id,
-            name: auth.familyadmin.name,
-            email: auth.familyadmin.email
-          },
-          autorizado: auth.autorizado,
-          fechaAutorizacion: auth.fechaAutorizacion,
-          comentarios: auth.comentarios
-        })),
-        studentsWithoutAuth: studentsWithoutAuth.map(student => ({
-          _id: student._id,
-          nombre: student.nombre,
-          apellido: student.apellido
-        })),
-        allStudentsPending: allStudentsForPending,
-        summary: {
-          total: allStudents.length,
-          autorizados: autorizados,
-          rechazados: rechazados,
-          sinRespuesta: sinRespuesta,
-          pendientes: pendientes
-        }
-      }
+      data: authorizations
     });
 
   } catch (error) {
-    console.error('❌ [GET AUTHORIZATIONS] Error:', error);
+    console.error('❌ [GET EVENT AUTHORIZATIONS] Error:', error);
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor al obtener autorizaciones'
+      message: 'Error interno del servidor'
     });
   }
 });
 
-// Verificar autorización de un evento para un estudiante (para familyadmin)
+// Obtener autorización específica de un estudiante para un evento
 app.get('/events/:eventId/authorization/:studentId', authenticateToken, async (req, res) => {
   try {
     const { eventId, studentId } = req.params;
     const currentUser = req.user;
 
-    console.log('🔍 [CHECK AUTHORIZATION] Evento:', eventId);
-    console.log('👨‍🎓 [CHECK AUTHORIZATION] Estudiante:', studentId);
-    console.log('👤 [CHECK AUTHORIZATION] Usuario:', currentUser._id, currentUser.role?.nombre);
+    console.log('📅 [GET EVENT AUTHORIZATION] Evento:', eventId, 'Estudiante:', studentId);
 
-    // Verificar que el usuario tiene asociación activa como familyadmin
-    const activeAssociation = await ActiveAssociation.getActiveAssociation(currentUser._id);
-    
-    if (!activeAssociation) {
+    // Verificar permisos
+    const userRole = currentUser.role?.nombre;
+    let hasAccess = false;
+
+    if (['adminaccount', 'superadmin', 'coordinador'].includes(userRole)) {
+      hasAccess = true;
+    } else if (userRole === 'familyadmin') {
+      // Verificar que el estudiante está asociado al usuario
+      const association = await Shared.findOne({
+        user: currentUser._id,
+        student: studentId,
+        status: 'active'
+      });
+      hasAccess = !!association;
+    }
+
+    if (!hasAccess) {
       return res.status(403).json({
         success: false,
-        message: 'No tienes una asociación activa'
+        message: 'No tienes permisos para ver esta autorización'
       });
     }
 
-    // Obtener los detalles de la asociación activa
-    const activeShared = await Shared.findById(activeAssociation.activeShared).populate('role');
-    
-    if (activeShared.role?.nombre !== 'familyadmin') {
-      return res.status(403).json({
-        success: false,
-        message: 'Solo los tutores principales pueden verificar autorizaciones'
-      });
-    }
-
-    // Verificar que el evento existe
-    const event = await Event.findById(eventId);
-    if (!event) {
-      return res.status(404).json({
-        success: false,
-        message: 'Evento no encontrado'
-      });
-    }
-
-    // Verificar que el usuario tiene acceso al estudiante
-    const studentAssociation = await Shared.findOne({
-      user: currentUser._id,
-      student: studentId,
-      status: 'active'
-    });
-
-    if (!studentAssociation) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes acceso a este estudiante'
-      });
-    }
-
-    // Buscar la autorización
+    // Obtener autorización
     const authorization = await EventAuthorization.findOne({
       event: eventId,
       student: studentId
+    })
+      .populate('student', 'nombre apellido')
+      .populate('familyadmin', 'name email')
+      .populate('event', 'titulo fecha');
+
+    if (!authorization) {
+      return res.status(404).json({
+        success: false,
+        message: 'Autorización no encontrada'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: authorization
     });
+
+  } catch (error) {
+    console.error('❌ [GET EVENT AUTHORIZATION] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// ===== FIN DE ENDPOINTS DE EVENTOS =====
+// NOTA: Las rutas de eventos han sido movidas a routes/events.routes.js
+// Las rutas están registradas arriba con: app.use('/', eventsRoutes);
+
+// ===== RUTAS DE ASISTENCIAS =====
+
+// Listar asistencias por cuenta
+app.get('/asistencias', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    const { accountId, grupoId, alumnoId, fechaInicio, fechaFin, page = 1, limit = 20 } = req.query;
+    const currentUser = req.user;
+
+    // Verificar permisos
+    if (!['adminaccount', 'superadmin', 'coordinador'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver asistencias'
+      });
+    }
+
+    let query = { activo: true };
+
+    // Filtro por cuenta según el rol del usuario
+    if (currentUser.role?.nombre === 'superadmin') {
+      // Superadmin puede ver todas las asistencias
+      if (accountId) {
+        query.account = accountId;
+      }
+    } else if (currentUser.role?.nombre === 'adminaccount') {
+      // Adminaccount solo puede ver asistencias de sus cuentas
+      const userAccounts = await Shared.find({ 
+        user: currentUser._id, 
+        status: { $in: ['active', 'pending'] }
+      }).select('account');
+      
+      const accountIds = userAccounts.map(ah => ah.account);
+      query.account = { $in: accountIds };
+      
+      if (accountId) {
+        // Verificar que la cuenta solicitada pertenece al usuario
+        if (!accountIds.includes(accountId)) {
+          return res.status(403).json({
+            success: false,
+            message: 'No tienes permisos para ver asistencias de esta cuenta'
+          });
+        }
+        query.account = accountId;
+      }
+    } else if (currentUser.role?.nombre === 'coordinador') {
+      // Coordinador puede ver asistencias de sus grupos
+      if (accountId) {
+        query.account = accountId;
+      }
+    }
+
+    // Filtros adicionales
+    if (grupoId) {
+      query.division = grupoId;
+    }
+    
+    if (alumnoId) {
+      query.alumno = alumnoId;
+    }
+    
+    if (fechaInicio && fechaFin) {
+      query.fecha = {
+        $gte: fechaInicio,
+        $lte: fechaFin
+      };
+    }
+
+    // Obtener datos reales de la base de datos
+    const total = await Asistencia.countDocuments(query);
+    const asistencias = await Asistencia.find(query)
+      .populate('alumno', 'name email')
+      .populate('account', 'nombre razonSocial')
+      .populate('grupo', 'nombre descripcion')
+      .populate('registradoPor', 'name email')
+      .skip((page - 1) * limit)
+      .limit(limit)
+      .sort({ fecha: -1, horaLlegada: -1 });
 
     res.json({
       success: true,
       data: {
-        event: {
-          _id: event._id,
-          titulo: event.titulo,
-          requiereAutorizacion: event.requiereAutorizacion
-        },
-        authorization: authorization ? {
-          _id: authorization._id,
-          autorizado: authorization.autorizado,
-          fechaAutorizacion: authorization.fechaAutorizacion,
-          comentarios: authorization.comentarios
-        } : null
+        asistencias: asistencias.map(asistencia => ({
+          _id: asistencia._id,
+          alumno: asistencia.alumno,
+          account: asistencia.account,
+          grupo: asistencia.grupo,
+          fecha: asistencia.fecha,
+          estado: asistencia.estado,
+          horaLlegada: asistencia.horaLlegada,
+          horaSalida: asistencia.horaSalida,
+          observaciones: asistencia.observaciones,
+          registradoPor: asistencia.registradoPor,
+          activo: asistencia.activo,
+          createdAt: asistencia.createdAt,
+          updatedAt: asistencia.updatedAt
+        })),
+        total,
+        page: parseInt(page),
+        limit: parseInt(limit)
       }
     });
-
   } catch (error) {
-    console.error('❌ [CHECK AUTHORIZATION] Error:', error);
+    console.error('Error listando asistencias:', error);
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor al verificar autorización'
+      message: 'Error interno del servidor'
     });
   }
 });
