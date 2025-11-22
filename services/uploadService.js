@@ -35,11 +35,15 @@ const uploadImage = async (file) => {
 
     const result = await s3.upload(params).promise();
     
+    // Generar URL firmada en lugar de usar result.Location (URL pública)
+    const { generateSignedUrl } = require('../config/s3.config');
+    const signedUrl = await generateSignedUrl(key, 172800); // 2 días
+    
     return {
       success: true,
       imageId: fileName,
       imageKey: key,
-      imageUrl: result.Location,
+      imageUrl: signedUrl, // URL firmada en lugar de URL pública
       message: 'Imagen subida exitosamente'
     };
   } catch (error) {
@@ -76,10 +80,24 @@ const deleteImage = async (imageKey) => {
   }
 };
 
-// Función para obtener URL de imagen
-const getImageUrl = (imageKey) => {
+// Función para obtener URL firmada de imagen
+const getImageUrl = async (imageKey, expiresIn = 172800) => {
   if (!imageKey) return null;
-  return `https://${process.env.AWS_S3_BUCKET_NAME}.s3.${process.env.AWS_REGION || 'us-east-1'}.amazonaws.com/${imageKey}`;
+  
+  // Si ya es una URL completa (http/https), retornarla tal cual
+  if (imageKey.startsWith('http://') || imageKey.startsWith('https://')) {
+    return imageKey;
+  }
+  
+  // Generar URL firmada usando la función de S3 config
+  try {
+    const { generateSignedUrl } = require('../config/s3.config');
+    return await generateSignedUrl(imageKey, expiresIn);
+  } catch (error) {
+    console.error('Error generando URL firmada en uploadService:', error);
+    // Fallback: retornar null en lugar de URL pública
+    return null;
+  }
 };
 
 module.exports = {

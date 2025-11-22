@@ -27,6 +27,41 @@ const gmailTransporter = nodemailer.createTransport({
 const FROM_EMAIL = process.env.GMAIL_USER || 'noreplykikiapp@gmail.com';
 const FROM_NAME = 'Kiki App';
 
+// Función helper para generar el HTML del logo de Kiki (URL pública)
+const getKikiLogoHTML = () => {
+  const logoUrl = 'https://drive.google.com/uc?export=download&id=1jPsauBej_P9NnG57YnrpnFz50UZQftpz';
+  return `
+    <div style="text-align: center; margin-bottom: 20px; padding: 20px 0;">
+      <img src="${logoUrl}" alt="Kiki Logo" style="max-width: 200px; height: auto; margin: 0 auto; display: block;">
+    </div>
+  `;
+};
+
+// Función helper para generar badges de App Store y Google Play (URLs públicas)
+const getAppStoreBadgesHTML = () => {
+  const appleBadgeUrl = 'https://drive.google.com/uc?export=download&id=1iHl9TB11buK7j6eh8G-W48L82X6FbELi';
+  const googlePlayBadgeUrl = 'https://drive.google.com/uc?export=download&id=1Vmbu4esRamKgTsiWK_G9xLGz1oKOJdkz';
+  
+  return `
+    <div style="text-align: center; margin: 30px 0;">
+      <div style="margin-bottom: 15px;">
+        <a href="https://apps.apple.com/ar/app/id1494945181" 
+           target="_blank"
+           style="display: inline-block; margin: 0 10px; text-decoration: none;">
+          <img src="${appleBadgeUrl}" alt="Download on the App Store" style="width: 200px; height: 75px; object-fit: contain; border-radius: 8px;">
+        </a>
+      </div>
+      <div>
+        <a href="https://play.google.com/store/apps/details?id=com.kikiapp.katter" 
+           target="_blank"
+           style="display: inline-block; margin: 0 10px; text-decoration: none;">
+          <img src="${googlePlayBadgeUrl}" alt="Get it on Google Play" style="width: 200px; height: 75px; object-fit: contain; border-radius: 8px;">
+        </a>
+      </div>
+    </div>
+  `;
+};
+
 // Función para envío asíncrono de emails (no bloquea el flujo principal)
 const sendEmailAsync = async (emailFunction, context = null, ...args) => {
   // Ejecutar el envío de email en segundo plano sin esperar
@@ -134,17 +169,13 @@ const sendEmailSES = async (toEmail, subject, htmlContent) => {
 const sendPasswordResetEmail = async (email, code, userName = 'Usuario') => {
   try {
     const htmlContent = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fa;">
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+        ${getKikiLogoHTML()}
         <div style="background-color: #0E5FCE; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <svg width="120" height="48" xmlns="http://www.w3.org/2000/svg" style="margin-bottom: 15px;">
-            <rect width="120" height="48" fill="#0E5FCE"/>
-            <text x="60" y="27" font-family="Arial, sans-serif" font-size="17" font-weight="bold" text-anchor="middle" fill="white">KIKI</text>
-            <text x="60" y="39" font-family="Arial, sans-serif" font-size="7" text-anchor="middle" fill="white" opacity="0.8">APP</text>
-          </svg>
           <h1 style="margin: 0; font-size: 24px;">Recuperación de Contraseña</h1>
         </div>
         
-        <div style="background-color: white; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+        <div style="background-color: #ffffff; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
           <h2 style="color: #333; margin-bottom: 20px;">Hola ${userName},</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
@@ -197,17 +228,13 @@ const sendPasswordResetEmail = async (email, code, userName = 'Usuario') => {
 const sendInstitutionWelcomeEmail = async (email, userName, institutionName, password) => {
   try {
     const htmlContent = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fa;">
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+        ${getKikiLogoHTML()}
         <div style="background-color: #0E5FCE; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <svg width="120" height="48" xmlns="http://www.w3.org/2000/svg" style="margin-bottom: 15px;">
-            <rect width="120" height="48" fill="#0E5FCE"/>
-            <text x="60" y="27" font-family="Arial, sans-serif" font-size="17" font-weight="bold" text-anchor="middle" fill="white">KIKI</text>
-            <text x="60" y="39" font-family="Arial, sans-serif" font-size="7" text-anchor="middle" fill="white" opacity="0.8">APP</text>
-          </svg>
           <h1 style="margin: 0; font-size: 24px;">¡Bienvenido a Kiki App!</h1>
         </div>
         
-        <div style="background-color: white; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+        <div style="background-color: #ffffff; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
           <h2 style="color: #333; margin-bottom: 20px;">Hola ${userName},</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
@@ -274,17 +301,13 @@ const sendInstitutionWelcomeEmail = async (email, userName, institutionName, pas
 const sendWelcomeEmail = async (email, userName) => {
   try {
     const htmlContent = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fa;">
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+        ${getKikiLogoHTML()}
         <div style="background-color: #0E5FCE; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <svg width="120" height="48" xmlns="http://www.w3.org/2000/svg" style="margin-bottom: 15px;">
-            <rect width="120" height="48" fill="#0E5FCE"/>
-            <text x="60" y="27" font-family="Arial, sans-serif" font-size="17" font-weight="bold" text-anchor="middle" fill="white">KIKI</text>
-            <text x="60" y="39" font-family="Arial, sans-serif" font-size="7" text-anchor="middle" fill="white" opacity="0.8">APP</text>
-          </svg>
           <h1 style="margin: 0; font-size: 24px;">¡Bienvenido a Kiki App!</h1>
         </div>
         
-        <div style="background-color: white; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+        <div style="background-color: #ffffff; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
           <h2 style="color: #333; margin-bottom: 20px;">Hola ${userName},</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
@@ -325,17 +348,13 @@ const sendWelcomeEmail = async (email, userName) => {
 const sendFamilyInvitationEmail = async (email, userName, password) => {
   try {
     const htmlContent = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fa;">
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+        ${getKikiLogoHTML()}
         <div style="background-color: #0E5FCE; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <svg width="120" height="48" xmlns="http://www.w3.org/2000/svg" style="margin-bottom: 15px;">
-            <rect width="120" height="48" fill="#0E5FCE"/>
-            <text x="60" y="27" font-family="Arial, sans-serif" font-size="17" font-weight="bold" text-anchor="middle" fill="white">KIKI</text>
-            <text x="60" y="39" font-family="Arial, sans-serif" font-size="7" text-anchor="middle" fill="white" opacity="0.8">APP</text>
-          </svg>
           <h1 style="margin: 0; font-size: 24px;">¡Invitación a Kiki App!</h1>
         </div>
         
-        <div style="background-color: white; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+        <div style="background-color: #ffffff; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
           <h2 style="color: #333; margin-bottom: 20px;">Hola ${userName},</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
@@ -360,24 +379,7 @@ const sendFamilyInvitationEmail = async (email, userName, password) => {
             </p>
           </div>
           
-          <div style="text-align: center; margin: 30px 0;">
-            <div style="margin-bottom: 15px;">
-              <a href="https://apps.apple.com/ar/app/id1494945181" 
-                 style="display: inline-block; margin: 0 10px; text-decoration: none;">
-                <img src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" 
-                     alt="Download on the App Store" 
-                     style="height: 40px; border-radius: 8px;">
-              </a>
-            </div>
-            <div>
-              <a href="https://play.google.com/store/apps/details?id=com.kikiapp.katter" 
-                 style="display: inline-block; margin: 0 10px; text-decoration: none;">
-                <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" 
-                     alt="Get it on Google Play" 
-                     style="height: 40px; border-radius: 8px;">
-              </a>
-            </div>
-          </div>
+          ${getAppStoreBadgesHTML()}
           
           <div style="background-color: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 8px; margin: 20px 0;">
             <p style="margin: 0; color: #856404; font-size: 14px;">
@@ -409,17 +411,13 @@ const sendFamilyInvitationEmail = async (email, userName, password) => {
 const sendFamilyInvitationNotificationEmail = async (email, userName, studentName) => {
   try {
     const htmlContent = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fa;">
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+        ${getKikiLogoHTML()}
         <div style="background-color: #0E5FCE; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <svg width="120" height="48" xmlns="http://www.w3.org/2000/svg" style="margin-bottom: 15px;">
-            <rect width="120" height="48" fill="#0E5FCE"/>
-            <text x="60" y="27" font-family="Arial, sans-serif" font-size="17" font-weight="bold" text-anchor="middle" fill="white">KIKI</text>
-            <text x="60" y="39" font-family="Arial, sans-serif" font-size="7" text-anchor="middle" fill="white" opacity="0.8">APP</text>
-          </svg>
           <h1 style="margin: 0; font-size: 24px;">¡Nueva Invitación a Kiki App!</h1>
         </div>
         
-        <div style="background-color: white; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+        <div style="background-color: #ffffff; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
           <h2 style="color: #333; margin-bottom: 20px;">Hola ${userName},</h2>
           
           <p style="color: #666; line-height: 1.6; margin-bottom: 20px;">
@@ -432,24 +430,7 @@ const sendFamilyInvitationNotificationEmail = async (email, userName, studentNam
             </p>
           </div>
           
-          <div style="text-align: center; margin: 30px 0;">
-            <div style="margin-bottom: 15px;">
-              <a href="https://apps.apple.com/ar/app/id1494945181" 
-                 style="display: inline-block; margin: 0 10px; text-decoration: none;">
-                <img src="https://developer.apple.com/assets/elements/badges/download-on-the-app-store.svg" 
-                     alt="Download on the App Store" 
-                     style="height: 40px; border-radius: 8px;">
-              </a>
-            </div>
-            <div>
-              <a href="https://play.google.com/store/apps/details?id=com.kikiapp.katter" 
-                 style="display: inline-block; margin: 0 10px; text-decoration: none;">
-                <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png" 
-                     alt="Get it on Google Play" 
-                     style="height: 40px; border-radius: 8px;">
-              </a>
-            </div>
-          </div>
+          ${getAppStoreBadgesHTML()}
           
           <hr style="border: none; border-top: 1px solid #eee; margin: 30px 0;">
           
@@ -475,17 +456,13 @@ const sendFamilyInvitationNotificationEmail = async (email, userName, studentNam
 const sendNotificationEmail = async (email, subject, message, userName = 'Usuario') => {
   try {
     const htmlContent = `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #f8f9fa;">
+      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
+        ${getKikiLogoHTML()}
         <div style="background-color: #0E5FCE; color: white; padding: 20px; text-align: center; border-radius: 8px 8px 0 0;">
-          <svg width="120" height="48" xmlns="http://www.w3.org/2000/svg" style="margin-bottom: 15px;">
-            <rect width="120" height="48" fill="#0E5FCE"/>
-            <text x="60" y="27" font-family="Arial, sans-serif" font-size="17" font-weight="bold" text-anchor="middle" fill="white">KIKI</text>
-            <text x="60" y="39" font-family="Arial, sans-serif" font-size="7" text-anchor="middle" fill="white" opacity="0.8">APP</text>
-          </svg>
           <h1 style="margin: 0; font-size: 24px;">Nueva Notificación</h1>
         </div>
         
-        <div style="background-color: white; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+        <div style="background-color: #ffffff; padding: 30px; border-radius: 0 0 8px 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
           <h2 style="color: #333; margin-bottom: 20px;">Hola ${userName},</h2>
           
           <div style="background-color: #e8f4fd; border-left: 4px solid #0E5FCE; padding: 15px; margin: 20px 0;">
@@ -531,5 +508,7 @@ module.exports = {
   sendNotificationEmail,
   sendEmail,
   generateRandomPassword,
-  sendEmailAsync
+  sendEmailAsync,
+  getKikiLogoHTML,
+  getAppStoreBadgesHTML
 };
