@@ -462,13 +462,17 @@ router.post('/s3/file', authenticateToken, uploadFileToMemory.single('file'), as
 
     const result = await s3.upload(uploadParams).promise();
     
+    // Generar URL firmada en lugar de usar result.Location (URL pública)
+    const { generateSignedUrl } = require('../config/s3.config');
+    const signedFileUrl = await generateSignedUrl(key, 172800); // 2 días
+    
     res.status(200).json({
       success: true,
       message: 'Archivo subido exitosamente',
       fileKey: key,
       data: {
         fileKey: key,
-        fileUrl: result.Location
+        fileUrl: signedFileUrl // URL firmada en lugar de URL pública
       }
     });
   } catch (error) {
