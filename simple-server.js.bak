@@ -207,8 +207,6 @@ const usersRoutes = require('./routes/users.routes');
 const groupsRoutes = require('./routes/groups.routes');
 // Importar rutas de cuentas
 const accountsRoutes = require('./routes/accounts.routes');
-// Importar rutas de student actions
-const studentActionsRoutes = require('./routes/studentActions.routes');
 
 // Configurar multer para subida de archivos
 const storage = multer.diskStorage({
@@ -808,11 +806,6 @@ console.log('🔍 Registrando rutas de cuentas...');
 app.use('/', accountsRoutes);
 console.log('✅ Rutas de cuentas registradas');
 
-console.log('🔍 Registrando rutas de student actions...');
-app.use('/', studentActionsRoutes);
-console.log('✅ Rutas de student actions registradas');
-console.log('✅ Rutas de cuentas registradas');
-
 // Conectar a MongoDB
 console.log('🔗 MongoDB URI:', config.MONGODB_URI)
 mongoose.connect(config.MONGODB_URI)
@@ -923,16 +916,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     console.log('📧 [TEST ALL EMAILS] Enviando todos los tipos de emails a:', testEmail);
     
-    // Verificar configuración de email
-    const hasGmailUser = !!process.env.GMAIL_USER;
-    const hasGmailPassword = !!process.env.GMAIL_APP_PASSWORD;
-    console.log('📧 [TEST ALL EMAILS] Configuración Gmail:', {
-      hasGmailUser,
-      hasGmailPassword,
-      gmailUser: hasGmailUser ? process.env.GMAIL_USER : 'NO CONFIGURADO'
-    });
-    
     const emailConfig = require('./config/email.config');
+    const emailService = require('./services/emailService');
+    const emailServiceInstance = new emailService();
     
     const results = [];
     const testUserData = {
@@ -1002,7 +988,7 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 7. Email de usuario familyviewer creado
     try {
-      await emailService.sendFamilyViewerCreatedEmail(testUserData, 'TestPass123!', 'Institución de Prueba');
+      await emailServiceInstance.sendFamilyViewerCreatedEmail(testUserData, 'TestPass123!', 'Institución de Prueba');
       results.push({ type: 'sendFamilyViewerCreatedEmail', status: 'success' });
       console.log('✅ [TEST] Email de familyviewer creado enviado');
     } catch (error) {
@@ -1012,7 +998,7 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 8. Email de nuevo usuario creado (coordinador)
     try {
-      await emailService.sendNewUserCreatedEmail(testUserData, 'TestPass123!', 'Institución de Prueba', 'coordinador');
+      await emailServiceInstance.sendNewUserCreatedEmail(testUserData, 'TestPass123!', 'Institución de Prueba', 'coordinador');
       results.push({ type: 'sendNewUserCreatedEmail (coordinador)', status: 'success' });
       console.log('✅ [TEST] Email de nuevo usuario coordinador enviado');
     } catch (error) {
@@ -1022,7 +1008,7 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 9. Email de nuevo usuario creado (adminaccount)
     try {
-      await emailService.sendNewUserCreatedEmail(testUserData, 'TestPass123!', 'Institución de Prueba', 'adminaccount');
+      await emailServiceInstance.sendNewUserCreatedEmail(testUserData, 'TestPass123!', 'Institución de Prueba', 'adminaccount');
       results.push({ type: 'sendNewUserCreatedEmail (adminaccount)', status: 'success' });
       console.log('✅ [TEST] Email de nuevo usuario adminaccount enviado');
     } catch (error) {
@@ -1032,7 +1018,7 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 10. Email de asociación a institución
     try {
-      await emailService.sendInstitutionAssociationEmail(
+      await emailServiceInstance.sendInstitutionAssociationEmail(
         testUserData,
         'Institución de Prueba',
         'División de Prueba',
@@ -1470,15 +1456,162 @@ app.post('/auth/refresh', async (req, res) => {
     });
   }
 });
-*/
 
-// Endpoint para revocar refresh token (logout) - DUPLICADO, ya está en users.routes.js
-// Código eliminado - movido a controllers/users.controller.js
+// Endpoint para revocar refresh token (logout)
+app.post('/auth/revoke', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    
+    console.log('🔒 [REVOKE] Revocando refresh token...');
+    
+    if (!refreshToken) {
+      return res.status(400).json({
+        success: false,
+        message: 'Refresh token es requerido'
+      });
+    }
+    
+    const revoked = await RefreshTokenService.revokeRefreshToken(refreshToken);
+    
+    if (revoked) {
+      console.log('✅ [REVOKE] Refresh token revocado exitosamente');
+      return res.json({
+        success: true,
+        message: 'Sesión cerrada exitosamente'
+      });
+    } else {
+      console.log('⚠️ [REVOKE] Refresh token no encontrado');
+      return res.status(404).json({
+        success: false,
+        message: 'Refresh token no encontrado'
+      });
+    }
+    
+  } catch (error) {
+    console.error('❌ [REVOKE] Error revocando token:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
 
 // ===== RUTAS DE AUTENTICACIÓN =====
 // NOTA: Las rutas de autenticación han sido movidas a routes/auth.routes.js
 // Las rutas están registradas arriba con: app.use('/', authRoutes);
-// Código eliminado - movido a controllers/users.controller.js
+
+// Crear usuario desde backoffice - DESACTIVADO
+app.post('/users', /* authenticateToken, */ async (req, res) => {
+  try {
+    console.log('👤 [CREATE USER] Intento de creación de usuario desde backoffice - DESACTIVADO');
+    
+    return res.status(403).json({
+      success: false,
+      message: 'La creación de usuarios desde el backoffice está desactivada. Los usuarios se crean mediante carga de Excel o desde la app móvil.'
+    });
+    
+    // Código desactivado - Los usuarios se crean por Excel o app móvil
+    /*
+    const { name, email, role, status, avatar } = req.body;
+    const { userId } = req.user;
+
+    if (!name || !email || !role) {
+      return res.status(400).json({
+        success: false,
+        message: 'Nombre, email y rol son requeridos'
+      });
+    }
+
+    // Verificar que el usuario que crea es admin
+    const currentUser = await User.findById(userId).populate('role');
+    if (!currentUser || !['superadmin', 'adminaccount'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo administradores pueden crear usuarios'
+      });
+    }
+
+    // Verificar que el email no exista
+    const existingUser = await User.findOne({ email: email.toLowerCase() });
+    if (existingUser) {
+      return res.status(400).json({
+        success: false,
+        message: 'Ya existe un usuario con este email'
+      });
+    }
+
+    // Buscar el rol
+    const roleDoc = await Role.findOne({ nombre: role });
+    if (!roleDoc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Rol no válido'
+      });
+    }
+
+    // Generar contraseña aleatoria
+    const generateRandomPassword = () => {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+      let password = '';
+      for (let i = 0; i < 8; i++) {
+        password += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return password;
+    };
+
+    const randomPassword = generateRandomPassword();
+    console.log('🔑 [CREATE USER] Contraseña generada para:', email);
+
+    // Crear el usuario
+    const newUser = new User({
+      name: name,
+      email: email.toLowerCase(),
+      password: randomPassword,
+      role: roleDoc._id,
+      status: status === 'active' ? 'approved' : 'pending',
+      activo: status === 'active',
+      isFirstLogin: true // Marcar como primer login
+    });
+
+    await newUser.save();
+    console.log('✅ [CREATE USER] Usuario creado exitosamente:', newUser._id);
+
+    // Enviar email de bienvenida con la contraseña (asíncrono)
+    sendEmailAsync(sendWelcomeEmail, null, newUser.email, newUser.name);
+    console.log('📧 [CREATE USER] Email de bienvenida programado para envío asíncrono a:', email);
+
+    // Populate para la respuesta
+    const populatedUser = await User.findById(newUser._id)
+      .populate('role', 'nombre descripcion nivel');
+
+    res.status(201).json({
+      success: true,
+      message: 'Usuario creado exitosamente. Se enviará un email con la contraseña.',
+      data: {
+        user: {
+          _id: populatedUser._id,
+          name: populatedUser.name,
+          email: populatedUser.email,
+          role: populatedUser.role,
+          status: populatedUser.status,
+          activo: populatedUser.activo,
+          createdAt: populatedUser.createdAt,
+          updatedAt: populatedUser.updatedAt
+        },
+        password: randomPassword // Temporalmente incluir la contraseña en la respuesta para testing
+      }
+    });
+    */
+    
+  } catch (error) {
+    console.error('❌ [CREATE USER] Error interno:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+*/
 
 // ===== FIN DE RUTAS DE USUARIOS/AUTH =====
 // Todo el código de usuarios/auth ha sido movido a controllers/users.controller.js y routes/users.routes.js
@@ -1496,6 +1629,10 @@ app.post('/auth/refresh', async (req, res) => {
 // - GET /groups/account/:accountId -> groupsController.getGroupsByAccountId
 
 // Código eliminado - movido a controllers/groups.controller.js
+
+// ===== RUTAS DE GRUPOS (DIVISIONES) =====
+// NOTA: Las rutas de grupos han sido movidas a routes/groups.routes.js y controllers/groups.controller.js
+// Las rutas están registradas arriba con: app.use('/', groupsRoutes);
 // Rutas movidas:
 // - GET /grupos -> groupsController.listGroups
 // - POST /grupos -> groupsController.createGroup
@@ -1506,6 +1643,1537 @@ app.post('/auth/refresh', async (req, res) => {
 // - GET /groups/account/:accountId -> groupsController.getGroupsByAccountId
 
 // Código eliminado - movido a controllers/groups.controller.js
+
+    if (!email || !password) {
+      // Registrar intento fallido
+      await LoginMonitorService.logLoginAttempt({
+        email: email || 'unknown',
+        ipAddress: ipAddress,
+        userAgent: userAgent,
+        success: false,
+        failureReason: 'missing_credentials',
+        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
+        location: await LoginMonitorService.getLocationInfo(ipAddress)
+      });
+
+      return res.status(400).json({
+        success: false,
+        message: 'Email y contraseña son requeridos'
+      });
+    }
+
+    // Verificar si la IP está bloqueada
+    const isIPBlocked = await LoginMonitorService.isIPBlocked(ipAddress);
+    if (isIPBlocked) {
+      console.log('🚫 IP bloqueada:', ipAddress);
+      return res.status(403).json({
+        success: false,
+        message: 'Acceso bloqueado temporalmente. Intenta más tarde.'
+      });
+    }
+
+    // Buscar usuario en la base de datos
+    const user = await User.findOne({ email }).populate('role').select('+password');
+    
+    if (!user) {
+      console.log('❌ Usuario no encontrado:', email);
+      
+      // Registrar intento fallido
+      await LoginMonitorService.logLoginAttempt({
+        email: email,
+        ipAddress: ipAddress,
+        userAgent: userAgent,
+        success: false,
+        failureReason: 'user_not_found',
+        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
+        location: await LoginMonitorService.getLocationInfo(ipAddress)
+      });
+
+      return res.status(401).json({
+        success: false,
+        message: 'Credenciales inválidas'
+      });
+    }
+
+    console.log('✅ Usuario encontrado:', user.email);
+    console.log('📊 Status:', user.status);
+    console.log('🎭 Rol:', user.role?.nombre);
+
+    // Verificar si el usuario está activo
+    if (user.status !== 'approved') {
+      // Registrar intento fallido
+      await LoginMonitorService.logLoginAttempt({
+        email: email,
+        ipAddress: ipAddress,
+        userAgent: userAgent,
+        success: false,
+        failureReason: 'user_not_approved',
+        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
+        location: await LoginMonitorService.getLocationInfo(ipAddress)
+      });
+
+      return res.status(401).json({
+        success: false,
+        message: 'Usuario no aprobado o inactivo'
+      });
+    }
+
+    // Verificar contraseña
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+    if (!isPasswordValid) {
+      console.log('❌ Contraseña inválida para:', email);
+      
+      // Registrar intento fallido
+      await LoginMonitorService.logLoginAttempt({
+        email: email,
+        ipAddress: ipAddress,
+        userAgent: userAgent,
+        success: false,
+        failureReason: 'password_incorrect',
+        deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
+        location: await LoginMonitorService.getLocationInfo(ipAddress)
+      });
+
+      return res.status(401).json({
+        success: false,
+        message: 'Credenciales inválidas'
+      });
+    }
+
+    console.log('✅ Contraseña válida para:', email);
+
+    // Generar URL firmada para el avatar del usuario
+    let avatarUrl = null;
+    if (user.avatar) {
+      try {
+        const { generateSignedUrl } = require('./config/s3.config');
+        avatarUrl = await generateSignedUrl(user.avatar);
+        console.log('🖼️ [BACKOFFICE LOGIN] Avatar URL generada:', avatarUrl);
+      } catch (avatarError) {
+        console.error('❌ [BACKOFFICE LOGIN] Error generando avatar URL:', avatarError);
+        console.log('🖼️ [BACKOFFICE LOGIN] Usando avatar original');
+      }
+    }
+    
+    // Crear objeto usuario con avatar procesado
+    const userWithProcessedAvatar = {
+      ...user.toObject(),
+      avatar: avatarUrl || user.avatar
+    };
+    
+    // Obtener asociaciones del usuario
+    const associations = await Shared.find({ user: user._id, status: 'active' })
+      .populate('account', 'nombre')
+      .populate('division', 'nombre')
+      .populate('student', 'nombre apellido avatar')
+      .populate('role', 'nombre')
+      .populate('createdBy', 'name')
+      .sort({ createdAt: -1 });
+    
+    // Si es adminaccount, agregar las divisiones/grupos de su cuenta
+    // Si el rol no está poblado, intentar poblar manualmente
+    let roleName = user.role?.nombre;
+    if (!roleName && user.role) {
+      const Role = require('./shared/models/Role');
+      const roleDoc = await Role.findById(user.role);
+      roleName = roleDoc?.nombre;
+    }
+    
+    if (roleName === 'adminaccount' && user.account) {
+      console.log('✅ [LOGIN] Usuario tiene cuenta, buscando grupos...');
+      const Group = require('./shared/models/Group');
+      const accountGroups = await Group.find({ account: user.account, activo: true })
+        .populate('creadoPor', 'name')
+        .sort({ nombre: 1 });
+      
+      
+      // Agregar las divisiones como asociaciones virtuales
+      const virtualAssociations = accountGroups.map(group => ({
+        _id: `group_${group._id}`,
+        user: user._id,
+        account: {
+          _id: user.account,
+          nombre: associations[0]?.account?.nombre || 'Cuenta'
+        },
+        division: {
+          _id: group._id,
+          nombre: group.nombre
+        },
+        student: null,
+        role: {
+          _id: user.role._id,
+          nombre: user.role.nombre
+        },
+        status: 'active',
+        createdBy: {
+          _id: group.creadoPor._id,
+          name: group.creadoPor.name
+        },
+        permissions: [],
+        createdAt: group.createdAt,
+        updatedAt: group.updatedAt,
+        isVirtual: true // Marcar como asociación virtual
+      }));
+      
+      // Combinar asociaciones reales con virtuales
+      associations.push(...virtualAssociations);
+    }
+    
+    // Procesar avatares de estudiantes en las asociaciones
+    console.log('🔍 [BACKOFFICE LOGIN] ===== PROCESANDO AVATARES DE ESTUDIANTES =====');
+    console.log('🔍 [BACKOFFICE LOGIN] Total de asociaciones:', associations.length);
+    
+    const associationsWithProcessedAvatars = await Promise.all(associations.map(async (association, index) => {
+      // Si es una asociación virtual (sin estudiante), retornar tal cual
+      if (association.isVirtual || !association.student) {
+        return association;
+      }
+      
+      // Convertir a objeto plano para poder modificar propiedades
+      const associationObj = association.toObject ? association.toObject() : association;
+      
+      if (associationObj.student && associationObj.student.avatar) {
+        try {
+          console.log(`🔍 [BACKOFFICE LOGIN] Procesando avatar ${index + 1}/${associations.length} - Estudiante:`, associationObj.student._id);
+          console.log('🔍 [BACKOFFICE LOGIN] Avatar original:', associationObj.student.avatar);
+          
+          const originalAvatar = associationObj.student.avatar;
+          let processedAvatar = originalAvatar;
+          
+          // Verificar si es una key de S3 o una URL local
+          if (originalAvatar.startsWith('http')) {
+            console.log('🔍 [BACKOFFICE LOGIN] Es una URL completa, usando tal como está');
+            // Es una URL completa (puede ser local o S3), no hacer nada
+          } else if (originalAvatar.includes('students/')) {
+            // Es una key de S3 para estudiantes, generar URL firmada
+            console.log('🔍 [BACKOFFICE LOGIN] Es una key de S3 para estudiantes, generando URL firmada');
+            console.log('🔍 [BACKOFFICE LOGIN] Key original:', originalAvatar);
+            
+            try {
+              const { generateSignedUrl } = require('./config/s3.config');
+              console.log('🔍 [BACKOFFICE LOGIN] Función generateSignedUrl importada correctamente');
+              
+              const signedUrl = await generateSignedUrl(originalAvatar, 172800); // 2 días
+              console.log('🔍 [BACKOFFICE LOGIN] URL firmada generada exitosamente:', signedUrl);
+              console.log('🔍 [BACKOFFICE LOGIN] Tipo de URL firmada:', typeof signedUrl);
+              console.log('🔍 [BACKOFFICE LOGIN] Longitud de URL firmada:', signedUrl ? signedUrl.length : 'null');
+              
+              processedAvatar = signedUrl || originalAvatar; // Fallback si signedUrl es null
+              console.log('🔍 [BACKOFFICE LOGIN] Avatar procesado:', processedAvatar);
+            } catch (s3Error) {
+              console.error('❌ [BACKOFFICE LOGIN] Error generando URL firmada:', s3Error);
+              console.error('❌ [BACKOFFICE LOGIN] Error details:', {
+                message: s3Error.message,
+                stack: s3Error.stack,
+                name: s3Error.name
+              });
+              // Mantener la key original si falla
+              console.log('🔍 [BACKOFFICE LOGIN] Manteniendo key original:', originalAvatar);
+              processedAvatar = originalAvatar;
+            }
+          } else {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${originalAvatar.split('/').pop()}`;
+            console.log('🔍 [BACKOFFICE LOGIN] URL local generada:', localUrl);
+            processedAvatar = localUrl;
+          }
+          
+          // Asignar el avatar procesado
+          associationObj.student.avatar = processedAvatar;
+          console.log('✅ [BACKOFFICE LOGIN] Avatar procesado asignado:', associationObj.student.avatar);
+        } catch (error) {
+          console.error('❌ [BACKOFFICE LOGIN] Error procesando avatar del estudiante:', associationObj.student?._id, error);
+          // Si falla, usar URL directa
+          if (associationObj.student && associationObj.student.avatar) {
+            const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${associationObj.student.avatar.split('/').pop()}`;
+            console.log('🔍 [BACKOFFICE LOGIN] Usando URL de fallback:', fallbackUrl);
+            associationObj.student.avatar = fallbackUrl;
+          }
+        }
+      } else {
+        console.log('🔍 [BACKOFFICE LOGIN] Estudiante sin avatar:', associationObj.student?._id);
+      }
+      
+      return associationObj;
+    }));
+    
+    const activeAssociation = associationsWithProcessedAvatars.length > 0 ? associationsWithProcessedAvatars[0] : null;
+    
+    // Generar access token (5 minutos)
+    const accessToken = jwt.sign(
+      { 
+        userId: user._id,
+        email: user.email,
+        role: user.role._id
+      },
+      process.env.JWT_SECRET || 'fallback-secret',
+      { expiresIn: '5m' } // 5 minutos
+    );
+    
+    // Generar refresh token (7 días)
+    const deviceInfo = RefreshTokenService.getDeviceInfo(req);
+    const refreshToken = await RefreshTokenService.generateRefreshToken(user._id, deviceInfo);
+    
+    console.log('🔑 [BACKOFFICE LOGIN] Access token generado (5m)');
+    console.log('🔄 [BACKOFFICE LOGIN] Refresh token generado (7d)');
+    
+    // Registrar login exitoso
+    await LoginMonitorService.logLoginAttempt({
+      email: email,
+      ipAddress: ipAddress,
+      userAgent: userAgent,
+      success: true,
+      deviceInfo: LoginMonitorService.parseUserAgent(userAgent),
+      location: await LoginMonitorService.getLocationInfo(ipAddress),
+      metadata: {
+        userId: user._id,
+        role: user.role?.nombre,
+        associationsCount: associationsWithProcessedAvatars.length,
+        source: 'backoffice'
+      }
+    });
+    
+    return res.json({
+      success: true,
+      message: 'Login exitoso para backoffice',
+      data: {
+        user: userWithProcessedAvatar,
+        accessToken: accessToken,
+        refreshToken: refreshToken.token,
+        activeAssociation: activeAssociation,
+        associations: associationsWithProcessedAvatars,
+        tokenExpiresIn: 5 * 60 // 5 minutos en segundos
+      }
+    });
+
+  } catch (error) {
+    console.error('❌ Error en login de backoffice:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+*/
+
+// Endpoint para verificar configuración JWT (código movido a users.controller.js)
+/*
+app.get('/auth/config', (req, res) => {
+  res.json({
+    success: true,
+    jwt_secret_length: config.JWT_SECRET.length,
+    jwt_expire: config.JWT_EXPIRE,
+    message: 'Configuración JWT actual'
+  });
+});
+
+// Obtener perfil - Versión simplificada para Cognito
+app.get('/users/profile', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    const user = req.user;
+    
+    // Si es usuario de Cognito, buscar información en MongoDB si es adminaccount
+    if (user.isCognitoUser) {
+      console.log('✅ [PROFILE] Usuario de Cognito:', user.email);
+      
+      let userAccount = null;
+      
+      // Para adminaccount, buscar en la tabla users de MongoDB usando el email
+      if (user.role?.nombre === 'adminaccount') {
+        console.log('🔍 [PROFILE] Adminaccount de Cognito, buscando en tabla users...');
+        
+        try {
+          // Buscar el usuario en MongoDB usando el email
+          const dbUser = await User.findOne({ email: user.email })
+            .populate('account', 'nombre razonSocial')
+            .populate('role', 'nombre descripcion');
+          
+          if (dbUser && dbUser.account) {
+            userAccount = dbUser.account;
+            console.log('✅ [PROFILE] Usuario encontrado en MongoDB con institución:', dbUser.account.nombre);
+          } else {
+            console.log('⚠️ [PROFILE] Usuario no encontrado en MongoDB o sin institución asignada');
+          }
+        } catch (error) {
+          console.error('❌ [PROFILE] Error buscando usuario en MongoDB:', error);
+        }
+      }
+      
+      return res.json({
+        success: true,
+        data: {
+          id: user._id,
+          email: user.email,
+          name: user.name,
+          role: user.role,
+          status: user.status,
+          source: 'cognito',
+          account: userAccount, // Incluir información de la institución desde MongoDB
+          avatar: null // Los usuarios de Cognito no tienen avatar por ahora
+        }
+      });
+    }
+
+    // Código original para usuarios de MongoDB (legacy)
+    // Buscar el usuario completo con el rol y cuenta populados
+    const dbUser = await User.findById(req.user._id).populate('role', 'nombre descripcion nivel').populate('account', 'nombre razonSocial');
+    if (!dbUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+
+    // Para adminaccount, obtener la cuenta desde las asociaciones si no tiene cuenta asignada directamente
+    let userAccount = dbUser.account;
+    if (dbUser.role?.nombre === 'adminaccount' && !userAccount) {
+      console.log('🔍 [PROFILE] Adminaccount sin cuenta directa, obteniendo desde asociaciones...');
+      const userAssociation = await Shared.findOne({
+        user: dbUser._id,
+        status: 'active'
+      }).populate('account', 'nombre razonSocial');
+      
+      if (userAssociation && userAssociation.account) {
+        userAccount = userAssociation.account;
+        console.log('🔍 [PROFILE] Cuenta obtenida desde asociación:', userAccount);
+      }
+    }
+
+    // Generar URL firmada para el avatar si existe
+    let avatarUrl = null;
+    if (dbUser.avatar) {
+      try {
+        avatarUrl = await generateSignedUrl(dbUser.avatar, 172800); // 2 días
+      } catch (error) {
+        console.error('Error generando URL firmada para avatar:', error);
+        // Si falla la URL firmada, usar la URL directa
+        avatarUrl = dbUser.avatar;
+      }
+    }
+
+    res.json({
+      success: true,
+      data: {
+        _id: dbUser._id,
+        email: dbUser.email,
+        nombre: dbUser.name,
+        role: dbUser.role,
+        account: userAccount,
+        telefono: dbUser.telefono,
+        avatar: avatarUrl,
+        activo: dbUser.status === 'approved',
+        createdAt: dbUser.createdAt,
+        updatedAt: dbUser.updatedAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo perfil:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Actualizar perfil
+app.put('/users/profile', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    const { name, email, phone, telefono } = req.body;
+    const userId = req.user._id;
+
+    console.log('🔍 [Server] Actualizando perfil para usuario:', userId);
+    console.log('📝 Datos recibidos:', { name, email, phone, telefono });
+
+    // Buscar el usuario
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+
+    console.log('🔍 Usuario encontrado antes de actualizar:', {
+      _id: user._id,
+      email: user.email,
+      name: user.name,
+      telefono: user.telefono,
+      status: user.status
+    });
+
+    // Verificar si el email ya existe (si se está cambiando)
+    if (email && email !== user.email) {
+      const existingUser = await User.findOne({ email });
+      if (existingUser) {
+        return res.status(400).json({
+          success: false,
+          message: 'El email ya está en uso'
+        });
+      }
+    }
+
+    // Actualizar campos
+    if (name) user.name = name;
+    if (email) user.email = email;
+    
+    // Manejar tanto 'phone' como 'telefono' para compatibilidad
+    if (phone) user.telefono = phone;
+    if (telefono) user.telefono = telefono;
+
+    await user.save();
+
+    console.log('✅ Perfil actualizado exitosamente');
+    console.log('📝 Usuario después de guardar:', {
+      _id: user._id,
+      email: user.email,
+      name: user.name,
+      telefono: user.telefono,
+      status: user.status
+    });
+
+    // Generar URL firmada para el avatar si existe
+    let avatarUrl = null;
+    if (user.avatar) {
+      try {
+        avatarUrl = await generateSignedUrl(user.avatar, 172800); // 2 días
+      } catch (error) {
+        console.error('Error generando URL firmada para avatar:', error);
+        // Si falla la URL firmada, usar la URL directa
+        avatarUrl = user.avatar;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: 'Perfil actualizado exitosamente',
+      data: {
+        _id: user._id,
+        email: user.email,
+        nombre: user.name,
+        role: user.role,
+        telefono: user.telefono,
+        avatar: avatarUrl,
+        activo: user.status === 'approved',
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt
+      }
+    });
+  } catch (error) {
+    console.error('Error actualizando perfil:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Actualizar avatar del usuario
+app.put('/users/avatar', authenticateToken, upload.single('avatar'), async (req, res) => {
+  console.log('🖼️ [AVATAR ENDPOINT] Petición recibida');
+  console.log('🖼️ [AVATAR ENDPOINT] Headers:', req.headers);
+  console.log('🖼️ [AVATAR ENDPOINT] Body:', req.body);
+  console.log('🖼️ [AVATAR ENDPOINT] File:', req.file);
+  try {
+    const userId = req.user._id;
+
+    console.log('🖼️ [UPDATE AVATAR] Iniciando actualización de avatar');
+    console.log('👤 [UPDATE AVATAR] Usuario:', userId);
+    console.log('📁 [UPDATE AVATAR] Archivo recibido:', req.file);
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No se proporcionó ninguna imagen'
+      });
+    }
+
+    // El archivo se guardó localmente, ahora lo subimos a S3
+    console.log('🖼️ [UPDATE AVATAR] Archivo guardado localmente:', req.file.filename);
+    console.log('🖼️ [UPDATE AVATAR] Subiendo a S3...');
+    
+    // Leer el archivo local
+    const fileBuffer = fs.readFileSync(req.file.path);
+    
+    // Subir a S3
+    const AWS = require('aws-sdk');
+    const s3 = new AWS.S3({
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+      region: process.env.AWS_REGION || 'us-east-1'
+    });
+    
+    const avatarKey = `avatars/${userId}/${Date.now()}-${req.file.originalname}`;
+    
+    const uploadParams = {
+      Bucket: process.env.AWS_S3_BUCKET_NAME,
+      Key: avatarKey,
+      Body: fileBuffer,
+      ContentType: req.file.mimetype
+    };
+    
+    const s3Result = await s3.upload(uploadParams).promise();
+    console.log('🖼️ [UPDATE AVATAR] Archivo subido a S3:', s3Result.Location);
+    
+    // Eliminar archivo local
+    try {
+      if (fs.existsSync(req.file.path)) {
+        fs.unlinkSync(req.file.path);
+        console.log('🖼️ [UPDATE AVATAR] Archivo local eliminado:', req.file.path);
+      } else {
+        console.log('🖼️ [UPDATE AVATAR] Archivo local no existe:', req.file.path);
+      }
+    } catch (error) {
+      console.error('🖼️ [UPDATE AVATAR] Error eliminando archivo local:', error.message);
+    }
+
+    // Actualizar el usuario con la nueva imagen
+    const updatedUser = await User.findByIdAndUpdate(
+      userId,
+      { 
+        avatar: avatarKey, // Guardar la key de S3 (no la URL completa)
+        updatedAt: new Date()
+      },
+      { new: true }
+    ).populate('role');
+
+    if (!updatedUser) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+
+    console.log('✅ [UPDATE AVATAR] Avatar actualizado exitosamente');
+
+    // Generar URL firmada para la respuesta
+    const { generateSignedUrl } = require('./config/s3.config');
+    const signedUrl = await generateSignedUrl(avatarKey, 172800); // 2 días
+    
+    console.log('🖼️ [UPDATE AVATAR] URL firmada generada:', signedUrl);
+
+    res.json({
+      success: true,
+      message: 'Avatar actualizado exitosamente',
+      data: {
+        user: {
+          _id: updatedUser._id,
+          name: updatedUser.name,
+          email: updatedUser.email,
+          avatar: signedUrl, // Devolver la URL firmada
+          role: updatedUser.role
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error actualizando avatar:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+*/
+
+// NOTA: La ruta PUT /students/:studentId/avatar fue movida a routes/students.routes.js
+
+// Endpoint de prueba para verificar configuración de S3 para avatares de estudiantes
+app.get('/test-student-avatar-s3', async (req, res) => {
+  try {
+    console.log('🧪 [TEST STUDENT AVATAR S3] Probando configuración...');
+    
+    // Verificar configuración
+    const config = {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID ? 'Configurado' : 'No configurado',
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ? 'Configurado' : 'No configurado',
+      region: process.env.AWS_REGION || 'us-east-1',
+      bucketName: process.env.AWS_S3_BUCKET_NAME || 'No configurado'
+    };
+    
+    console.log('🧪 [TEST STUDENT AVATAR S3] Configuración:', config);
+    
+    // Intentar generar una URL firmada de prueba para estudiantes
+    const testKey = 'students/test/avatar-test.jpg';
+    const { s3 } = require('./config/s3.config');
+    
+    // Verificar que el bucket existe
+    try {
+      await s3.headBucket({ Bucket: process.env.AWS_S3_BUCKET_NAME }).promise();
+      console.log('✅ [TEST STUDENT AVATAR S3] Bucket existe y es accesible');
+    } catch (bucketError) {
+      console.error('❌ [TEST STUDENT AVATAR S3] Error accediendo al bucket:', bucketError);
+    }
+    
+    res.json({
+      success: true,
+      message: 'Configuración de S3 para avatares de estudiantes verificada',
+      data: {
+        config,
+        testKey
+      }
+    });
+  } catch (error) {
+    console.error('❌ [TEST STUDENT AVATAR S3] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error en configuración de S3 para avatares de estudiantes',
+      error: error.message
+    });
+  }
+});
+
+// ===== RUTAS DE USUARIOS =====
+
+// Endpoint de prueba para S3
+app.get('/test-s3', async (req, res) => {
+  try {
+    console.log('🧪 [TEST S3] Probando configuración de S3...');
+    console.log('🧪 [TEST S3] Configuración:', {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID ? 'Configurado' : 'No configurado',
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY ? 'Configurado' : 'No configurado',
+      region: process.env.AWS_REGION || 'us-east-1',
+      bucketName: process.env.AWS_S3_BUCKET_NAME || 'No configurado'
+    });
+    
+    // Intentar generar una URL firmada de prueba
+    const testKey = 'test/avatar-test.jpg';
+    const testUrl = generateSignedUrl(testKey, 3600);
+    
+    res.json({
+      success: true,
+      message: 'Configuración de S3 verificada',
+      data: {
+        config: {
+          accessKeyId: !!process.env.AWS_ACCESS_KEY_ID,
+          secretAccessKey: !!process.env.AWS_SECRET_ACCESS_KEY,
+          region: process.env.AWS_REGION || 'us-east-1',
+          bucketName: process.env.AWS_S3_BUCKET_NAME || null
+        },
+        testUrl: testUrl,
+        testKey: testKey
+      }
+    });
+  } catch (error) {
+    console.error('❌ [TEST S3] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error en configuración de S3',
+      error: error.message
+    });
+  }
+});
+
+// Aprobar asociación pendiente
+app.put('/users/approve-association/:associationId', authenticateToken, async (req, res) => {
+  try {
+    const { associationId } = req.params;
+    const currentUser = req.user;
+
+    // Verificar que el usuario actual es adminaccount o superadmin
+    if (!['adminaccount', 'superadmin'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para aprobar asociaciones'
+      });
+    }
+
+    // Buscar la asociación
+    const association = await Shared.findById(associationId)
+      .populate('user', 'name email')
+      .populate('account', 'nombre razonSocial')
+      .populate('role', 'nombre');
+
+    if (!association) {
+      return res.status(404).json({
+        success: false,
+        message: 'Asociación no encontrada'
+      });
+    }
+
+    // Verificar que la asociación esté pendiente
+    if (association.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'La asociación ya no está pendiente de aprobación'
+      });
+    }
+
+    // Verificar permisos: adminaccount solo puede aprobar asociaciones de su cuenta
+    if (currentUser.role?.nombre === 'adminaccount') {
+      console.log('🔍 Verificando permisos para aprobar asociación...');
+      console.log('👤 Usuario ID:', currentUser._id);
+      console.log('🏢 Cuenta de la asociación:', association.account._id);
+      
+      const userAssociations = await Shared.find({ 
+        user: currentUser._id, 
+        status: { $in: ['active', 'pending'] }
+      });
+      
+      console.log('📋 Asociaciones del usuario encontradas:', userAssociations.length);
+      
+      const userAccountIds = userAssociations.map(a => a.account.toString());
+      console.log('🏢 IDs de cuentas del usuario:', userAccountIds);
+      
+      if (!userAccountIds.includes(association.account._id.toString())) {
+        console.log('❌ Permiso denegado: La cuenta no pertenece al usuario');
+        return res.status(403).json({
+          success: false,
+          message: 'Solo puedes aprobar asociaciones de tu cuenta'
+        });
+      }
+      
+      console.log('✅ Permiso concedido: La cuenta pertenece al usuario');
+    }
+
+    // Aprobar la asociación
+    association.status = 'active';
+    await association.save();
+
+    console.log(`✅ Asociación aprobada: ${association.user.name} en ${association.account.nombre}`);
+
+    res.json({
+      success: true,
+      message: 'Asociación aprobada exitosamente',
+      data: {
+        _id: association._id,
+        user: {
+          _id: association.user._id,
+          name: association.user.name,
+          email: association.user.email
+        },
+        account: {
+          _id: association.account._id,
+          nombre: association.account.nombre,
+          razonSocial: association.account.razonSocial
+        },
+        role: {
+          _id: association.role._id,
+          nombre: association.role.nombre
+        },
+        status: association.status,
+        updatedAt: association.updatedAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Error aprobando asociación:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Rechazar asociación pendiente
+app.put('/users/reject-association/:associationId', authenticateToken, async (req, res) => {
+  try {
+    const { associationId } = req.params;
+    const currentUser = req.user;
+
+    // Verificar que el usuario actual es adminaccount o superadmin
+    if (!['adminaccount', 'superadmin'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para rechazar asociaciones'
+      });
+    }
+
+    // Buscar la asociación
+    const association = await Shared.findById(associationId)
+      .populate('user', 'name email')
+      .populate('account', 'nombre razonSocial')
+      .populate('role', 'nombre');
+
+    if (!association) {
+      return res.status(404).json({
+        success: false,
+        message: 'Asociación no encontrada'
+      });
+    }
+
+    // Verificar que la asociación esté pendiente
+    if (association.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'La asociación ya no está pendiente de aprobación'
+      });
+    }
+
+    // Verificar permisos: adminaccount solo puede rechazar asociaciones de su cuenta
+    if (currentUser.role?.nombre === 'adminaccount') {
+      console.log('🔍 Verificando permisos para rechazar asociación...');
+      console.log('👤 Usuario ID:', currentUser._id);
+      console.log('🏢 Cuenta de la asociación:', association.account._id);
+      
+      const userAssociations = await Shared.find({ 
+        user: currentUser._id, 
+        status: { $in: ['active', 'pending'] }
+      });
+      
+      console.log('📋 Asociaciones del usuario encontradas:', userAssociations.length);
+      
+      const userAccountIds = userAssociations.map(a => a.account.toString());
+      console.log('🏢 IDs de cuentas del usuario:', userAccountIds);
+      
+      if (!userAccountIds.includes(association.account._id.toString())) {
+        console.log('❌ Permiso denegado: La cuenta no pertenece al usuario');
+        return res.status(403).json({
+          success: false,
+          message: 'Solo puedes rechazar asociaciones de tu cuenta'
+        });
+      }
+      
+      console.log('✅ Permiso concedido: La cuenta pertenece al usuario');
+    }
+
+    // Rechazar la asociación (cambiar a inactive)
+    association.status = 'inactive';
+    await association.save();
+
+    console.log(`❌ Asociación rechazada: ${association.user.name} en ${association.account.nombre}`);
+
+    res.json({
+      success: true,
+      message: 'Asociación rechazada exitosamente',
+      data: {
+        _id: association._id,
+        user: {
+          _id: association.user._id,
+          name: association.user.name,
+          email: association.user.email
+        },
+        account: {
+          _id: association.account._id,
+          nombre: association.account.nombre,
+          razonSocial: association.account.razonSocial
+        },
+        role: {
+          _id: association.role._id,
+          nombre: association.role.nombre
+        },
+        status: association.status,
+        updatedAt: association.updatedAt
+      }
+    });
+
+  } catch (error) {
+    console.error('Error rechazando asociación:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+*/
+
+// Obtener asociaciones pendientes (código movido a users.controller.js)
+/*
+app.get('/users/pending-associations', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    const currentUser = req.user;
+
+    // Verificar que el usuario actual es adminaccount o superadmin
+    if (!['adminaccount', 'superadmin'].includes(currentUser.role?.nombre)) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver asociaciones pendientes'
+      });
+    }
+
+    let query = { status: 'pending' };
+
+    // Si es adminaccount, solo mostrar asociaciones de su cuenta
+    if (currentUser.role?.nombre === 'adminaccount') {
+      console.log('🔍 Adminaccount buscando asociaciones pendientes...');
+      console.log('👤 Usuario ID:', currentUser._id);
+      
+      // Usar el middleware global para obtener la institución
+      if (req.userInstitution) {
+        console.log('🏢 Institución del usuario:', req.userInstitution.nombre, req.userInstitution._id);
+        
+        // Filtrar asociaciones pendientes de esta cuenta
+        query.account = req.userInstitution._id;
+        console.log('👥 Filtrando asociaciones pendientes de la cuenta:', req.userInstitution._id);
+      } else {
+        console.log('⚠️ Usuario sin institución asignada');
+        query.account = null; // No mostrar asociaciones
+      }
+      
+      console.log('🔍 Query final para asociaciones pendientes:', JSON.stringify(query, null, 2));
+    }
+
+    const pendingAssociations = await Shared.find(query)
+      .populate('user', 'name email')
+      .populate('account', 'nombre razonSocial')
+      .populate('role', 'nombre')
+      .populate('division', 'nombre descripcion')
+      .sort({ createdAt: -1 });
+
+    res.json({
+      success: true,
+      data: pendingAssociations.map(association => ({
+        _id: association._id,
+        user: {
+          _id: association.user._id,
+          name: association.user.name,
+          email: association.user.email
+        },
+        account: {
+          _id: association.account._id,
+          nombre: association.account.nombre,
+          razonSocial: association.account.razonSocial
+        },
+        role: {
+          _id: association.role._id,
+          nombre: association.role.nombre
+        },
+        division: association.division ? {
+          _id: association.division._id,
+          nombre: association.division.nombre,
+          descripcion: association.division.descripcion
+        } : null,
+        status: association.status,
+        createdAt: association.createdAt,
+        updatedAt: association.updatedAt
+      }))
+    });
+
+  } catch (error) {
+    console.error('Error obteniendo asociaciones pendientes:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Registro desde app mobile (solo familyview)
+app.post('/users/register-mobile', async (req, res) => {
+  try {
+    console.log('🎯 [REGISTER MOBILE] Iniciando registro desde app móvil');
+    console.log('📦 [REGISTER MOBILE] Body recibido:', JSON.stringify(req.body, null, 2));
+    console.log('🔍 [REGISTER MOBILE] Campos disponibles:', Object.keys(req.body));
+    
+    const { 
+      email, 
+      password, 
+      nombre, 
+      apellido,
+      telefono
+    } = req.body;
+
+    // Validaciones básicas
+    console.log('🔍 [REGISTER MOBILE] Validando campos requeridos...');
+    console.log('📋 [REGISTER MOBILE] Campos:', {
+      email: !!email,
+      password: !!password,
+      nombre: !!nombre,
+      apellido: !!apellido,
+      telefono: !!telefono
+    });
+    console.log('📋 [REGISTER MOBILE] Campos requeridos:', {
+      email: !!email,
+      password: !!password,
+      nombre: !!nombre
+    });
+    
+    if (!email || !password || !nombre) {
+      const missingFields = [];
+      if (!email) missingFields.push('email');
+      if (!password) missingFields.push('password');
+      if (!nombre) missingFields.push('nombre');
+      
+      console.log('❌ [REGISTER MOBILE] Campos faltantes:', missingFields);
+      
+      return res.status(400).json({
+        success: false,
+        message: `Campos requeridos faltantes: ${missingFields.join(', ')}`
+      });
+    }
+
+    // Buscar solicitudes pendientes para este email
+    console.log('🔍 [REGISTER MOBILE] Buscando solicitudes pendientes para:', email);
+    const pendingRequests = await RequestedShared.findPendingByEmail(email);
+    console.log('📋 [REGISTER MOBILE] Solicitudes pendientes encontradas:', pendingRequests.length);
+
+    // Buscar usuario existente por email
+    let user = await User.findOne({ email });
+    
+    if (user) {
+      console.log('👤 Usuario existente encontrado:', user.email);
+      return res.status(400).json({
+        success: false,
+        message: 'El usuario ya existe en el sistema'
+      });
+    }
+
+    console.log('🆕 Creando nuevo usuario familyviewer:', email);
+    
+    // Obtener el rol familyviewer
+    const role = await Role.findOne({ nombre: 'familyviewer' });
+    
+    if (!role) {
+      console.log('❌ [REGISTER MOBILE] Rol familyviewer no encontrado');
+      return res.status(500).json({
+        success: false,
+        message: 'Rol familyviewer no encontrado en el sistema'
+      });
+    }
+
+    // Crear nuevo usuario
+    const fullName = apellido ? `${nombre} ${apellido}` : nombre;
+    user = new User({
+      name: fullName,
+      email: email,
+      password: password,
+      role: role._id,
+      status: 'approved',
+      telefono: telefono || null
+    });
+
+    await user.save();
+    console.log('✅ Usuario familyviewer creado exitosamente');
+
+
+
+    // Procesar solicitudes pendientes si existen
+    if (pendingRequests.length > 0) {
+      console.log('🔍 [REGISTER] Procesando solicitudes pendientes:', pendingRequests.length);
+      
+      for (const request of pendingRequests) {
+        try {
+          // Crear la asociación solicitada
+          const requestedShared = new Shared({
+            user: user._id,
+            account: request.account._id,
+            division: request.division?._id,
+            student: request.student?._id,
+            role: request.role._id,
+            status: 'active',
+            createdBy: request.requestedBy
+          });
+          
+          await requestedShared.save();
+          
+          // Verificar si el usuario ya tiene una asociación activa
+          const existingActiveAssociation = await ActiveAssociation.getActiveAssociation(user._id);
+          
+          if (!existingActiveAssociation) {
+            // Si no tiene asociación activa, establecer esta como activa automáticamente
+            try {
+              await ActiveAssociation.setActiveAssociation(user._id, requestedShared._id);
+              console.log(`🎯 [AUTO-ACTIVE] Asociación automáticamente establecida como activa para usuario ${user._id}`);
+            } catch (error) {
+              console.error('❌ [AUTO-ACTIVE] Error estableciendo asociación activa automáticamente:', error);
+            }
+          } else {
+            console.log(`ℹ️ [AUTO-ACTIVE] Usuario ${user._id} ya tiene una asociación activa, no se cambia automáticamente`);
+          }
+          
+          // Marcar la solicitud como completada
+          await RequestedShared.markAsCompleted(request._id, user._id);
+          
+          console.log('✅ [REGISTER] Asociación solicitada creada para:', request.account.nombre);
+        } catch (error) {
+          console.error('❌ [REGISTER] Error al procesar solicitud pendiente:', error);
+        }
+      }
+    }
+
+    // Generar URL firmada para el avatar si existe
+    let avatarUrl = null;
+    if (user.avatar) {
+      try {
+        avatarUrl = await generateSignedUrl(user.avatar, 172800); // 2 días
+      } catch (error) {
+        console.error('Error generando URL firmada para avatar:', error);
+        // Si falla la URL firmada, usar la URL directa
+        avatarUrl = user.avatar;
+      }
+    }
+
+    res.status(201).json({
+      success: true,
+      message: pendingRequests.length > 0 
+        ? 'Usuario registrado exitosamente y asociaciones creadas'
+        : 'Usuario registrado exitosamente. No hay asociaciones pendientes.',
+      data: {
+        user: {
+          _id: user._id,
+          name: user.name,
+          email: user.email,
+          role: user.role,
+          avatar: avatarUrl,
+          status: user.status
+        },
+        associationsCreated: pendingRequests.length
+      }
+    });
+
+  } catch (error) {
+    console.error('Error en registro mobile:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Listar usuarios
+app.get('/users', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const search = req.query.search || '';
+
+    // Filtrar según el rol del usuario
+    const currentUser = req.user;
+    console.log('🔍 [USERS] Usuario actual:', currentUser.email, 'Rol:', currentUser.role?.nombre);
+
+    let users = [];
+    let total = 0;
+
+    // Si el usuario es superadmin, puede ver todos los usuarios
+    if (currentUser.role?.nombre === 'superadmin') {
+      console.log('👑 [USERS] Superadmin: mostrando todos los usuarios');
+      
+      // Construir query de búsqueda
+      const query = {};
+      if (search) {
+        query.$or = [
+          { name: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      total = await User.countDocuments(query);
+      const userDocs = await User.find(query)
+        .populate('role')
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .sort({ createdAt: -1 });
+
+      users = userDocs.map(user => ({
+        _id: user._id,
+        email: user.email,
+        nombre: user.name,
+        role: user.role,
+        activo: user.status === 'approved',
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt
+      }));
+    } 
+    // Si el usuario es adminaccount, buscar usuarios a través de Shared
+    else if (currentUser.role?.nombre === 'adminaccount') {
+      console.log('🏢 [USERS] Adminaccount: filtrando usuarios por cuenta usando Shared');
+      console.log('👤 [USERS] Usuario actual ID:', currentUser._id);
+      
+      // Usar el middleware global para obtener la institución
+      if (req.userInstitution) {
+        console.log('🏢 [USERS] Institución del usuario:', req.userInstitution.nombre, req.userInstitution._id);
+        
+        // Buscar todas las asociaciones (Shared) de esta cuenta
+        // Esto incluye todos los usuarios: adminaccount, familyadmin, familyviewer y coordinadores
+        const sharedAssociations = await Shared.find({
+          account: req.userInstitution._id,
+          status: { $in: ['active', 'pending'] }
+        })
+        .populate('user')
+        .populate('role')
+        .sort({ createdAt: -1 });
+
+        console.log('👥 [USERS] Asociaciones encontradas:', sharedAssociations.length);
+
+        // Obtener usuarios únicos (un usuario puede tener múltiples asociaciones)
+        const uniqueUsersMap = new Map();
+        sharedAssociations.forEach(shared => {
+          if (shared.user && !uniqueUsersMap.has(shared.user._id.toString())) {
+            // Aplicar filtro de búsqueda si existe
+            if (!search || 
+                shared.user.name?.toLowerCase().includes(search.toLowerCase()) ||
+                shared.user.email?.toLowerCase().includes(search.toLowerCase())) {
+              uniqueUsersMap.set(shared.user._id.toString(), {
+                _id: shared.user._id,
+                email: shared.user.email,
+                nombre: shared.user.name,
+                role: shared.role, // Usar el rol de la asociación Shared
+                activo: shared.user.status === 'approved',
+                createdAt: shared.user.createdAt,
+                updatedAt: shared.user.updatedAt
+              });
+            }
+          }
+        });
+
+        // Convertir a array y aplicar paginación
+        const allUsers = Array.from(uniqueUsersMap.values());
+        total = allUsers.length;
+        const startIndex = (page - 1) * limit;
+        users = allUsers.slice(startIndex, startIndex + limit);
+
+        console.log('👥 [USERS] Usuarios únicos encontrados:', total);
+      } else {
+        console.log('⚠️ [USERS] Usuario sin institución asignada');
+        users = [];
+        total = 0;
+      }
+    }
+    // Para otros roles, no mostrar usuarios
+    else {
+      console.log('🚫 [USERS] Rol no autorizado:', currentUser.role?.nombre);
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver usuarios'
+      });
+    }
+
+    res.json({
+      success: true,
+      data: {
+        users,
+        total,
+        page,
+        limit
+      }
+    });
+  } catch (error) {
+    console.error('Error listando usuarios:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+
+// Endpoint /api/users para compatibilidad con el backoffice
+app.get('/api/users', authenticateToken, setUserInstitution, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const search = req.query.search || '';
+
+    // Filtrar según el rol del usuario
+    const currentUser = req.user;
+    console.log('🔍 [API/USERS] Usuario actual:', currentUser.email, 'Rol:', currentUser.role?.nombre);
+
+    let users = [];
+    let total = 0;
+
+    // Si el usuario es superadmin, puede ver todos los usuarios
+    if (currentUser.role?.nombre === 'superadmin') {
+      console.log('👑 [API/USERS] Superadmin: mostrando todos los usuarios');
+      
+      // Construir query de búsqueda
+      const query = {};
+      if (search) {
+        query.$or = [
+          { name: { $regex: search, $options: 'i' } },
+          { email: { $regex: search, $options: 'i' } }
+        ];
+      }
+
+      total = await User.countDocuments(query);
+      const userDocs = await User.find(query)
+        .populate('role')
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .sort({ createdAt: -1 });
+
+      users = userDocs.map(user => ({
+        _id: user._id,
+        email: user.email,
+        nombre: user.name,
+        role: user.role,
+        activo: user.status === 'approved',
+        createdAt: user.createdAt,
+        updatedAt: user.updatedAt
+      }));
+    } 
+    // Si el usuario es adminaccount, buscar usuarios a través de Shared
+    else if (currentUser.role?.nombre === 'adminaccount') {
+      console.log('🏢 [API/USERS] Adminaccount: filtrando usuarios por cuenta usando Shared');
+      console.log('👤 [API/USERS] Usuario actual ID:', currentUser._id);
+      
+      // Usar el middleware global para obtener la institución
+      if (req.userInstitution) {
+        console.log('🏢 [API/USERS] Institución del usuario:', req.userInstitution.nombre, req.userInstitution._id);
+        
+        // Buscar todas las asociaciones (Shared) de esta cuenta
+        // Esto incluye todos los usuarios: adminaccount, familyadmin, familyviewer y coordinadores
+        const sharedAssociations = await Shared.find({
+          account: req.userInstitution._id,
+          status: { $in: ['active', 'pending'] }
+        })
+        .populate('user')
+        .populate('role')
+        .sort({ createdAt: -1 });
+
+        console.log('👥 [API/USERS] Asociaciones encontradas:', sharedAssociations.length);
+
+        // Obtener usuarios únicos (un usuario puede tener múltiples asociaciones)
+        const uniqueUsersMap = new Map();
+        sharedAssociations.forEach(shared => {
+          if (shared.user && !uniqueUsersMap.has(shared.user._id.toString())) {
+            // Aplicar filtro de búsqueda si existe
+            if (!search || 
+                shared.user.name?.toLowerCase().includes(search.toLowerCase()) ||
+                shared.user.email?.toLowerCase().includes(search.toLowerCase())) {
+              uniqueUsersMap.set(shared.user._id.toString(), {
+                _id: shared.user._id,
+                email: shared.user.email,
+                nombre: shared.user.name,
+                role: shared.role, // Usar el rol de la asociación Shared
+                activo: shared.user.status === 'approved',
+                createdAt: shared.user.createdAt,
+                updatedAt: shared.user.updatedAt
+              });
+            }
+          }
+        });
+
+        // Convertir a array y aplicar paginación
+        const allUsers = Array.from(uniqueUsersMap.values());
+        total = allUsers.length;
+        const startIndex = (page - 1) * limit;
+        users = allUsers.slice(startIndex, startIndex + limit);
+
+        console.log('👥 [API/USERS] Usuarios únicos encontrados:', total);
+      } else {
+        console.log('⚠️ [API/USERS] Usuario sin institución asignada');
+        users = [];
+        total = 0;
+      }
+    }
+    // Para otros roles, no mostrar usuarios
+    else {
+      console.log('🚫 [API/USERS] Rol no autorizado:', currentUser.role?.nombre);
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver usuarios'
+      });
+    }
+
+    // Calcular estadísticas totales (no solo de la página actual)
+    let stats = {
+      total: 0,
+      active: 0,
+      inactive: 0,
+      coordinadores: 0,
+      familiares: 0,
+      tutores: 0,
+      familyadmin: 0
+    };
+
+    console.log('📊 [API/USERS] Calculando estadísticas...');
+    console.log('📊 [API/USERS] Rol del usuario:', currentUser.role?.nombre);
+    console.log('📊 [API/USERS] Total usuarios encontrados:', total);
+
+    if (currentUser.role?.nombre === 'superadmin') {
+      console.log('📊 [API/USERS] Calculando stats para superadmin');
+      // Para superadmin, calcular desde User - SIN filtro de búsqueda para stats
+      // Las estadísticas siempre deben ser del total, no filtradas por búsqueda
+      
+      stats.total = await User.countDocuments({});
+      stats.active = await User.countDocuments({ status: 'approved' });
+      stats.inactive = await User.countDocuments({ status: { $ne: 'approved' } });
+      
+      // Contar por roles - SIN filtro de búsqueda
+      const Role = require('./shared/models/Role');
+      const coordinadorRole = await Role.findOne({ nombre: 'coordinador' });
+      const familyadminRole = await Role.findOne({ nombre: 'familyadmin' });
+      const familyviewerRole = await Role.findOne({ nombre: 'familyviewer' });
+      
+      console.log('📊 [API/USERS] Roles encontrados:', {
+        coordinador: coordinadorRole?._id,
+        familyadmin: familyadminRole?._id,
+        familyviewer: familyviewerRole?._id
+      });
+      
+      if (coordinadorRole) {
+        stats.coordinadores = await User.countDocuments({ role: coordinadorRole._id });
+        console.log('📊 [API/USERS] Coordinadores encontrados:', stats.coordinadores);
+      }
+      
+      if (familyadminRole) {
+        stats.tutores = await User.countDocuments({ role: familyadminRole._id });
+        stats.familyadmin = stats.tutores; // Los tutores son familyadmin
+        console.log('📊 [API/USERS] Tutores (familyadmin) encontrados:', stats.tutores);
+      }
+      if (familyviewerRole) {
+        stats.familiares = await User.countDocuments({ role: familyviewerRole._id });
+        console.log('📊 [API/USERS] Familiares (familyviewer) encontrados:', stats.familiares);
+      }
+      console.log('📊 [API/USERS] Stats calculadas (superadmin):', stats);
+    } else if (currentUser.role?.nombre === 'adminaccount' && req.userInstitution) {
+      console.log('📊 [API/USERS] Calculando stats para adminaccount');
+      // Para adminaccount, calcular desde Shared - SIN filtro de búsqueda para stats
+      // Las estadísticas siempre deben ser del total, no filtradas por búsqueda
+      const sharedForStats = await Shared.find({
+        account: req.userInstitution._id,
+        status: { $in: ['active', 'pending'] }
+      }).populate('user').populate('role');
+      
+      console.log('📊 [API/USERS] Shared associations encontradas:', sharedForStats.length);
+      
+      const uniqueUsersForStats = new Map();
+      sharedForStats.forEach(shared => {
+        // Validar que user y role existan antes de procesar
+        if (shared.user && shared.role && !uniqueUsersForStats.has(shared.user._id.toString())) {
+          // NO aplicar filtro de búsqueda para estadísticas - siempre contar todos
+          uniqueUsersForStats.set(shared.user._id.toString(), {
+            user: shared.user,
+            role: shared.role
+          });
+        }
+      });
+      
+      const allUsersForStats = Array.from(uniqueUsersForStats.values());
+      console.log('📊 [API/USERS] Usuarios únicos para stats:', allUsersForStats.length);
+      
+      stats.total = allUsersForStats.length;
+      stats.active = allUsersForStats.filter(u => u.user && u.user.status === 'approved').length;
+      stats.inactive = allUsersForStats.filter(u => u.user && u.user.status !== 'approved').length;
+      stats.coordinadores = allUsersForStats.filter(u => u.role && u.role.nombre === 'coordinador').length;
+      stats.tutores = allUsersForStats.filter(u => u.role && u.role.nombre === 'familyadmin').length;
+      stats.familyadmin = stats.tutores; // Los tutores son familyadmin
+      stats.familiares = allUsersForStats.filter(u => u.role && u.role.nombre === 'familyviewer').length;
+      
+      console.log('📊 [API/USERS] Desglose por rol:', {
+        coordinadores: stats.coordinadores,
+        tutores: stats.tutores,
+        familiares: stats.familiares,
+        total: stats.total
+      });
+      
+      console.log('📊 [API/USERS] Stats calculadas (adminaccount):', stats);
+    } else {
+      console.log('⚠️ [API/USERS] No se calcularon stats - rol no reconocido o sin institución');
+      // Inicializar stats con valores por defecto si no se calcularon
+      stats.total = total;
+    }
+
+    console.log('📊 [API/USERS] Stats finales a enviar:', JSON.stringify(stats, null, 2));
+
+    res.json({
+      success: true,
+      data: {
+        users,
+        total,
+        page,
+        limit,
+        stats
+      }
+    });
+  } catch (error) {
+    console.error('Error listando usuarios:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+});
+*/
 
 // ===== RUTAS DE GRUPOS (DIVISIONES) =====
 // NOTA: Las rutas de grupos han sido movidas a routes/groups.routes.js y controllers/groups.controller.js
@@ -1979,7 +3647,6 @@ app.delete('/grupos/:id', authenticateToken, setUserInstitution, async (req, res
     });
   }
 });
-*/
 
 // ===== RUTAS DE CUENTAS =====
 
@@ -3094,22 +4761,8 @@ app.get('/roles/hierarchy', async (req, res) => {
 });
 
 // ===== RUTAS DE ACCIONES DE ESTUDIANTES =====
-// NOTA: Las rutas de student-actions han sido movidas a routes/studentActions.routes.js y controllers/studentActions.controller.js
-// Las rutas están registradas arriba con: app.use('/', studentActionsRoutes);
-// Rutas movidas:
-// - GET /api/student-actions/test -> studentActionsController.test
-// - GET /api/student-actions -> studentActionsController.listActions
-// - GET /api/student-actions/division/:divisionId -> studentActionsController.getActionsByDivision
-// - POST /api/student-actions -> studentActionsController.createAction
-// - PUT /api/student-actions/:actionId -> studentActionsController.updateAction
-// - DELETE /api/student-actions/:actionId -> studentActionsController.deleteAction
-// - POST /api/student-actions/log -> studentActionsController.createLog
-// - GET /api/student-actions/log/student/:studentId -> studentActionsController.getLogsByStudent
-// - GET /api/student-actions/log/division/:divisionId -> studentActionsController.getLogsByDivision
-// - GET /api/student-actions/log/account/:accountId -> studentActionsController.getLogsByAccount
 
-// Código eliminado - movido a controllers/studentActions.controller.js
-/*
+// Endpoint de prueba sin autenticación
 app.get('/api/student-actions/test', async (req, res) => {
   console.log('🎯 [TEST] Endpoint de prueba llamado');
   try {
@@ -3699,17 +5352,7 @@ const registrarActividad = async (data) => {
 
 // Rutas de estudiantes, coordinadores y tutores movidas a routes/students.routes.js
 
-// ===== RUTAS DE ASISTENCIA =====
-// NOTA: Las rutas de asistencia han sido movidas a routes/attendance.routes.js y controllers/attendance.controller.js
-// Las rutas están registradas arriba con: app.use('/', attendanceRoutes);
-// Rutas movidas:
-// - POST /asistencia -> attendanceController.saveAsistencia
-// - GET /asistencia/by-date -> attendanceController.getAsistenciaByDate
-// - POST /asistencia/retirada -> attendanceController.saveRetirada
-// - GET /asistencia/student-attendance -> attendanceController.getStudentAttendance
-
-// Código eliminado - movido a controllers/attendance.controller.js
-/*
+// Endpoint para guardar asistencia
 app.post('/asistencia', authenticateToken, async (req, res) => {
   try {
     console.log('🚀 [ASISTENCIA] Iniciando endpoint de asistencia...');
@@ -4198,7 +5841,6 @@ app.get('/asistencia/student-attendance', authenticateToken, async (req, res) =>
     });
   }
 });
-*/
 
 // ==================== ENDPOINTS DE CÓDIGOS QR ====================
 

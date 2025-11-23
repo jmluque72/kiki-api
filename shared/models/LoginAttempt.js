@@ -32,6 +32,8 @@ const loginAttemptSchema = new mongoose.Schema({
       'two_factor_required',
       'two_factor_invalid',
       'account_locked',
+      'cognito_error',
+      'missing_credentials',
       'other'
     ]
   },
