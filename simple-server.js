@@ -47,7 +47,8 @@ const RefreshTokenService = require('./services/refreshTokenService');
 const TwoFactorAuthService = require('./services/twoFactorAuthService');
 const LoginMonitorService = require('./services/loginMonitorService');
 const PasswordExpirationService = require('./services/passwordExpirationService');
-const { sendPasswordResetEmail, sendWelcomeEmail, sendInstitutionWelcomeEmail, sendFamilyInvitationEmail, sendFamilyInvitationNotificationEmail, sendNotificationEmail, generateRandomPassword, sendEmailAsync } = require('./config/email.config');
+const { generateRandomPassword } = require('./config/email.config');
+const { sendInstitutionWelcomeEmailToQueue, sendNewUserCreatedEmailToQueue, sendNotificationEmailToQueue, sendFamilyInvitationNotificationEmailToQueue, sendFamilyInvitationEmailToQueue } = require('./services/sqsEmailService');
 const emailService = require('./services/emailService');
 const formRequestService = require('./services/formRequestService');
 
@@ -932,7 +933,17 @@ app.post('/debug/test-all-emails', async (req, res) => {
       gmailUser: hasGmailUser ? process.env.GMAIL_USER : 'NO CONFIGURADO'
     });
     
-    const emailConfig = require('./config/email.config');
+    const { 
+      sendPasswordResetEmailToQueue,
+      sendWelcomeEmailToQueue,
+      sendInstitutionWelcomeEmailToQueue,
+      sendFamilyInvitationEmailToQueue,
+      sendFamilyInvitationNotificationEmailToQueue,
+      sendNotificationEmailToQueue,
+      sendFamilyViewerCreatedEmailToQueue,
+      sendNewUserCreatedEmailToQueue,
+      sendInstitutionAssociationEmailToQueue
+    } = require('./services/sqsEmailService');
     
     const results = [];
     const testUserData = {
@@ -942,9 +953,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 1. Email de recuperación de contraseña
     try {
-      await emailConfig.sendPasswordResetEmail(testEmail, '123456', 'Usuario de Prueba');
-      results.push({ type: 'sendPasswordResetEmail', status: 'success' });
-      console.log('✅ [TEST] Email de recuperación de contraseña enviado');
+      const result = await sendPasswordResetEmailToQueue(testEmail, '123456', 'Usuario de Prueba');
+      results.push({ type: 'sendPasswordResetEmail', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de recuperación de contraseña enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendPasswordResetEmail', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendPasswordResetEmail:', error.message);
@@ -952,9 +963,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 2. Email de bienvenida de institución
     try {
-      await emailConfig.sendInstitutionWelcomeEmail(testEmail, 'Usuario Admin', 'Institución de Prueba', 'TestPass123!');
-      results.push({ type: 'sendInstitutionWelcomeEmail', status: 'success' });
-      console.log('✅ [TEST] Email de bienvenida de institución enviado');
+      const result = await sendInstitutionWelcomeEmailToQueue(testEmail, 'Usuario Admin', 'Institución de Prueba', 'TestPass123!');
+      results.push({ type: 'sendInstitutionWelcomeEmail', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de bienvenida de institución enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendInstitutionWelcomeEmail', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendInstitutionWelcomeEmail:', error.message);
@@ -962,9 +973,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 3. Email de bienvenida general
     try {
-      await emailConfig.sendWelcomeEmail(testEmail, 'Usuario de Prueba');
-      results.push({ type: 'sendWelcomeEmail', status: 'success' });
-      console.log('✅ [TEST] Email de bienvenida general enviado');
+      const result = await sendWelcomeEmailToQueue(testEmail, 'Usuario de Prueba');
+      results.push({ type: 'sendWelcomeEmail', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de bienvenida general enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendWelcomeEmail', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendWelcomeEmail:', error.message);
@@ -972,9 +983,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 4. Email de invitación familiar
     try {
-      await emailConfig.sendFamilyInvitationEmail(testEmail, 'Usuario Familiar', 'TestPass123!');
-      results.push({ type: 'sendFamilyInvitationEmail', status: 'success' });
-      console.log('✅ [TEST] Email de invitación familiar enviado');
+      const result = await sendFamilyInvitationEmailToQueue(testEmail, 'Usuario Familiar', 'TestPass123!');
+      results.push({ type: 'sendFamilyInvitationEmail', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de invitación familiar enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendFamilyInvitationEmail', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendFamilyInvitationEmail:', error.message);
@@ -982,9 +993,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 5. Email de notificación de invitación familiar
     try {
-      await emailConfig.sendFamilyInvitationNotificationEmail(testEmail, 'Usuario Familiar', 'Juan Pérez');
-      results.push({ type: 'sendFamilyInvitationNotificationEmail', status: 'success' });
-      console.log('✅ [TEST] Email de notificación de invitación familiar enviado');
+      const result = await sendFamilyInvitationNotificationEmailToQueue(testEmail, 'Usuario Familiar', 'Juan Pérez');
+      results.push({ type: 'sendFamilyInvitationNotificationEmail', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de notificación de invitación familiar enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendFamilyInvitationNotificationEmail', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendFamilyInvitationNotificationEmail:', error.message);
@@ -992,9 +1003,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 6. Email de notificación general
     try {
-      await emailConfig.sendNotificationEmail(testEmail, 'Notificación de Prueba', 'Este es un mensaje de prueba', 'Usuario de Prueba');
-      results.push({ type: 'sendNotificationEmail', status: 'success' });
-      console.log('✅ [TEST] Email de notificación general enviado');
+      const result = await sendNotificationEmailToQueue(testEmail, 'Notificación de Prueba', 'Este es un mensaje de prueba', 'Usuario de Prueba');
+      results.push({ type: 'sendNotificationEmail', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de notificación general enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendNotificationEmail', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendNotificationEmail:', error.message);
@@ -1002,9 +1013,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 7. Email de usuario familyviewer creado
     try {
-      await emailService.sendFamilyViewerCreatedEmail(testUserData, 'TestPass123!', 'Institución de Prueba');
-      results.push({ type: 'sendFamilyViewerCreatedEmail', status: 'success' });
-      console.log('✅ [TEST] Email de familyviewer creado enviado');
+      const result = await sendFamilyViewerCreatedEmailToQueue(testUserData, 'TestPass123!', 'Institución de Prueba');
+      results.push({ type: 'sendFamilyViewerCreatedEmail', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de familyviewer creado enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendFamilyViewerCreatedEmail', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendFamilyViewerCreatedEmail:', error.message);
@@ -1012,9 +1023,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 8. Email de nuevo usuario creado (coordinador)
     try {
-      await emailService.sendNewUserCreatedEmail(testUserData, 'TestPass123!', 'Institución de Prueba', 'coordinador');
-      results.push({ type: 'sendNewUserCreatedEmail (coordinador)', status: 'success' });
-      console.log('✅ [TEST] Email de nuevo usuario coordinador enviado');
+      const result = await sendNewUserCreatedEmailToQueue(testUserData, 'TestPass123!', 'Institución de Prueba', 'coordinador');
+      results.push({ type: 'sendNewUserCreatedEmail (coordinador)', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de nuevo usuario coordinador enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendNewUserCreatedEmail (coordinador)', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendNewUserCreatedEmail (coordinador):', error.message);
@@ -1022,9 +1033,9 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 9. Email de nuevo usuario creado (adminaccount)
     try {
-      await emailService.sendNewUserCreatedEmail(testUserData, 'TestPass123!', 'Institución de Prueba', 'adminaccount');
-      results.push({ type: 'sendNewUserCreatedEmail (adminaccount)', status: 'success' });
-      console.log('✅ [TEST] Email de nuevo usuario adminaccount enviado');
+      const result = await sendNewUserCreatedEmailToQueue(testUserData, 'TestPass123!', 'Institución de Prueba', 'adminaccount');
+      results.push({ type: 'sendNewUserCreatedEmail (adminaccount)', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de nuevo usuario adminaccount enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendNewUserCreatedEmail (adminaccount)', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendNewUserCreatedEmail (adminaccount):', error.message);
@@ -1032,7 +1043,7 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     // 10. Email de asociación a institución
     try {
-      await emailService.sendInstitutionAssociationEmail(
+      const result = await sendInstitutionAssociationEmailToQueue(
         testUserData,
         'Institución de Prueba',
         'División de Prueba',
@@ -1043,8 +1054,8 @@ app.post('/debug/test-all-emails', async (req, res) => {
           dni: '12345678'
         }
       );
-      results.push({ type: 'sendInstitutionAssociationEmail', status: 'success' });
-      console.log('✅ [TEST] Email de asociación a institución enviado');
+      results.push({ type: 'sendInstitutionAssociationEmail', status: result.success ? 'success' : 'error', error: result.error });
+      console.log(result.success ? '✅ [TEST] Mensaje de asociación a institución enviado a SQS' : '❌ [TEST] Error enviando a SQS');
     } catch (error) {
       results.push({ type: 'sendInstitutionAssociationEmail', status: 'error', error: error.message });
       console.error('❌ [TEST] Error en sendInstitutionAssociationEmail:', error.message);
@@ -1055,7 +1066,7 @@ app.post('/debug/test-all-emails', async (req, res) => {
     
     res.json({ 
       success: true, 
-      message: `Enviados ${successCount} emails exitosamente, ${errorCount} con errores a ${testEmail}`,
+      message: `Enviados ${successCount} mensajes a cola SQS exitosamente, ${errorCount} con errores a ${testEmail}. Los emails serán procesados por el worker.`,
       results: results,
       summary: {
         total: results.length,
@@ -1182,7 +1193,8 @@ app.post('/users/login', loginRateLimit, async (req, res) => {
     }
 
     // Verificar contraseña
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    // Usar comparePassword que soporta PEPPER y migración automática
+    const isPasswordValid = await user.comparePassword(password);
     if (!isPasswordValid) {
       console.log('❌ Contraseña inválida para:', email);
       
@@ -1204,6 +1216,12 @@ app.post('/users/login', loginRateLimit, async (req, res) => {
     }
 
     console.log('✅ Contraseña válida para:', email);
+    
+    // Migrar contraseña a PEPPER si es necesario
+    const envConfig = require('./config/env.config');
+    if (envConfig.PEPPER && !user.passwordUsesPepper) {
+      await user.migratePasswordToPepper(password);
+    }
 
     // Generar URL firmada para el avatar del usuario
     let avatarUrl = null;
@@ -2186,7 +2204,7 @@ app.post('/accounts', authenticateToken, async (req, res) => {
     );
 
     // Enviar email de bienvenida con credenciales al administrador (asíncrono)
-    sendEmailAsync(sendInstitutionWelcomeEmail, null, adminUser.email, adminUser.name, account.nombre, randomPassword);
+    await sendInstitutionWelcomeEmailToQueue(adminUser.email, adminUser.name, account.nombre, randomPassword);
     console.log('📧 [CREATE ACCOUNT] Email de bienvenida programado para envío asíncrono al administrador:', adminUser.email);
 
     // Populate el usuario administrador
@@ -2345,16 +2363,14 @@ app.post('/api/accounts/:accountId/admin-users', authenticateToken, async (req, 
     console.log('✅ [CREATE ADMIN USER] Asociación creada');
 
     // Enviar email de bienvenida (asíncrono)
-    sendEmailAsync(
-      emailService.sendNewUserCreatedEmail,
-      emailService,
+    await sendNewUserCreatedEmailToQueue(
       {
         name: adminUser.name,
         email: adminUser.email
       },
       randomPassword,
       account.nombre,
-      'Administrador de Institución'
+      'adminaccount'
     );
     console.log('📧 [CREATE ADMIN USER] Email de bienvenida programado para envío asíncrono a:', adminUser.email);
 
@@ -5115,10 +5131,11 @@ app.post('/shared', authenticateToken, async (req, res) => {
       const role = await Role.findById(role._id);
       
       if (user && account) {
-        await sendNotificationEmail(
+        await sendNotificationEmailToQueue(
           user.email,
           'Asociación a Institución',
-          `Has sido asociado a la institución <strong>${account.nombre}</strong> con el rol <strong>${role.nombre}</strong>. Ya puedes acceder a la aplicación con tus credenciales.`
+          `Has sido asociado a la institución <strong>${account.nombre}</strong> con el rol <strong>${role.nombre}</strong>. Ya puedes acceder a la aplicación con tus credenciales.`,
+          user.name
         );
         console.log('✅ [SHARED POST] Email de notificación enviado exitosamente a:', user.email);
       }
@@ -5526,7 +5543,7 @@ app.post('/shared/request', authenticateToken, async (req, res) => {
           console.log('✅ [SHARED REQUEST] Asociación creada exitosamente');
           
           // Enviar email de invitación con las credenciales (asíncrono)
-          sendEmailAsync(sendFamilyInvitationEmail, null, newUser.email, newUser.name, randomPassword);
+          await sendFamilyInvitationEmailToQueue(newUser.email, newUser.name, randomPassword);
           console.log('📧 [SHARED REQUEST] Email de invitación familiar programado para envío asíncrono a:', email);
           
           res.status(201).json({
@@ -6553,6 +6570,17 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`📡 Health check disponible en http://localhost:${PORT}/health`);
   console.log(`📖 Documentación disponible en http://localhost:${PORT}/api`);
   console.log(`🌐 API accesible desde la red local en http://0.0.0.0:${PORT}`);
+  
+  // Iniciar worker de emails si está configurado
+  if (process.env.SQS_EMAIL_QUEUE_URL) {
+    console.log(`📧 Iniciando worker de emails...`);
+    const { startWorker } = require('./workers/emailWorker');
+    startWorker().catch(error => {
+      console.error('❌ Error iniciando worker de emails:', error);
+    });
+  } else {
+    console.log(`⚠️  Worker de emails no iniciado: SQS_EMAIL_QUEUE_URL no está configurada`);
+  }
 });
 
 // Configurar timeouts extendidos para uploads de archivos grandes

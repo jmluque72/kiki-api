@@ -8,7 +8,8 @@ const ActiveAssociation = require('../shared/models/ActiveAssociation');
 const XLSX = require('xlsx');
 const fs = require('fs');
 const { generateSignedUrl } = require('../config/s3.config');
-const { generateRandomPassword, sendEmailAsync } = require('../config/email.config');
+const { generateRandomPassword } = require('../config/email.config');
+const { sendNewUserCreatedEmailToQueue, sendInstitutionAssociationEmailToQueue } = require('../services/sqsEmailService');
 const emailService = require('../services/emailService');
 
 // Función auxiliar para crear asociaciones
@@ -420,9 +421,7 @@ exports.uploadStudentsExcel = async (req, res) => {
           tutorUser = new User(tutorData);
           await tutorUser.save();
 
-          sendEmailAsync(
-            emailService.sendNewUserCreatedEmail,
-            emailService,
+          await sendNewUserCreatedEmailToQueue(
             {
               name: tutorUser.name,
               email: tutorUser.email
@@ -467,7 +466,7 @@ exports.uploadStudentsExcel = async (req, res) => {
 
           if (existingTutor) {
             try {
-              await emailService.sendInstitutionAssociationEmail(
+              await sendInstitutionAssociationEmailToQueue(
                 {
                   name: tutorUser.name,
                   email: tutorUser.email
@@ -1272,16 +1271,14 @@ exports.uploadCoordinatorsExcel = async (req, res) => {
           await coordinatorUser.save();
 
           const institutionName = division.cuenta ? (await Account.findById(division.cuenta)).nombre : 'Institución';
-          sendEmailAsync(
-            emailService.sendNewUserCreatedEmail,
-            emailService,
+          await sendNewUserCreatedEmailToQueue(
             {
               name: coordinatorUser.name,
               email: coordinatorUser.email
             },
             coordinatorData.password,
             institutionName,
-            'Coordinador'
+            'coordinador'
           );
         }
 
@@ -1306,7 +1303,7 @@ exports.uploadCoordinatorsExcel = async (req, res) => {
           if (existingCoordinator) {
             try {
               const account = await Account.findById(division.cuenta);
-              await emailService.sendInstitutionAssociationEmail(
+              await sendInstitutionAssociationEmailToQueue(
                 {
                   name: coordinatorUser.name,
                   email: coordinatorUser.email

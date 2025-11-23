@@ -1,6 +1,7 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const config = require('../../config/env.config');
 
 const userSchema = new mongoose.Schema({
@@ -123,13 +124,33 @@ const userSchema = new mongoose.Schema({
   }
 });
 
+// Función helper para aplicar PEPPER a la contraseña
+function applyPepper(password) {
+  if (!config.PEPPER) {
+    return password; // Si no hay PEPPER configurado, retornar sin modificar
+  }
+  // Combinar contraseña con PEPPER usando HMAC para mayor seguridad
+  return crypto.createHmac('sha256', config.PEPPER).update(password).digest('hex') + password;
+}
+
 // Middleware pre-save para hashear contraseña
 userSchema.pre('save', async function(next) {
   if (!this.isModified('password')) return next();
   
   try {
+    // Aplicar PEPPER si está configurado
+    // - Para nuevos usuarios: siempre usar PEPPER si está configurado
+    // - Para usuarios existentes: usar PEPPER si está configurado (migración automática)
+    const shouldUsePepper = !!config.PEPPER;
+    const passwordWithPepper = shouldUsePepper ? applyPepper(this.password) : this.password;
+    
     const salt = await bcrypt.genSalt(12);
-    this.password = await bcrypt.hash(this.password, salt);
+    this.password = await bcrypt.hash(passwordWithPepper, salt);
+    
+    // Marcar que esta contraseña usa PEPPER si está configurado
+    if (config.PEPPER) {
+      this.passwordUsesPepper = true;
+    }
     
     // Actualizar fechas de contraseña
     this.passwordChangedAt = new Date();
@@ -142,9 +163,64 @@ userSchema.pre('save', async function(next) {
   }
 });
 
-// Método para comparar contraseñas
+// Método para comparar contraseñas (soporta contraseñas con y sin PEPPER)
 userSchema.methods.comparePassword = async function(candidatePassword) {
-  return await bcrypt.compare(candidatePassword, this.password);
+  if (!this.password) {
+    return false; // Usuario sin contraseña (ej: Cognito)
+  }
+  
+  // Si la contraseña almacenada usa PEPPER, comparar con PEPPER
+  if (this.passwordUsesPepper && config.PEPPER) {
+    const passwordWithPepper = applyPepper(candidatePassword);
+    const isValid = await bcrypt.compare(passwordWithPepper, this.password);
+    
+    // Si es válida, retornar true (y se migrará automáticamente en el login)
+    return isValid;
+  }
+  
+  // Si no usa PEPPER, intentar comparación normal (compatibilidad con contraseñas antiguas)
+  const isValidWithoutPepper = await bcrypt.compare(candidatePassword, this.password);
+  
+  // Si es válida y tenemos PEPPER configurado, marcar para migración
+  if (isValidWithoutPepper && config.PEPPER && !this.passwordUsesPepper) {
+    // La migración se hará automáticamente en el login
+    return true;
+  }
+  
+  return isValidWithoutPepper;
+};
+
+// Método para migrar contraseña a PEPPER (llamado automáticamente después de login exitoso)
+userSchema.methods.migratePasswordToPepper = async function(plainPassword) {
+  if (!config.PEPPER || this.passwordUsesPepper) {
+    return; // Ya usa PEPPER o no está configurado
+  }
+  
+  try {
+    // Aplicar PEPPER y re-hashear la contraseña
+    const passwordWithPepper = applyPepper(plainPassword);
+    const salt = await bcrypt.genSalt(12);
+    const hashedPassword = await bcrypt.hash(passwordWithPepper, salt);
+    
+    // Usar updateOne para evitar que el pre-save se ejecute nuevamente
+    await this.constructor.updateOne(
+      { _id: this._id },
+      { 
+        password: hashedPassword,
+        passwordUsesPepper: true,
+        passwordChangedAt: new Date()
+      }
+    );
+    
+    // Actualizar el objeto en memoria
+    this.password = hashedPassword;
+    this.passwordUsesPepper = true;
+    
+    console.log(`✅ [PEPPER] Contraseña migrada a PEPPER para usuario: ${this.email}`);
+  } catch (error) {
+    console.error(`❌ [PEPPER] Error migrando contraseña para ${this.email}:`, error);
+    // No lanzar error para no interrumpir el login
+  }
 };
 
 // Método para generar JWT

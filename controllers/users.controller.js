@@ -11,7 +11,8 @@ const RefreshTokenService = require('../services/refreshTokenService');
 const LoginMonitorService = require('../services/loginMonitorService');
 const TwoFactorAuthService = require('../services/twoFactorAuthService');
 const { generateSignedUrl } = require('../config/s3.config');
-const { sendWelcomeEmail, sendEmailAsync, generateRandomPassword } = require('../config/email.config');
+const { generateRandomPassword } = require('../config/email.config');
+const { sendWelcomeEmailToQueue } = require('../services/sqsEmailService');
 
 // Login de usuario
 exports.login = async (req, res) => {
@@ -91,7 +92,8 @@ exports.login = async (req, res) => {
       });
     }
 
-    const isPasswordValid = await bcrypt.compare(password, user.password);
+    // Usar comparePassword que soporta PEPPER y migración automática
+    const isPasswordValid = await user.comparePassword(password);
     if (!isPasswordValid) {
       console.log('❌ Contraseña inválida para:', email);
       
@@ -112,6 +114,12 @@ exports.login = async (req, res) => {
     }
 
     console.log('✅ Contraseña válida para:', email);
+
+    // Migrar contraseña a PEPPER si es necesario (solo si la contraseña antigua funcionó)
+    const envConfig = require('../config/env.config');
+    if (envConfig.PEPPER && !user.passwordUsesPepper) {
+      await user.migratePasswordToPepper(password);
+    }
 
     let avatarUrl = null;
     if (user.avatar) {

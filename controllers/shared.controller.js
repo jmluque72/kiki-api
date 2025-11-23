@@ -7,7 +7,7 @@ const Role = require('../shared/models/Role');
 const ActiveAssociation = require('../shared/models/ActiveAssociation');
 const RequestedShared = require('../shared/models/RequestedShared');
 const { generateSignedUrl } = require('../config/s3.config');
-const { sendNotificationEmail, sendFamilyInvitationEmail } = require('../config/email.config');
+const { sendNotificationEmailToQueue, sendFamilyInvitationEmailToQueue } = require('../services/sqsEmailService');
 const emailService = require('../services/emailService');
 
 /**
@@ -251,10 +251,11 @@ exports.createAssociation = async (req, res) => {
       const role = await Role.findById(role._id);
       
       if (user && account) {
-        await sendNotificationEmail(
+        await sendNotificationEmailToQueue(
           user.email,
           'Asociación a Institución',
-          `Has sido asociado a la institución <strong>${account.nombre}</strong> con el rol <strong>${role.nombre}</strong>. Ya puedes acceder a la aplicación con tus credenciales.`
+          `Has sido asociado a la institución <strong>${account.nombre}</strong> con el rol <strong>${role.nombre}</strong>. Ya puedes acceder a la aplicación con tus credenciales.`,
+          user.name
         );
       }
     } catch (emailError) {
@@ -515,13 +516,10 @@ exports.requestAssociation = async (req, res) => {
     await requestedShared.save();
 
     try {
-      await sendFamilyInvitationEmail(
+      await sendFamilyInvitationEmailToQueue(
         email.toLowerCase().trim(),
         nombre || 'Familiar',
-        student.nombre + ' ' + student.apellido,
-        student.account.nombre,
-        student.division?.nombre || 'Sin división',
-        requestedShared._id
+        null // password - se genera en el worker si es necesario
       );
     } catch (emailError) {
       console.error('❌ [SHARED REQUEST] Error enviando email:', emailError);

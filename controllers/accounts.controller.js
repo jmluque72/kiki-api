@@ -6,7 +6,8 @@ const AccountConfig = require('../shared/models/AccountConfig');
 const ActiveAssociation = require('../shared/models/ActiveAssociation');
 const Activity = require('../shared/models/Activity');
 const { generateSignedUrl } = require('../config/s3.config');
-const { sendInstitutionWelcomeEmail, generateRandomPassword, sendEmailAsync } = require('../config/email.config');
+const { generateRandomPassword } = require('../config/email.config');
+const { sendInstitutionWelcomeEmailToQueue, sendNewUserCreatedEmailToQueue } = require('../services/sqsEmailService');
 const emailService = require('../services/emailService');
 const bcrypt = require('bcryptjs');
 
@@ -252,7 +253,7 @@ exports.createAccount = async (req, res) => {
       req.user._id
     );
 
-    sendEmailAsync(sendInstitutionWelcomeEmail, null, adminUser.email, adminUser.name, account.nombre, randomPassword);
+    await sendInstitutionWelcomeEmailToQueue(adminUser.email, adminUser.name, account.nombre, randomPassword);
     console.log('📧 [CREATE ACCOUNT] Email de bienvenida programado para envío asíncrono al administrador:', adminUser.email);
 
     await account.populate('usuarioAdministrador');
@@ -352,16 +353,14 @@ exports.createAdminUser = async (req, res) => {
     );
     console.log('✅ [CREATE ADMIN USER] Asociación creada');
 
-    sendEmailAsync(
-      emailService.sendNewUserCreatedEmail,
-      emailService,
+    await sendNewUserCreatedEmailToQueue(
       {
         name: adminUser.name,
         email: adminUser.email
       },
       randomPassword,
       account.nombre,
-      'Administrador de Institución'
+      'adminaccount'
     );
     console.log('📧 [CREATE ADMIN USER] Email de bienvenida programado para envío asíncrono a:', adminUser.email);
 

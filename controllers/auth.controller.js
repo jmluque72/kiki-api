@@ -1,7 +1,7 @@
 const User = require('../shared/models/User');
 const PasswordReset = require('../shared/models/PasswordReset');
 const PasswordExpirationService = require('../services/passwordExpirationService');
-const { sendPasswordResetEmail } = require('../config/email.config');
+const { sendPasswordResetEmailToQueue } = require('../services/sqsEmailService');
 
 // Cambiar contraseña
 exports.changePassword = async (req, res) => {
@@ -125,10 +125,10 @@ exports.forgotPassword = async (req, res) => {
     await passwordReset.save();
     console.log('💾 [FORGOT PASSWORD] Nuevo código guardado en base de datos');
 
-    // Enviar email con el código usando el servicio existente
+    // Enviar email con el código usando SQS
     try {
-      await sendPasswordResetEmail(email, code, user.name);
-      console.log('✅ [FORGOT PASSWORD] Email enviado exitosamente a:', email);
+      await sendPasswordResetEmailToQueue(email, code, user.name);
+      console.log('✅ [FORGOT PASSWORD] Mensaje de email enviado a cola SQS para:', email);
       
       res.json({
         success: true,

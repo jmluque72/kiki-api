@@ -3,6 +3,9 @@
 const nodemailer = require('nodemailer');
 require('dotenv').config();
 
+// Importar servicio SQS (se importa después de definir las funciones de email)
+let sqsEmailService = null;
+
 // Configuración de AWS SES - Comentado para uso futuro
 /*
 const sesClient = new SESClient({
@@ -62,23 +65,102 @@ const getAppStoreBadgesHTML = () => {
   `;
 };
 
-// Función para envío asíncrono de emails (no bloquea el flujo principal)
+// Función helper para obtener el servicio SQS (lazy loading)
+const getSqsEmailService = () => {
+  if (!sqsEmailService) {
+    sqsEmailService = require('../services/sqsEmailService');
+  }
+  return sqsEmailService;
+};
+
+// Función para envío asíncrono de emails usando SQS (no bloquea el flujo principal)
 const sendEmailAsync = async (emailFunction, context = null, ...args) => {
-  // Ejecutar el envío de email en segundo plano sin esperar
-  setImmediate(async () => {
-    try {
-      if (context && typeof emailFunction === 'function') {
-        // Si se proporciona contexto, usar bind para mantener el contexto
-        await emailFunction.bind(context)(...args);
-      } else {
-        // Función normal sin contexto
-        await emailFunction(...args);
-      }
-      console.log('✅ [ASYNC EMAIL] Email enviado exitosamente');
-    } catch (error) {
-      console.error('❌ [ASYNC EMAIL] Error enviando email:', error.message);
+  try {
+    // Detectar el tipo de email basándose en el nombre de la función
+    const functionName = emailFunction?.name || '';
+    let emailType = null;
+    let emailData = {};
+
+    // Mapear funciones conocidas a tipos de email
+    if (functionName === 'sendInstitutionWelcomeEmail' || emailFunction === sendInstitutionWelcomeEmail) {
+      emailType = 'sendInstitutionWelcomeEmail';
+      emailData = {
+        to: args[0], // email
+        userName: args[1], // userName
+        institutionName: args[2], // institutionName
+        password: args[3] // password
+      };
+    } else if (functionName === 'sendNewUserCreatedEmail' || (context && context.sendNewUserCreatedEmail === emailFunction)) {
+      emailType = 'sendNewUserCreatedEmail';
+      emailData = {
+        userData: args[0],
+        password: args[1],
+        institutionName: args[2],
+        roleType: args[3]
+      };
+    } else if (functionName === 'sendFamilyViewerCreatedEmail' || (context && context.sendFamilyViewerCreatedEmail === emailFunction)) {
+      emailType = 'sendFamilyViewerCreatedEmail';
+      emailData = {
+        userData: args[0],
+        password: args[1],
+        institutionName: args[2]
+      };
+    } else {
+      // Si no se puede determinar el tipo, intentar inferir desde los argumentos
+      console.warn(`⚠️ [SQS EMAIL] No se pudo determinar el tipo de email para función: ${functionName}`);
+      // Fallback: intentar enviar directamente (comportamiento anterior)
+      setImmediate(async () => {
+        try {
+          if (context && typeof emailFunction === 'function') {
+            await emailFunction.bind(context)(...args);
+          } else {
+            await emailFunction(...args);
+          }
+          console.log('✅ [ASYNC EMAIL] Email enviado exitosamente (fallback)');
+        } catch (error) {
+          console.error('❌ [ASYNC EMAIL] Error enviando email:', error.message);
+        }
+      });
+      return;
     }
-  });
+
+    // Enviar a SQS
+    const { sendEmailToQueue } = getSqsEmailService();
+    const result = await sendEmailToQueue(emailType, emailData);
+    if (result.success) {
+      console.log(`✅ [SQS EMAIL] Mensaje enviado a cola SQS - Tipo: ${emailType}`);
+    } else {
+      console.error(`❌ [SQS EMAIL] Error enviando a SQS: ${result.error}`);
+      // Fallback: intentar enviar directamente si SQS falla
+      setImmediate(async () => {
+        try {
+          if (context && typeof emailFunction === 'function') {
+            await emailFunction.bind(context)(...args);
+          } else {
+            await emailFunction(...args);
+          }
+          console.log('✅ [ASYNC EMAIL] Email enviado exitosamente (fallback después de error SQS)');
+        } catch (error) {
+          console.error('❌ [ASYNC EMAIL] Error enviando email:', error.message);
+        }
+      });
+    }
+  } catch (error) {
+    console.error('❌ [SQS EMAIL] Error en sendEmailAsync:', error.message);
+    // Fallback: intentar enviar directamente
+    setImmediate(async () => {
+      try {
+        if (context && typeof emailFunction === 'function') {
+          await emailFunction.bind(context)(...args);
+        } else {
+          await emailFunction(...args);
+        }
+        console.log('✅ [ASYNC EMAIL] Email enviado exitosamente (fallback después de error)');
+      } catch (fallbackError) {
+        console.error('❌ [ASYNC EMAIL] Error enviando email:', fallbackError.message);
+      }
+    });
+  }
 };
 
 // Función para generar contraseña aleatoria segura
