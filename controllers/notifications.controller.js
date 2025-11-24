@@ -4,6 +4,7 @@ const Student = require('../shared/models/Student');
 const Shared = require('../shared/models/Shared');
 const ActiveAssociation = require('../shared/models/ActiveAssociation');
 const Device = require('../shared/models/Device');
+const Role = require('../shared/models/Role');
 
 // Función helper para obtener usuarios familiares de un estudiante
 async function getFamilyUsersForStudent(studentId) {
@@ -485,6 +486,9 @@ const getFamilyNotifications = async (req, res) => {
  * Obtener detalles de una notificación
  */
 const getNotificationDetails = async (req, res) => {
+  const startTime = Date.now();
+  const timings = {};
+  
   try {
     const notificationId = req.params.id;
     const userId = req.user._id;
@@ -492,21 +496,53 @@ const getNotificationDetails = async (req, res) => {
     console.log('🔔 [GET NOTIFICATION DETAILS] ID:', notificationId);
     console.log('🔔 [GET NOTIFICATION DETAILS] Usuario:', userId);
     
-    // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
+    // Obtener información del usuario para verificar su rol - OPTIMIZADO
+    const userStart = Date.now();
+    console.log(`⏱️  [TIMING] Iniciando consulta de usuario...`);
+    
+    // Usar lean() para evitar hidratación completa y hacer populate manualmente
+    const userDoc = await User.findById(userId).select('name email role').lean();
+    timings.userFind = Date.now() - userStart;
+    console.log(`⏱️  [TIMING] User find: ${timings.userFind}ms`);
+    
+    if (!userDoc) {
       return res.status(404).json({
         success: false,
         message: 'Usuario no encontrado'
       });
     }
     
-    // Buscar la notificación con detalles básicos
+    // Populate role manualmente (más rápido que populate automático)
+    // Si no hay role, no hacer consulta
+    let role = null;
+    if (userDoc.role) {
+      const roleStart = Date.now();
+      role = await Role.findById(userDoc.role).select('nombre').lean();
+      timings.roleQuery = Date.now() - roleStart;
+      console.log(`⏱️  [TIMING] Role query: ${timings.roleQuery}ms`);
+    } else {
+      timings.roleQuery = 0;
+      console.log(`⏱️  [TIMING] Role query: 0ms (sin role)`);
+    }
+    
+    const user = {
+      ...userDoc,
+      role: role
+    };
+    
+    timings.userQuery = Date.now() - userStart;
+    console.log(`⏱️  [TIMING] User query total: ${timings.userQuery}ms`);
+    
+    // Buscar la notificación SIN populate de readBy.user (esto es muy lento)
+    const notificationStart = Date.now();
     const notification = await Notification.findById(notificationId)
       .populate('sender', 'name email')
       .populate('account', 'nombre')
-      .populate('division', 'nombre')
-      .populate('readBy.user', 'name email');
+      .populate('division', 'nombre');
+    timings.notificationQuery = Date.now() - notificationStart;
+    console.log(`⏱️  [TIMING] Notification query: ${timings.notificationQuery}ms`);
+    console.log(`⏱️  [TIMING] Notification readBy length: ${notification?.readBy?.length || 0}`);
+    console.log(`⏱️  [TIMING] Notification recipients length: ${notification?.recipients?.length || 0}`);
     
     if (!notification) {
       return res.status(404).json({
@@ -516,9 +552,29 @@ const getNotificationDetails = async (req, res) => {
     }
     
     // Verificar que el usuario tenga acceso a esta notificación
-    // Usar rol efectivo de ActiveAssociation si existe
-    const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
-    const effectiveRole = activeAssociation?.role?.nombre || user.role?.nombre;
+    // Usar rol efectivo de ActiveAssociation si existe - OPTIMIZADO
+    const activeAssocStart = Date.now();
+    const activeAssociationDoc = await ActiveAssociation.findOne({ user: userId }).select('role').lean();
+    timings.activeAssociationFind = Date.now() - activeAssocStart;
+    console.log(`⏱️  [TIMING] ActiveAssociation find: ${timings.activeAssociationFind}ms`);
+    
+    let effectiveRole = user.role?.nombre;
+    
+    if (activeAssociationDoc?.role) {
+      const activeRoleStart = Date.now();
+      const activeRole = await Role.findById(activeAssociationDoc.role).select('nombre').lean();
+      timings.activeRoleQuery = Date.now() - activeRoleStart;
+      console.log(`⏱️  [TIMING] ActiveRole query: ${timings.activeRoleQuery}ms`);
+      if (activeRole) {
+        effectiveRole = activeRole.nombre || effectiveRole;
+      }
+    } else {
+      timings.activeRoleQuery = 0;
+      console.log(`⏱️  [TIMING] ActiveRole query: 0ms (sin activeAssociation)`);
+    }
+    
+    timings.activeAssociationQuery = Date.now() - activeAssocStart;
+    console.log(`⏱️  [TIMING] ActiveAssociation query total: ${timings.activeAssociationQuery}ms`);
     const isCoordinador = effectiveRole === 'coordinador';
     const hasAccess = isCoordinador || 
                      notification.recipients.some(recipient => recipient.toString() === userId);
@@ -530,24 +586,35 @@ const getNotificationDetails = async (req, res) => {
       });
     }
     
-    // Poblar destinatarios manualmente (usuarios y estudiantes)
+    // Poblar destinatarios manualmente (usuarios y estudiantes) - OPTIMIZADO
     let notificationObj = notification.toObject();
     
     if (notification.recipients && notification.recipients.length > 0) {
-      const populatedRecipients = [];
+      const recipientsStart = Date.now();
+      // Buscar todos los usuarios y estudiantes en batch
+      const [users, students] = await Promise.all([
+        User.find({ _id: { $in: notification.recipients } }).select('name email').lean(),
+        Student.find({ _id: { $in: notification.recipients } }).select('nombre apellido email').lean()
+      ]);
+      timings.recipientsQuery = Date.now() - recipientsStart;
+      console.log(`⏱️  [TIMING] Recipients query: ${timings.recipientsQuery}ms (${users.length} users, ${students.length} students)`);
       
-      for (let recipientId of notification.recipients) {
-        // Intentar buscar como usuario
-        let recipient = await User.findById(recipientId).select('name email');
+      // Crear mapas para acceso rápido
+      const userMap = new Map(users.map(u => [u._id.toString(), u]));
+      const studentMap = new Map(students.map(s => [s._id.toString(), s]));
+      
+      const populatedRecipients = notification.recipients.map(recipientId => {
+        const recipientIdStr = recipientId.toString();
+        let recipient = userMap.get(recipientIdStr);
         
         // Si no es usuario, buscar como estudiante
         if (!recipient) {
-          recipient = await Student.findById(recipientId).select('nombre apellido email');
+          recipient = studentMap.get(recipientIdStr);
         }
         
         if (recipient) {
           // Normalizar el nombre para usuarios y estudiantes
-          const recipientObj = recipient.toObject();
+          const recipientObj = { ...recipient };
           if (recipientObj.name) {
             // Es un usuario, usar 'name' como 'nombre'
             recipientObj.nombre = recipientObj.name;
@@ -555,39 +622,54 @@ const getNotificationDetails = async (req, res) => {
             // Es un estudiante, combinar nombre y apellido
             recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
           }
-          populatedRecipients.push(recipientObj);
+          return recipientObj;
         }
-      }
+        return null;
+      }).filter(Boolean);
       
       notificationObj.recipients = populatedRecipients;
     }
 
-    // Poblar readBy.user manualmente para asegurar que tenga el campo nombre
+    // Poblar readBy.user manualmente para asegurar que tenga el campo nombre - OPTIMIZADO
     if (notificationObj.readBy && notificationObj.readBy.length > 0) {
-      const populatedReadBy = [];
+      const readByStart = Date.now();
+      // Extraer todos los IDs de usuarios de readBy
+      const readByUserIds = notificationObj.readBy
+        .map(readEntry => readEntry.user?._id || readEntry.user)
+        .filter(Boolean);
       
-      for (let readEntry of notificationObj.readBy) {
-        if (readEntry.user && readEntry.user._id) {
-          // Buscar el usuario completo
-          const user = await User.findById(readEntry.user._id).select('name email');
+      console.log(`⏱️  [TIMING] ReadBy user IDs: ${readByUserIds.length}`);
+      
+      // Buscar todos los usuarios en batch
+      const readByUsers = await User.find({ _id: { $in: readByUserIds } })
+        .select('name email role')
+        .populate('role', 'nombre')
+        .lean();
+      timings.readByQuery = Date.now() - readByStart;
+      console.log(`⏱️  [TIMING] ReadBy query: ${timings.readByQuery}ms (${readByUsers.length} users)`);
+      
+      // Crear mapa para acceso rápido
+      const readByUserMap = new Map(readByUsers.map(u => [u._id.toString(), u]));
+      
+      const populatedReadBy = notificationObj.readBy.map(readEntry => {
+        const userId = readEntry.user?._id?.toString() || readEntry.user?.toString();
+        if (userId) {
+          const user = readByUserMap.get(userId);
           if (user) {
-            populatedReadBy.push({
+            return {
               user: {
                 _id: user._id,
                 nombre: user.name, // User model usa 'name', no 'nombre'
-                email: user.email
+                email: user.email,
+                role: user.role
               },
               readAt: readEntry.readAt,
               _id: readEntry._id
-            });
-          } else {
-            // Si no se encuentra el usuario, mantener la entrada original
-            populatedReadBy.push(readEntry);
+            };
           }
-        } else {
-          populatedReadBy.push(readEntry);
         }
-      }
+        return readEntry;
+      });
       
       notificationObj.readBy = populatedReadBy;
     }
@@ -602,55 +684,100 @@ const getNotificationDetails = async (req, res) => {
       return readEntry.user.role?.nombre !== 'coordinador';
     }) || [];
     
-    // Para la lista de pendientes, necesitamos encontrar qué estudiantes tienen padres que ya leyeron
+    // Para la lista de pendientes, necesitamos encontrar qué estudiantes tienen padres que ya leyeron - OPTIMIZADO
     const studentsWithParentsRead = new Set();
     
     if (readByParents.length > 0) {
-      // Buscar asociaciones de los usuarios que leyeron para encontrar sus estudiantes
-      for (let readEntry of readByParents) {
-        const associations = await Shared.find({
-          user: readEntry.user._id,
-          status: 'active'
-        }).populate('student', '_id');
-        
-        associations.forEach(assoc => {
-          if (assoc.student) {
-            studentsWithParentsRead.add(assoc.student._id.toString());
-          }
-        });
-      }
+      const associationsStart = Date.now();
+      // Extraer todos los IDs de usuarios que leyeron
+      const parentUserIds = readByParents.map(readEntry => readEntry.user._id);
+      
+      console.log(`⏱️  [TIMING] Parent user IDs: ${parentUserIds.length}`);
+      
+      // Buscar todas las asociaciones en batch
+      const allAssociations = await Shared.find({
+        user: { $in: parentUserIds },
+        status: 'active'
+      }).select('user student').lean();
+      timings.associationsQuery = Date.now() - associationsStart;
+      console.log(`⏱️  [TIMING] Associations query: ${timings.associationsQuery}ms (${allAssociations.length} associations)`);
+      
+      // Agregar estudiantes al Set
+      allAssociations.forEach(assoc => {
+        if (assoc.student) {
+          studentsWithParentsRead.add(assoc.student.toString());
+        }
+      });
     }
     
-    // Filtrar destinatarios pendientes (estudiantes cuyos padres NO han leído)
+    // Filtrar destinatarios pendientes (estudiantes cuyos padres NO han leído) - OPTIMIZADO
     const pendingRecipients = [];
     
     if (notificationObj.recipients && notificationObj.recipients.length > 0) {
-      for (let recipient of notificationObj.recipients) {
-        // Si es un estudiante, verificar si sus padres ya leyeron
-        if (recipient._id && !studentsWithParentsRead.has(recipient._id.toString())) {
-          // Buscar el tutor (familyadmin) de este estudiante
-          const tutorAssociation = await Shared.findOne({
-            student: recipient._id,
-            status: 'active'
-          }).populate('user', 'name email').populate('role', 'nombre');
-          
-          // Solo incluir si el tutor es familyadmin
-          if (tutorAssociation && tutorAssociation.role?.nombre === 'familyadmin') {
+      // Extraer todos los IDs de estudiantes pendientes
+      const pendingStudentIds = notificationObj.recipients
+        .map(recipient => recipient._id?.toString() || recipient._id)
+        .filter(id => id && !studentsWithParentsRead.has(id.toString()));
+      
+      if (pendingStudentIds.length > 0) {
+        const tutorAssocStart = Date.now();
+        console.log(`⏱️  [TIMING] Pending student IDs: ${pendingStudentIds.length}`);
+        
+        // Buscar todas las asociaciones de tutores en batch
+        // OPTIMIZACIÓN: Evitar populate anidado, hacer consultas separadas
+        const tutorAssociationsRaw = await Shared.find({
+          student: { $in: pendingStudentIds },
+          status: 'active'
+        }).select('user student role').lean();
+        
+        // Extraer IDs únicos de usuarios y roles
+        const tutorUserIds = [...new Set(tutorAssociationsRaw.map(a => a.user?.toString()).filter(Boolean))];
+        const tutorRoleIds = [...new Set(tutorAssociationsRaw.map(a => a.role?.toString()).filter(Boolean))];
+        
+        // Buscar usuarios y roles en batch
+        const [tutorUsers, tutorRoles] = await Promise.all([
+          User.find({ _id: { $in: tutorUserIds } }).select('name email').lean(),
+          Role.find({ _id: { $in: tutorRoleIds } }).select('nombre').lean()
+        ]);
+        
+        // Crear mapas
+        const tutorUserMap = new Map(tutorUsers.map(u => [u._id.toString(), u]));
+        const tutorRoleMap = new Map(tutorRoles.map(r => [r._id.toString(), r]));
+        
+        // Construir tutorAssociations con datos poblados
+        const tutorAssociations = tutorAssociationsRaw.map(assoc => ({
+          ...assoc,
+          user: assoc.user ? tutorUserMap.get(assoc.user.toString()) : null,
+          role: assoc.role ? tutorRoleMap.get(assoc.role.toString()) : null
+        }));
+        
+        timings.tutorAssociationsQuery = Date.now() - tutorAssocStart;
+        console.log(`⏱️  [TIMING] Tutor associations query: ${timings.tutorAssociationsQuery}ms (${tutorAssociations.length} associations)`);
+        
+        // Crear mapa de estudiante -> tutor
+        const studentTutorMap = new Map();
+        tutorAssociations.forEach(assoc => {
+          if (assoc.student && assoc.role?.nombre === 'familyadmin') {
+            const studentId = assoc.student.toString();
+            if (!studentTutorMap.has(studentId)) {
+              studentTutorMap.set(studentId, {
+                name: assoc.user?.name,
+                email: assoc.user?.email
+              });
+            }
+          }
+        });
+        
+        // Construir lista de pendientes
+        notificationObj.recipients.forEach(recipient => {
+          const recipientId = recipient._id?.toString() || recipient._id?.toString();
+          if (recipientId && !studentsWithParentsRead.has(recipientId)) {
             pendingRecipients.push({
               ...recipient,
-              tutor: {
-                name: tutorAssociation.user?.name,
-                email: tutorAssociation.user?.email
-              }
-            });
-          } else {
-            // Si no tiene tutor familyadmin, incluir sin tutor
-            pendingRecipients.push({
-              ...recipient,
-              tutor: null
+              tutor: studentTutorMap.get(recipientId) || null
             });
           }
-        }
+        });
       }
     }
     
@@ -664,10 +791,16 @@ const getNotificationDetails = async (req, res) => {
     // Agregar lista de pendientes corregida
     notificationObj.pendingRecipients = pendingRecipients;
     
+    const totalTime = Date.now() - startTime;
+    timings.total = totalTime;
+    
     console.log('🔔 [GET NOTIFICATION DETAILS] Notificación encontrada:', notification.title);
     console.log('🔔 [GET NOTIFICATION DETAILS] Total destinatarios:', totalRecipients);
     console.log('🔔 [GET NOTIFICATION DETAILS] Leídas por padres:', readByParents.length);
     console.log('🔔 [GET NOTIFICATION DETAILS] Pendientes:', pendingRecipients.length);
+    console.log('⏱️  [TIMING] ===== RESUMEN DE TIEMPOS =====');
+    console.log('⏱️  [TIMING]', JSON.stringify(timings, null, 2));
+    console.log(`⏱️  [TIMING] TOTAL: ${totalTime}ms`);
     
     res.json({
       success: true,

@@ -65,6 +65,7 @@ sharedSchema.index({ account: 1, status: 1 });
 sharedSchema.index({ user: 1, division: 1 });
 sharedSchema.index({ user: 1, student: 1 });
 sharedSchema.index({ division: 1, student: 1 });
+sharedSchema.index({ student: 1, status: 1 }); // Índice para optimizar búsqueda de tutores por estudiante
 
 // Método para verificar si un usuario tiene un permiso específico en una cuenta
 sharedSchema.methods.hasPermission = function(module, action) {

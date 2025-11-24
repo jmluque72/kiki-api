@@ -476,11 +476,27 @@ exports.createEventFromBackoffice = async (req, res) => {
  */
 exports.createEvent = async (req, res) => {
   try {
+    console.log('📅 [CREATE EVENT] ===== INICIO =====');
+    console.log('📅 [CREATE EVENT] Body completo:', JSON.stringify(req.body, null, 2));
+    console.log('📅 [CREATE EVENT] Headers:', {
+      'content-type': req.headers['content-type'],
+      'authorization': req.headers['authorization'] ? 'presente' : 'ausente'
+    });
+    
     const { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId, requiereAutorizacion } = req.body;
     const currentUser = req.user;
 
-    console.log('📅 [CREATE EVENT] Datos recibidos:', { titulo, descripcion, fecha, hora, lugar, institutionId, divisionId, requiereAutorizacion });
-    console.log('👤 [CREATE EVENT] Usuario:', currentUser._id, currentUser.role?.nombre);
+    console.log('📅 [CREATE EVENT] Datos extraídos:', { 
+      titulo: titulo || 'FALTANTE', 
+      descripcion: descripcion || 'FALTANTE', 
+      fecha: fecha || 'FALTANTE', 
+      hora: hora || 'FALTANTE', 
+      lugar: lugar || 'vacío', 
+      institutionId: institutionId || 'FALTANTE', 
+      divisionId: divisionId || 'FALTANTE', 
+      requiereAutorizacion: requiereAutorizacion 
+    });
+    console.log('👤 [CREATE EVENT] Usuario:', currentUser?._id || 'NO ENCONTRADO', currentUser?.role?.nombre || 'SIN ROL');
 
     // Verificar que el usuario tiene permisos para crear eventos
     // Para adminaccount y superadmin, usar el rol directo del usuario
@@ -505,10 +521,18 @@ exports.createEvent = async (req, res) => {
     }
 
     // Validar campos requeridos
-    if (!titulo || !descripcion || !fecha || !hora) {
+    const missingFields = [];
+    if (!titulo) missingFields.push('titulo');
+    if (!descripcion) missingFields.push('descripcion');
+    if (!fecha) missingFields.push('fecha');
+    if (!hora) missingFields.push('hora');
+    
+    if (missingFields.length > 0) {
+      console.error('❌ [CREATE EVENT] Campos faltantes:', missingFields);
       return res.status(400).json({
         success: false,
-        message: 'Título, descripción, fecha y hora son requeridos'
+        message: `Campos requeridos faltantes: ${missingFields.join(', ')}`,
+        missingFields: missingFields
       });
     }
 
@@ -539,31 +563,90 @@ exports.createEvent = async (req, res) => {
       }
     } else {
       // Para coordinadores, verificar ActiveAssociation
-      userAssociation = await ActiveAssociation.findOne({ user: currentUser._id });
+      userAssociation = await ActiveAssociation.findOne({ user: currentUser._id })
+        .populate('account')
+        .populate('division');
       
-      if (!userAssociation || !userAssociation.activeShared) {
+      if (!userAssociation) {
+        console.error('❌ [CREATE EVENT] No se encontró ActiveAssociation para el usuario');
         return res.status(403).json({
           success: false,
           message: 'No tienes una asociación activa'
         });
       }
       
-      targetAccount = userAssociation.activeShared.account;
-      targetDivision = divisionId || userAssociation.activeShared.division;
+      console.log('🔍 [CREATE EVENT] ActiveAssociation encontrada:', {
+        account: userAssociation.account?._id || userAssociation.account,
+        division: userAssociation.division?._id || userAssociation.division,
+        activeShared: userAssociation.activeShared
+      });
+      
+      // Usar los campos desnormalizados de ActiveAssociation (account, division)
+      // Estos campos ya están disponibles directamente sin necesidad de populate activeShared
+      targetAccount = userAssociation.account?._id ? userAssociation.account._id.toString() : 
+                     (userAssociation.account?.toString ? userAssociation.account.toString() : String(userAssociation.account));
+      targetDivision = divisionId || (userAssociation.division?._id ? userAssociation.division._id.toString() : 
+                                  (userAssociation.division?.toString ? userAssociation.division.toString() : String(userAssociation.division)));
+      
+      console.log('🔍 [CREATE EVENT] Valores asignados:', {
+        targetAccount: targetAccount,
+        targetDivision: targetDivision,
+        accountType: typeof userAssociation.account,
+        divisionType: typeof userAssociation.division
+      });
     }
 
     if (!targetAccount || !targetDivision) {
+      console.error('❌ [CREATE EVENT] Institución o división faltante:', {
+        targetAccount: targetAccount || 'FALTANTE',
+        targetDivision: targetDivision || 'FALTANTE',
+        effectiveRole,
+        institutionId,
+        divisionId,
+        userAssociation: userAssociation ? 'encontrada' : 'no encontrada'
+      });
       return res.status(400).json({
         success: false,
-        message: 'Institución y división son requeridos'
+        message: 'Institución y división son requeridos',
+        details: {
+          targetAccount: targetAccount || null,
+          targetDivision: targetDivision || null,
+          receivedInstitutionId: institutionId || null,
+          receivedDivisionId: divisionId || null
+        }
       });
     }
 
     // Crear el evento
+    // Normalizar fecha para evitar problemas de zona horaria
+    // IMPORTANTE: Guardar la fecha como medianoche LOCAL, no UTC, para que el día sea correcto
+    let fechaNormalizada;
+    if (typeof fecha === 'string' && fecha.match(/^\d{4}-\d{2}-\d{2}$/)) {
+      // Fecha sin hora, crear como medianoche en zona horaria local
+      // Extraer año, mes y día
+      const [year, month, day] = fecha.split('-').map(Number);
+      // Crear Date en zona horaria local (no UTC)
+      fechaNormalizada = new Date(year, month - 1, day, 0, 0, 0, 0);
+    } else {
+      // Si viene como Date o string con hora, extraer solo la fecha
+      const dateObj = new Date(fecha);
+      const year = dateObj.getFullYear();
+      const month = dateObj.getMonth();
+      const day = dateObj.getDate();
+      // Crear nueva fecha en zona horaria local a medianoche
+      fechaNormalizada = new Date(year, month, day, 0, 0, 0, 0);
+    }
+    
+    console.log('📅 [CREATE EVENT] Fecha original:', fecha);
+    console.log('📅 [CREATE EVENT] Fecha normalizada (local):', fechaNormalizada);
+    console.log('📅 [CREATE EVENT] Fecha ISO:', fechaNormalizada.toISOString());
+    console.log('📅 [CREATE EVENT] Fecha local string:', fechaNormalizada.toLocaleDateString('es-AR'));
+    console.log('📅 [CREATE EVENT] Año/Mes/Día:', fechaNormalizada.getFullYear(), fechaNormalizada.getMonth() + 1, fechaNormalizada.getDate());
+    
     const newEvent = new Event({
       titulo,
       descripcion,
-      fecha: new Date(fecha),
+      fecha: fechaNormalizada,
       hora,
       lugar: lugar || '',
       creador: currentUser._id,
@@ -604,9 +687,12 @@ exports.createEvent = async (req, res) => {
 
   } catch (error) {
     console.error('❌ [CREATE EVENT] Error:', error);
+    console.error('❌ [CREATE EVENT] Stack:', error.stack);
+    console.error('❌ [CREATE EVENT] Body recibido:', req.body);
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor al crear evento'
+      message: 'Error interno del servidor al crear evento',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
   }
 };
@@ -625,27 +711,63 @@ exports.getEventsByInstitution = async (req, res) => {
 
     // Verificar permisos
     const userRole = currentUser.role?.nombre;
+    const allowedRoles = ['adminaccount', 'superadmin', 'coordinador', 'familyadmin', 'familyviewer'];
+    
+    console.log('📅 [GET EVENTS BY INSTITUTION] Rol del usuario:', userRole);
+    
+    if (!allowedRoles.includes(userRole)) {
+      console.log('❌ [GET EVENTS BY INSTITUTION] Rol no permitido:', userRole);
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver eventos'
+      });
+    }
+
     let hasAccess = false;
 
     if (userRole === 'superadmin') {
       hasAccess = true;
+      console.log('✅ [GET EVENTS BY INSTITUTION] Superadmin - acceso permitido');
     } else if (userRole === 'adminaccount') {
       const user = await User.findById(currentUser._id);
       hasAccess = user.account?.toString() === institutionId;
+      console.log('📋 [GET EVENTS BY INSTITUTION] AdminAccount - acceso:', hasAccess);
     } else {
-      // Para coordinadores y otros roles, verificar ActiveAssociation
-      const activeAssociation = await ActiveAssociation.findOne({ user: currentUser._id });
-      if (activeAssociation && activeAssociation.activeShared) {
-        hasAccess = activeAssociation.activeShared.account?.toString() === institutionId;
+      // Para coordinadores, familyadmin y familyviewer, verificar ActiveAssociation o Shared
+      const activeAssociation = await ActiveAssociation.findOne({ 
+        user: currentUser._id,
+        account: institutionId
+      });
+
+      if (activeAssociation) {
+        hasAccess = true;
+        console.log('✅ [GET EVENTS BY INSTITUTION] ActiveAssociation encontrada');
+      } else {
+        // Si no hay ActiveAssociation, verificar Shared directamente
+        const sharedAssociation = await Shared.findOne({
+          user: currentUser._id,
+          account: institutionId,
+          status: { $in: ['active', 'pending'] }
+        });
+        
+        if (sharedAssociation) {
+          hasAccess = true;
+          console.log('✅ [GET EVENTS BY INSTITUTION] Shared association encontrada');
+        } else {
+          console.log('❌ [GET EVENTS BY INSTITUTION] No se encontró asociación para usuario:', currentUser._id, 'institución:', institutionId);
+        }
       }
     }
 
     if (!hasAccess) {
+      console.log('❌ [GET EVENTS BY INSTITUTION] Acceso denegado');
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para ver eventos de esta institución'
       });
     }
+
+    console.log('✅ [GET EVENTS BY INSTITUTION] Acceso permitido, consultando eventos...');
 
     // Construir query
     let query = { institucion: institutionId };
@@ -654,23 +776,86 @@ exports.getEventsByInstitution = async (req, res) => {
       query.division = divisionId;
     }
 
+    // NO filtrar por fecha si no se proporcionan - traer todos los eventos
+    // Solo filtrar si explícitamente se envían fechaInicio y fechaFin
     if (fechaInicio && fechaFin) {
+      // IMPORTANTE: Filtrar por fecha ignorando la hora y zona horaria
+      // Extraer solo la fecha (YYYY-MM-DD) y crear rangos que incluyan todo el día
+      // Usar zona horaria local para evitar problemas de conversión UTC
+      const [startYear, startMonth, startDay] = fechaInicio.split('-').map(Number);
+      const [endYear, endMonth, endDay] = fechaFin.split('-').map(Number);
+      
+      // Crear fechas en zona horaria local (no UTC) para que el día sea correcto
+      const startDate = new Date(startYear, startMonth - 1, startDay, 0, 0, 0, 0);
+      const endDate = new Date(endYear, endMonth - 1, endDay, 23, 59, 59, 999);
+      
       query.fecha = {
-        $gte: new Date(fechaInicio),
-        $lte: new Date(fechaFin)
+        $gte: startDate,
+        $lte: endDate
       };
+      
+      console.log('📅 [GET EVENTS BY INSTITUTION] Filtro de fechas aplicado:', {
+        fechaInicio: fechaInicio,
+        fechaFin: fechaFin,
+        startDate: startDate.toISOString(),
+        startDateLocal: startDate.toLocaleString('es-AR'),
+        endDate: endDate.toISOString(),
+        endDateLocal: endDate.toLocaleString('es-AR')
+      });
+    } else {
+      console.log('📅 [GET EVENTS BY INSTITUTION] Sin filtro de fechas - obteniendo todos los eventos');
     }
 
-    // Obtener eventos
+    // Obtener eventos con paginación
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10000; // Aumentar límite para obtener todos los eventos
+    const skip = (page - 1) * limit;
+
+    console.log('📅 [GET EVENTS BY INSTITUTION] Query:', JSON.stringify(query, null, 2));
+    console.log('📅 [GET EVENTS BY INSTITUTION] Paginación:', { page, limit, skip });
+    
+    // DEBUG: Buscar TODOS los eventos sin filtros de fecha para verificar
+    const allEventsDebug = await Event.find({
+      institucion: institutionId,
+      ...(divisionId && { division: divisionId })
+    }).select('_id titulo fecha division').lean();
+    
+    console.log('📅 [GET EVENTS BY INSTITUTION] DEBUG - TODOS los eventos (sin filtros de fecha):', allEventsDebug.length);
+    console.log('📅 [GET EVENTS BY INSTITUTION] DEBUG - Eventos encontrados:', allEventsDebug.map(e => ({
+      id: e._id,
+      titulo: e.titulo,
+      fecha: e.fecha ? new Date(e.fecha).toISOString() : 'SIN FECHA',
+      fechaLocal: e.fecha ? new Date(e.fecha).toLocaleDateString('es-AR') : 'SIN FECHA',
+      division: e.division?.toString() || 'SIN DIVISIÓN'
+    })));
+    
+    const total = await Event.countDocuments(query);
+    console.log('📅 [GET EVENTS BY INSTITUTION] Total eventos encontrados (con filtros):', total);
+    
     const events = await Event.find(query)
       .populate('creador', 'name email')
       .populate('institucion', 'nombre')
       .populate('division', 'nombre')
-      .sort({ fecha: 1 });
+      .sort({ fecha: 1 })
+      .skip(skip)
+      .limit(limit);
+
+    console.log('📅 [GET EVENTS BY INSTITUTION] Eventos devueltos:', events.length);
+    console.log('📅 [GET EVENTS BY INSTITUTION] Fechas de eventos devueltos:', events.map(e => ({
+      id: e._id,
+      titulo: e.titulo,
+      fecha: e.fecha ? e.fecha.toISOString() : 'SIN FECHA',
+      fechaLocal: e.fecha ? e.fecha.toLocaleDateString('es-AR') : 'SIN FECHA'
+    })));
 
     res.json({
       success: true,
-      data: events
+      data: {
+        events: events,
+        total: total,
+        page: page,
+        limit: limit
+      }
     });
 
   } catch (error) {
@@ -707,14 +892,21 @@ exports.authorizeEvent = async (req, res) => {
     const association = await Shared.findOne({
       user: currentUser._id,
       student: studentId,
-      status: 'active',
-      'role.nombre': 'familyadmin'
-    });
+      status: 'active'
+    }).populate('role');
 
     if (!association) {
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para autorizar eventos de este estudiante'
+      });
+    }
+
+    // Verificar que el rol es familyadmin
+    if (association.role?.nombre !== 'familyadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los tutores principales pueden autorizar eventos'
       });
     }
 
@@ -943,7 +1135,8 @@ exports.getEventAuthorizations = async (req, res) => {
     const { eventId } = req.params;
     const currentUser = req.user;
 
-    console.log('📅 [GET EVENT AUTHORIZATIONS] Evento:', eventId);
+    console.log('📋 [GET EVENT AUTHORIZATIONS] Evento:', eventId);
+    console.log('👤 [GET EVENT AUTHORIZATIONS] Usuario:', currentUser._id, currentUser.role?.nombre);
 
     // Verificar permisos
     const userRole = currentUser.role?.nombre;
@@ -954,22 +1147,176 @@ exports.getEventAuthorizations = async (req, res) => {
       });
     }
 
-    // Obtener autorizaciones
+    // Verificar que el evento existe
+    const event = await Event.findById(eventId)
+      .populate('institucion', 'nombre')
+      .populate('division', 'nombre');
+
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: 'Evento no encontrado'
+      });
+    }
+
+    console.log('📋 [GET EVENT AUTHORIZATIONS] Evento encontrado:', event.titulo);
+    console.log('📋 [GET EVENT AUTHORIZATIONS] Institución:', event.institucion?._id);
+    console.log('📋 [GET EVENT AUTHORIZATIONS] División:', event.division?._id);
+
+    // Verificar acceso al evento según el rol
+    let userAssociation = null;
+    let divisionId = null;
+
+    if (userRole === 'coordinador') {
+      // Para coordinadores, usar ActiveAssociation
+      userAssociation = await ActiveAssociation.findOne({ user: currentUser._id })
+        .populate('account')
+        .populate('division');
+
+      if (!userAssociation) {
+        console.log('📋 [GET EVENT AUTHORIZATIONS] No se encontró ActiveAssociation');
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes una asociación activa'
+        });
+      }
+
+      // Verificar que el evento pertenece a la institución del coordinador
+      if (userAssociation.account?._id?.toString() !== event.institucion?._id?.toString()) {
+        console.log('📋 [GET EVENT AUTHORIZATIONS] El evento no pertenece a la institución del coordinador');
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes acceso a este evento'
+        });
+      }
+
+      divisionId = userAssociation.division?._id || event.division?._id;
+      console.log('📋 [GET EVENT AUTHORIZATIONS] División del coordinador:', divisionId);
+    } else if (userRole === 'adminaccount') {
+      // Para adminaccount, verificar que el evento pertenece a su cuenta
+      const user = await User.findById(currentUser._id);
+      if (user.account?.toString() !== event.institucion?._id?.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes acceso a este evento'
+        });
+      }
+      divisionId = event.division?._id;
+    } else {
+      // Para superadmin, usar la división del evento
+      divisionId = event.division?._id;
+    }
+
+    // Obtener todas las autorizaciones del evento
     const authorizations = await EventAuthorization.find({ event: eventId })
-      .populate('student', 'nombre apellido email')
+      .populate('student', 'nombre apellido')
       .populate('familyadmin', 'name email')
-      .populate('event', 'titulo fecha');
+      .sort({ createdAt: 1 });
+
+    console.log('📋 [GET EVENT AUTHORIZATIONS] Autorizaciones encontradas:', authorizations.length);
+
+    // Obtener todos los estudiantes de la división
+    let allStudents = [];
+    if (divisionId) {
+      allStudents = await Student.find({ 
+        division: divisionId,
+        activo: true 
+      }).select('nombre apellido');
+      console.log('📋 [GET EVENT AUTHORIZATIONS] Estudiantes en división:', allStudents.length);
+    } else {
+      console.log('📋 [GET EVENT AUTHORIZATIONS] No hay división específica');
+    }
+
+    // Separar estudiantes con y sin autorización
+    const studentsWithAuth = authorizations.map(auth => auth.student?._id?.toString()).filter(Boolean);
+    const studentsWithoutAuth = allStudents.filter(student => 
+      !studentsWithAuth.includes(student._id.toString())
+    );
+
+    // Crear lista completa de estudiantes pendientes (todos los de la división)
+    const allStudentsForPending = allStudents.map(student => {
+      const existingAuth = authorizations.find(auth => 
+        auth.student?._id?.toString() === student._id.toString()
+      );
+      
+      return {
+        _id: student._id,
+        nombre: student.nombre,
+        apellido: student.apellido,
+        hasResponse: !!existingAuth,
+        autorizado: existingAuth?.autorizado || false
+      };
+    });
+
+    // Calcular resumen
+    const autorizados = authorizations.filter(auth => auth.autorizado).length;
+    const rechazados = authorizations.filter(auth => !auth.autorizado).length;
+    const sinRespuesta = allStudents.length - authorizations.length;
+    const pendientes = allStudents.length - autorizados;
+
+    console.log('📋 [GET EVENT AUTHORIZATIONS] Resumen:', {
+      total: allStudents.length,
+      autorizados,
+      rechazados,
+      sinRespuesta,
+      pendientes
+    });
 
     res.json({
       success: true,
-      data: authorizations
+      data: {
+        event: {
+          _id: event._id,
+          titulo: event.titulo,
+          fecha: event.fecha,
+          hora: event.hora,
+          institucion: event.institucion ? {
+            _id: event.institucion._id,
+            nombre: event.institucion.nombre
+          } : null,
+          division: event.division ? {
+            _id: event.division._id,
+            nombre: event.division.nombre
+          } : null
+        },
+        authorizations: authorizations.map(auth => ({
+          _id: auth._id,
+          student: auth.student ? {
+            _id: auth.student._id,
+            nombre: auth.student.nombre,
+            apellido: auth.student.apellido
+          } : null,
+          familyadmin: auth.familyadmin ? {
+            _id: auth.familyadmin._id,
+            name: auth.familyadmin.name,
+            email: auth.familyadmin.email
+          } : null,
+          autorizado: auth.autorizado,
+          fechaAutorizacion: auth.fechaAutorizacion,
+          comentarios: auth.comentarios
+        })),
+        studentsWithoutAuth: studentsWithoutAuth.map(student => ({
+          _id: student._id,
+          nombre: student.nombre,
+          apellido: student.apellido
+        })),
+        allStudentsPending: allStudentsForPending,
+        summary: {
+          total: allStudents.length,
+          autorizados: autorizados,
+          rechazados: rechazados,
+          sinRespuesta: sinRespuesta,
+          pendientes: pendientes
+        }
+      }
     });
 
   } catch (error) {
     console.error('❌ [GET EVENT AUTHORIZATIONS] Error:', error);
+    console.error('❌ [GET EVENT AUTHORIZATIONS] Stack:', error.stack);
     res.status(500).json({
       success: false,
-      message: 'Error interno del servidor'
+      message: 'Error interno del servidor al obtener autorizaciones'
     });
   }
 };
@@ -982,7 +1329,17 @@ exports.getEventAuthorization = async (req, res) => {
     const { eventId, studentId } = req.params;
     const currentUser = req.user;
 
-    console.log('📅 [GET EVENT AUTHORIZATION] Evento:', eventId, 'Estudiante:', studentId);
+    console.log('🔍 [GET EVENT AUTHORIZATION] Evento:', eventId, 'Estudiante:', studentId);
+    console.log('👤 [GET EVENT AUTHORIZATION] Usuario:', currentUser._id, currentUser.role?.nombre);
+
+    // Verificar que el evento existe
+    const event = await Event.findById(eventId);
+    if (!event) {
+      return res.status(404).json({
+        success: false,
+        message: 'Evento no encontrado'
+      });
+    }
 
     // Verificar permisos
     const userRole = currentUser.role?.nombre;
@@ -996,40 +1353,53 @@ exports.getEventAuthorization = async (req, res) => {
         user: currentUser._id,
         student: studentId,
         status: 'active'
-      });
-      hasAccess = !!association;
+      }).populate('role');
+      
+      if (association && association.role?.nombre === 'familyadmin') {
+        hasAccess = true;
+      }
     }
 
     if (!hasAccess) {
+      console.log('❌ [GET EVENT AUTHORIZATION] Sin acceso');
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para ver esta autorización'
       });
     }
 
-    // Obtener autorización
+    // Obtener autorización (puede ser null si no existe)
     const authorization = await EventAuthorization.findOne({
       event: eventId,
       student: studentId
-    })
-      .populate('student', 'nombre apellido')
-      .populate('familyadmin', 'name email')
-      .populate('event', 'titulo fecha');
+    });
 
-    if (!authorization) {
-      return res.status(404).json({
-        success: false,
-        message: 'Autorización no encontrada'
-      });
+    console.log('🔍 [GET EVENT AUTHORIZATION] Autorización encontrada:', !!authorization);
+    if (authorization) {
+      console.log('🔍 [GET EVENT AUTHORIZATION] Estado:', authorization.autorizado);
     }
 
+    // Siempre devolver 200 con la estructura esperada, incluso si no hay autorización
     res.json({
       success: true,
-      data: authorization
+      data: {
+        event: {
+          _id: event._id,
+          titulo: event.titulo,
+          requiereAutorizacion: event.requiereAutorizacion
+        },
+        authorization: authorization ? {
+          _id: authorization._id,
+          autorizado: authorization.autorizado,
+          fechaAutorizacion: authorization.fechaAutorizacion,
+          comentarios: authorization.comentarios
+        } : null
+      }
     });
 
   } catch (error) {
     console.error('❌ [GET EVENT AUTHORIZATION] Error:', error);
+    console.error('❌ [GET EVENT AUTHORIZATION] Stack:', error.stack);
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor'

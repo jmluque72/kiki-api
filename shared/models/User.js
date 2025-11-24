@@ -164,30 +164,61 @@ userSchema.pre('save', async function(next) {
 });
 
 // Método para comparar contraseñas (soporta contraseñas con y sin PEPPER)
+// SIEMPRE intenta ambas opciones para máxima compatibilidad
 userSchema.methods.comparePassword = async function(candidatePassword) {
   if (!this.password) {
+    console.log(`🔑 [PASSWORD COMPARE] Usuario ${this.email} sin contraseña`);
     return false; // Usuario sin contraseña (ej: Cognito)
   }
   
-  // Si la contraseña almacenada usa PEPPER, comparar con PEPPER
-  if (this.passwordUsesPepper && config.PEPPER) {
-    const passwordWithPepper = applyPepper(candidatePassword);
-    const isValid = await bcrypt.compare(passwordWithPepper, this.password);
-    
-    // Si es válida, retornar true (y se migrará automáticamente en el login)
-    return isValid;
-  }
+  console.log(`🔑 [PASSWORD COMPARE] Comparando contraseña para: ${this.email}`);
+  console.log(`🔑 [PASSWORD COMPARE] passwordUsesPepper: ${this.passwordUsesPepper}`);
+  console.log(`🔑 [PASSWORD COMPARE] PEPPER configurado: ${!!config.PEPPER}`);
+  console.log(`🔑 [PASSWORD COMPARE] Longitud contraseña candidata: ${candidatePassword?.length || 0}`);
   
-  // Si no usa PEPPER, intentar comparación normal (compatibilidad con contraseñas antiguas)
+  // SIEMPRE intentar ambas opciones: con y sin PEPPER
+  // Esto asegura compatibilidad con todas las contraseñas, independientemente de cómo estén guardadas
+  
+  // 1. Intentar sin PEPPER primero (contraseñas antiguas)
+  console.log(`🔑 [PASSWORD COMPARE] Intentando sin PEPPER...`);
   const isValidWithoutPepper = await bcrypt.compare(candidatePassword, this.password);
+  console.log(`🔑 [PASSWORD COMPARE] Resultado sin PEPPER: ${isValidWithoutPepper}`);
   
-  // Si es válida y tenemos PEPPER configurado, marcar para migración
-  if (isValidWithoutPepper && config.PEPPER && !this.passwordUsesPepper) {
-    // La migración se hará automáticamente en el login
+  if (isValidWithoutPepper) {
+    // Si funciona sin PEPPER y tenemos PEPPER configurado, marcar para migración
+    if (config.PEPPER && this.passwordUsesPepper !== true) {
+      console.log(`🔑 [PASSWORD] Contraseña válida sin PEPPER para ${this.email}, se migrará automáticamente`);
+    }
+    console.log(`✅ [PASSWORD COMPARE] Contraseña válida (sin PEPPER) para ${this.email}`);
     return true;
   }
   
-  return isValidWithoutPepper;
+  // 2. Si no funcionó sin PEPPER, intentar con PEPPER (si está configurado)
+  if (config.PEPPER) {
+    console.log(`🔑 [PASSWORD COMPARE] Intentando con PEPPER...`);
+    const passwordWithPepper = applyPepper(candidatePassword);
+    console.log(`🔑 [PASSWORD COMPARE] Longitud contraseña con PEPPER: ${passwordWithPepper.length}`);
+    const isValidWithPepper = await bcrypt.compare(passwordWithPepper, this.password);
+    console.log(`🔑 [PASSWORD COMPARE] Resultado con PEPPER: ${isValidWithPepper}`);
+    
+    if (isValidWithPepper) {
+      // Si funciona con PEPPER pero no está marcado, actualizar el flag
+      if (this.passwordUsesPepper !== true) {
+        console.log(`🔑 [PASSWORD] Contraseña válida con PEPPER para ${this.email}, actualizando flag`);
+        await this.constructor.updateOne(
+          { _id: this._id },
+          { passwordUsesPepper: true }
+        );
+        this.passwordUsesPepper = true;
+      }
+      console.log(`✅ [PASSWORD COMPARE] Contraseña válida (con PEPPER) para ${this.email}`);
+      return true;
+    }
+  }
+  
+  // Si ninguna de las dos opciones funcionó, la contraseña es inválida
+  console.log(`❌ [PASSWORD COMPARE] Contraseña inválida para ${this.email} (ambas opciones fallaron)`);
+  return false;
 };
 
 // Método para migrar contraseña a PEPPER (llamado automáticamente después de login exitoso)

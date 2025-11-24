@@ -5,7 +5,8 @@ const path = require('path');
 const fs = require('fs');
 const usersController = require('../controllers/users.controller');
 const { authenticateToken, setUserInstitution } = require('../middleware/mongoAuth');
-const { loginRateLimit, registerRateLimit } = require('../middleware/rateLimiter');
+// Rate limiting DESACTIVADO
+// const { loginRateLimit, registerRateLimit } = require('../middleware/rateLimiter');
 
 // Configuración de multer para avatares
 const storage = multer.diskStorage({
@@ -37,10 +38,10 @@ const upload = multer({
 });
 
 // Rutas de autenticación
-router.post('/users/login', loginRateLimit, usersController.login);
+router.post('/users/login', /* loginRateLimit, */ usersController.login);
 router.post('/auth/refresh', usersController.refreshToken);
 router.post('/auth/revoke', usersController.revokeToken);
-router.post('/auth/cognito-login', loginRateLimit, usersController.cognitoLogin);
+router.post('/auth/cognito-login', /* loginRateLimit, */ usersController.cognitoLogin);
 router.get('/auth/verify', authenticateToken, usersController.verifyAuth);
 router.get('/auth/config', usersController.getAuthConfig);
 
@@ -52,7 +53,7 @@ router.put('/users/avatar', authenticateToken, upload.single('avatar'), usersCon
 // Rutas de usuarios
 router.get('/users', authenticateToken, setUserInstitution, usersController.getUsers);
 router.get('/api/users', authenticateToken, setUserInstitution, usersController.getUsers);
-router.post('/users/register-mobile', registerRateLimit, usersController.registerMobile);
+router.post('/users/register-mobile', /* registerRateLimit, */ usersController.registerMobile);
 
 // Rutas de asociaciones
 router.put('/users/approve-association/:associationId', authenticateToken, usersController.approveAssociation);

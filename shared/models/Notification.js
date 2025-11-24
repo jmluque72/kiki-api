@@ -82,6 +82,8 @@ notificationSchema.index({ sender: 1 });
 notificationSchema.index({ account: 1 });
 notificationSchema.index({ division: 1 });
 notificationSchema.index({ recipients: 1 });
+notificationSchema.index({ 'readBy.user': 1 }); // Índice para optimizar consultas de usuarios que leyeron
+notificationSchema.index({ recipients: 1, account: 1 }); // Índice compuesto para consultas frecuentes
 notificationSchema.index({ sentAt: -1 });
 notificationSchema.index({ status: 1 });
 notificationSchema.index({ type: 1 });
