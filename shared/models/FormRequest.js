@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const formQuestionSchema = new mongoose.Schema({
   tipo: {
     type: String,
-    enum: ['texto', 'opcion_multiple', 'checkbox', 'imagen', 'archivo'],
+    enum: ['texto', 'opcion_multiple', 'checkbox', 'imagen'],
     required: [true, 'El tipo de pregunta es obligatorio']
   },
   texto: {

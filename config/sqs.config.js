@@ -13,8 +13,12 @@ const sqsClient = new SQSClient({
 // URL de la cola SQS para emails
 const EMAIL_QUEUE_URL = process.env.SQS_EMAIL_QUEUE_URL;
 
+// URL de la cola SQS para push notifications
+const PUSH_QUEUE_URL = process.env.SQS_PUSH_QUEUE_URL;
+
 module.exports = {
   sqsClient,
-  EMAIL_QUEUE_URL
+  EMAIL_QUEUE_URL,
+  PUSH_QUEUE_URL
 };
 

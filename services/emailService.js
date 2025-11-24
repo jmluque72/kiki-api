@@ -19,8 +19,10 @@ class EmailService {
 
   // Función helper para generar badges de App Store y Google Play (URLs públicas)
   getAppStoreBadgesHTML() {
-    const appleBadgeUrl = 'https://drive.google.com/uc?export=download&id=1iHl9TB11buK7j6eh8G-W48L82X6FbELi';
-    const googlePlayBadgeUrl = 'https://drive.google.com/uc?export=download&id=1Vmbu4esRamKgTsiWK_G9xLGz1oKOJdkz';
+    // Usar URLs públicas permanentes de Google Drive (formato que funciona en emails)
+    // Formato: https://drive.google.com/uc?export=view&id=FILE_ID
+    const appleBadgeUrl = 'https://drive.google.com/uc?export=view&id=1iHl9TB11buK7j6eh8G-W48L82X6FbELi';
+    const googlePlayBadgeUrl = 'https://drive.google.com/uc?export=view&id=1Vmbu4esRamKgTsiWK_G9xLGz1oKOJdkz';
     
     return `
       <div style="text-align: center; margin: 30px 0;">
@@ -44,7 +46,9 @@ class EmailService {
 
   // Template base moderno con header de KIKI (formato unificado)
   getBaseTemplate(content, title = 'KIKI') {
-    const logoUrl = 'https://drive.google.com/uc?export=download&id=1jPsauBej_P9NnG57YnrpnFz50UZQftpz';
+    // Usar URL pública permanente de Google Drive (formato que funciona en emails)
+    // Formato: https://drive.google.com/uc?export=view&id=FILE_ID
+    const logoUrl = 'https://drive.google.com/uc?export=view&id=1jPsauBej_P9NnG57YnrpnFz50UZQftpz';
     const logoHTML = `
       <div style="text-align: center; margin-bottom: 20px; padding: 20px 0;">
         <img src="${logoUrl}" alt="Kiki Logo" style="max-width: 200px; height: auto; margin: 0 auto; display: block;">
@@ -264,22 +268,7 @@ class EmailService {
           </p>
         </div>
         
-        <div style="text-align: center; margin: 30px 0;">
-          <div style="margin-bottom: 15px;">
-            <a href="https://apps.apple.com/ar/app/id1494945181" 
-               target="_blank"
-               style="display: inline-block; margin: 0 10px; text-decoration: none; background-color: #000; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 14px; font-weight: bold;">
-              📱 Download on the App Store
-            </a>
-          </div>
-          <div>
-            <a href="https://play.google.com/store/apps/details?id=com.kikiapp.katter" 
-               target="_blank"
-               style="display: inline-block; margin: 0 10px; text-decoration: none; background-color: #000; color: #fff; padding: 10px 20px; border-radius: 8px; font-size: 14px; font-weight: bold;">
-              📱 Get it on Google Play
-            </a>
-          </div>
-        </div>
+        ${this.getAppStoreBadgesHTML()}
       `;
     }
 

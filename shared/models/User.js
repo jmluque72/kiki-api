@@ -169,25 +169,42 @@ userSchema.methods.comparePassword = async function(candidatePassword) {
     return false; // Usuario sin contraseña (ej: Cognito)
   }
   
-  // Si la contraseña almacenada usa PEPPER, comparar con PEPPER
-  if (this.passwordUsesPepper && config.PEPPER) {
+  // Si está explícitamente marcado que usa PEPPER, solo comparar con PEPPER
+  if (this.passwordUsesPepper === true && config.PEPPER) {
     const passwordWithPepper = applyPepper(candidatePassword);
-    const isValid = await bcrypt.compare(passwordWithPepper, this.password);
+    return await bcrypt.compare(passwordWithPepper, this.password);
+  }
+  
+  // Si está explícitamente marcado que NO usa PEPPER, solo comparar sin PEPPER
+  if (this.passwordUsesPepper === false || (this.passwordUsesPepper === undefined && !config.PEPPER)) {
+    return await bcrypt.compare(candidatePassword, this.password);
+  }
+  
+  // Si no está claro (passwordUsesPepper es undefined/null y PEPPER está configurado),
+  // intentar ambas opciones para compatibilidad
+  if (config.PEPPER && (this.passwordUsesPepper === undefined || this.passwordUsesPepper === null)) {
+    // Intentar primero sin PEPPER (para usuarios antiguos)
+    const isValidWithoutPepper = await bcrypt.compare(candidatePassword, this.password);
+    if (isValidWithoutPepper) {
+      return true; // La migración se hará automáticamente en el login
+    }
     
-    // Si es válida, retornar true (y se migrará automáticamente en el login)
-    return isValid;
+    // Si falla, intentar con PEPPER (por si fue hasheada con PEPPER pero no está marcado)
+    const passwordWithPepper = applyPepper(candidatePassword);
+    const isValidWithPepper = await bcrypt.compare(passwordWithPepper, this.password);
+    
+    if (isValidWithPepper) {
+      // Marcar que usa PEPPER para futuras comparaciones
+      this.passwordUsesPepper = true;
+      await this.save();
+      return true;
+    }
+    
+    return false;
   }
   
-  // Si no usa PEPPER, intentar comparación normal (compatibilidad con contraseñas antiguas)
-  const isValidWithoutPepper = await bcrypt.compare(candidatePassword, this.password);
-  
-  // Si es válida y tenemos PEPPER configurado, marcar para migración
-  if (isValidWithoutPepper && config.PEPPER && !this.passwordUsesPepper) {
-    // La migración se hará automáticamente en el login
-    return true;
-  }
-  
-  return isValidWithoutPepper;
+  // Fallback: comparación normal
+  return await bcrypt.compare(candidatePassword, this.password);
 };
 
 // Método para migrar contraseña a PEPPER (llamado automáticamente después de login exitoso)

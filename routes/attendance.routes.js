@@ -21,15 +21,8 @@ router.get('/asistencia/by-date', authenticateToken, attendanceController.getAsi
 router.post('/asistencia/retirada', authenticateToken, attendanceController.saveRetirada);
 router.get('/asistencia/student-attendance', authenticateToken, attendanceController.getStudentAttendance);
 
-// Rutas del backoffice
-router.get('/backoffice/asistencias', authenticateToken, setUserInstitution, attendanceController.getBackofficeAsistencias);
-router.get('/backoffice/asistencias/calendar', authenticateToken, setUserInstitution, attendanceController.getCalendarAsistencias);
-router.get('/backoffice/asistencias/day/:fecha', authenticateToken, setUserInstitution, attendanceController.getDayAsistencias);
-router.post('/backoffice/asistencias', authenticateToken, setUserInstitution, attendanceController.createBackofficeAsistencia);
-router.put('/backoffice/asistencias/:asistenciaId', authenticateToken, setUserInstitution, attendanceController.updateBackofficeAsistencia);
-router.delete('/backoffice/asistencias/:asistenciaId', authenticateToken, setUserInstitution, attendanceController.deleteBackofficeAsistencia);
-router.get('/backoffice/asistencias/stats', authenticateToken, setUserInstitution, attendanceController.getAttendanceStats);
-router.get('/backoffice/asistencias/export', authenticateToken, setUserInstitution, attendanceController.exportAsistencias);
+// Rutas del backoffice - MOVIDAS a backoffice.routes.js para evitar duplicados
+// Estas rutas ahora están en routes/backoffice.routes.js
 
 module.exports = router;
 

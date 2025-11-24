@@ -5,7 +5,8 @@ const path = require('path');
 const fs = require('fs');
 const usersController = require('../controllers/users.controller');
 const { authenticateToken, setUserInstitution } = require('../middleware/mongoAuth');
-const { loginRateLimit, registerRateLimit } = require('../middleware/rateLimiter');
+// Rate limiting deshabilitado
+const { validateObjectId } = require('../middleware/security');
 
 // Configuración de multer para avatares
 const storage = multer.diskStorage({
@@ -37,10 +38,10 @@ const upload = multer({
 });
 
 // Rutas de autenticación
-router.post('/users/login', loginRateLimit, usersController.login);
+router.post('/users/login', usersController.login);
 router.post('/auth/refresh', usersController.refreshToken);
 router.post('/auth/revoke', usersController.revokeToken);
-router.post('/auth/cognito-login', loginRateLimit, usersController.cognitoLogin);
+router.post('/auth/cognito-login', usersController.cognitoLogin);
 router.get('/auth/verify', authenticateToken, usersController.verifyAuth);
 router.get('/auth/config', usersController.getAuthConfig);
 
@@ -52,11 +53,11 @@ router.put('/users/avatar', authenticateToken, upload.single('avatar'), usersCon
 // Rutas de usuarios
 router.get('/users', authenticateToken, setUserInstitution, usersController.getUsers);
 router.get('/api/users', authenticateToken, setUserInstitution, usersController.getUsers);
-router.post('/users/register-mobile', registerRateLimit, usersController.registerMobile);
+router.post('/users/register-mobile', usersController.registerMobile);
 
 // Rutas de asociaciones
-router.put('/users/approve-association/:associationId', authenticateToken, usersController.approveAssociation);
-router.put('/users/reject-association/:associationId', authenticateToken, usersController.rejectAssociation);
+router.put('/users/approve-association/:associationId', authenticateToken, validateObjectId('associationId'), usersController.approveAssociation);
+router.put('/users/reject-association/:associationId', authenticateToken, validateObjectId('associationId'), usersController.rejectAssociation);
 router.get('/users/pending-associations', authenticateToken, setUserInstitution, usersController.getPendingAssociations);
 
 // Rutas de 2FA

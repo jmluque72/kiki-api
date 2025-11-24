@@ -331,8 +331,52 @@ exports.uploadStudentsExcel = async (req, res) => {
     const workbook = XLSX.readFile(req.file.path);
     const sheetName = workbook.SheetNames[0];
     const worksheet = workbook.Sheets[sheetName];
-    const data = XLSX.utils.sheet_to_json(worksheet);
-    console.log('📊 Datos extraídos:', data.length, 'filas');
+    
+    // Normalizar nombres de columnas (case-insensitive, sin espacios)
+    const rawData = XLSX.utils.sheet_to_json(worksheet, { raw: false });
+    console.log('📊 Datos extraídos (raw):', rawData.length, 'filas');
+    
+    // Normalizar las claves de las filas
+    const data = rawData.map((row, index) => {
+      const normalizedRow = {};
+      Object.keys(row).forEach(key => {
+        const normalizedKey = key.trim().toLowerCase()
+          .replace(/\s+/g, '')
+          .replace(/á/g, 'a').replace(/é/g, 'e').replace(/í/g, 'i')
+          .replace(/ó/g, 'o').replace(/ú/g, 'u');
+        normalizedRow[normalizedKey] = row[key];
+      });
+      
+      // Mapear variaciones comunes de nombres de columnas
+      const columnMap = {
+        'nombre': ['nombre', 'name', 'nombres'],
+        'apellido': ['apellido', 'lastname', 'apellidos', 'surname'],
+        'dni': ['dni', 'documento', 'document', 'cedula'],
+        'email': ['email', 'correo', 'mail'],
+        'dnitutor': ['dnitutor', 'dni_tutor', 'dni tutor', 'documentotutor', 'documento_tutor'],
+        'nombretutor': ['nombretutor', 'nombre_tutor', 'nombre tutor', 'nametutor', 'name_tutor'],
+        'emailtutor': ['emailtutor', 'email_tutor', 'email tutor', 'correotutor', 'correo_tutor']
+      };
+      
+      const finalRow = {};
+      Object.keys(columnMap).forEach(targetKey => {
+        for (const sourceKey of columnMap[targetKey]) {
+          if (normalizedRow[sourceKey] !== undefined && normalizedRow[sourceKey] !== null && normalizedRow[sourceKey] !== '') {
+            finalRow[targetKey] = normalizedRow[sourceKey];
+            break;
+          }
+        }
+      });
+      
+      if (index < 3) {
+        console.log(`📋 Fila ${index + 2} - Original:`, row);
+        console.log(`📋 Fila ${index + 2} - Normalizada:`, finalRow);
+      }
+      
+      return finalRow;
+    });
+    
+    console.log('📊 Datos normalizados:', data.length, 'filas');
 
     const results = {
       success: 0,
@@ -345,45 +389,66 @@ exports.uploadStudentsExcel = async (req, res) => {
       const rowNumber = i + 2;
 
       try {
-        const isRowEmpty = !row.nombre && !row.apellido && !row.dni && !row.dniTutor && !row.nombreTutor && !row.emailTutor;
+        // Verificar si la fila está vacía usando las claves normalizadas
+        const isRowEmpty = !row.nombre && !row.apellido && !row.dni && !row.dnitutor && !row.nombretutor && !row.emailtutor;
         if (isRowEmpty) {
+          console.log(`⏭️ Fila ${rowNumber} vacía, saltando`);
           continue;
         }
+        
+        // Mapear a los nombres esperados por el código
+        const mappedRow = {
+          nombre: row.nombre,
+          apellido: row.apellido,
+          dni: row.dni,
+          email: row.email,
+          dniTutor: row.dnitutor,
+          nombreTutor: row.nombretutor,
+          emailTutor: row.emailtutor
+        };
+        
+        console.log(`🔄 Procesando fila ${rowNumber}:`, mappedRow);
 
-        if (!row.nombre || !row.apellido || !row.dni) {
+        if (!mappedRow.nombre || !mappedRow.apellido || !mappedRow.dni) {
           const missingFields = [];
-          if (!row.nombre) missingFields.push('nombre');
-          if (!row.apellido) missingFields.push('apellido');
-          if (!row.dni) missingFields.push('dni');
+          if (!mappedRow.nombre) missingFields.push('nombre');
+          if (!mappedRow.apellido) missingFields.push('apellido');
+          if (!mappedRow.dni) missingFields.push('dni');
           
+          const errorMsg = `Faltan campos requeridos del alumno: ${missingFields.join(', ')}`;
+          console.log(`❌ Fila ${rowNumber}: ${errorMsg}`);
           results.errors.push({
             row: rowNumber,
-            error: `Faltan campos requeridos del alumno: ${missingFields.join(', ')}`
+            error: errorMsg
           });
           continue;
         }
 
-        if (!row.dniTutor || !row.nombreTutor || !row.emailTutor) {
+        if (!mappedRow.dniTutor || !mappedRow.nombreTutor || !mappedRow.emailTutor) {
           const missingFields = [];
-          if (!row.dniTutor) missingFields.push('dniTutor');
-          if (!row.nombreTutor) missingFields.push('nombreTutor');
-          if (!row.emailTutor) missingFields.push('emailTutor');
+          if (!mappedRow.dniTutor) missingFields.push('dniTutor');
+          if (!mappedRow.nombreTutor) missingFields.push('nombreTutor');
+          if (!mappedRow.emailTutor) missingFields.push('emailTutor');
           
+          const errorMsg = `Faltan campos requeridos del tutor: ${missingFields.join(', ')}`;
+          console.log(`❌ Fila ${rowNumber}: ${errorMsg}`);
           results.errors.push({
             row: rowNumber,
-            error: `Faltan campos requeridos del tutor: ${missingFields.join(', ')}`
+            error: errorMsg
           });
           continue;
         }
 
         const existingStudent = await Student.findOne({
-          dni: String(row.dni).trim()
+          dni: String(mappedRow.dni).trim()
         });
 
         if (existingStudent) {
+          const errorMsg = `Alumno ya existe con DNI ${String(mappedRow.dni).trim()}`;
+          console.log(`❌ Fila ${rowNumber}: ${errorMsg}`);
           results.errors.push({
             row: rowNumber,
-            error: `Alumno ya existe con DNI ${String(row.dni).trim()}`
+            error: errorMsg
           });
           continue;
         }
@@ -391,8 +456,8 @@ exports.uploadStudentsExcel = async (req, res) => {
         let tutorUser = null;
         const existingTutor = await User.findOne({
           $or: [
-            { email: String(row.emailTutor).toLowerCase().trim() },
-            { dni: String(row.dniTutor).trim() }
+            { email: String(mappedRow.emailTutor).toLowerCase().trim() },
+            { dni: String(mappedRow.dniTutor).trim() }
           ]
         });
 
@@ -410,16 +475,18 @@ exports.uploadStudentsExcel = async (req, res) => {
 
           const tutorPassword = generateRandomPassword(12);
           const tutorData = {
-            name: String(row.nombreTutor).trim(),
-            email: String(row.emailTutor).toLowerCase().trim(),
+            name: String(mappedRow.nombreTutor).trim(),
+            email: String(mappedRow.emailTutor).toLowerCase().trim(),
             password: tutorPassword,
             role: tutorRole._id,
             status: 'approved',
-            dni: String(row.dniTutor).trim()
+            dni: String(mappedRow.dniTutor).trim()
           };
 
+          console.log(`👤 Creando tutor para fila ${rowNumber}:`, tutorData.email);
           tutorUser = new User(tutorData);
           await tutorUser.save();
+          console.log(`✅ Tutor creado: ${tutorUser._id}`);
 
           await sendNewUserCreatedEmailToQueue(
             {
@@ -433,18 +500,32 @@ exports.uploadStudentsExcel = async (req, res) => {
         }
 
         const studentData = {
-          nombre: String(row.nombre).trim(),
-          apellido: String(row.apellido).trim(),
-          dni: String(row.dni).trim(),
+          nombre: String(mappedRow.nombre).trim(),
+          apellido: String(mappedRow.apellido).trim(),
+          dni: String(mappedRow.dni).trim(),
           account: accountId,
           division: divisionId,
           year: parseInt(year),
           tutor: tutorUser._id,
           createdBy: userId
         };
+        
+        // Agregar email solo si está presente
+        if (mappedRow.email && String(mappedRow.email).trim()) {
+          const emailValue = String(mappedRow.email).toLowerCase().trim();
+          // Validar formato de email
+          const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+          if (emailRegex.test(emailValue)) {
+            studentData.email = emailValue;
+          } else {
+            console.log(`⚠️ Fila ${rowNumber}: Email inválido, omitiendo: ${emailValue}`);
+          }
+        }
 
+        console.log(`👨‍🎓 Creando estudiante para fila ${rowNumber}:`, studentData.nombre, studentData.apellido);
         const student = new Student(studentData);
         await student.save();
+        console.log(`✅ Estudiante creado: ${student._id}`);
 
         const existingStudentAssociation = await Shared.findOne({
           user: tutorUser._id,
@@ -487,21 +568,44 @@ exports.uploadStudentsExcel = async (req, res) => {
         }
         
         results.success++;
+        console.log(`✅ Fila ${rowNumber} procesada exitosamente`);
 
       } catch (error) {
-        console.log(`❌ Error en fila ${rowNumber}:`, error.message);
+        const errorMsg = error.message || 'Error desconocido';
+        console.error(`❌ Error en fila ${rowNumber}:`, errorMsg);
+        console.error(`❌ Stack trace:`, error.stack);
         results.errors.push({
           row: rowNumber,
-          error: error.message
+          error: errorMsg
         });
       }
     }
 
-    fs.unlinkSync(req.file.path);
+    // Eliminar archivo temporal
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
 
-    res.json({
-      success: true,
-      message: `Carga completada. ${results.success} alumnos cargados exitosamente.`,
+    // Preparar respuesta
+    const hasErrors = results.errors.length > 0;
+    const hasSuccess = results.success > 0;
+    
+    console.log('📊 Resumen de procesamiento:', {
+      total: results.total,
+      success: results.success,
+      errors: results.errors.length,
+      hasErrors,
+      hasSuccess
+    });
+
+    // Si hay errores, devolver status 207 (Multi-Status) o 200 con información de errores
+    const statusCode = hasErrors && !hasSuccess ? 400 : 200;
+    
+    res.status(statusCode).json({
+      success: hasSuccess,
+      message: hasSuccess 
+        ? `Carga completada. ${results.success} alumnos cargados exitosamente${hasErrors ? `, ${results.errors.length} errores` : ''}.`
+        : `No se pudieron cargar alumnos. ${results.errors.length} errores encontrados.`,
       data: results
     });
 
@@ -1060,12 +1164,15 @@ exports.getCoordinatorsByDivision = async (req, res) => {
         path: 'role',
         select: 'nombre descripcion'
       }
-    ]).filter(association => association.user);
+    ]);
+
+    // Filtrar asociaciones que tienen usuario (populate puede retornar null)
+    const filteredAssociations = associations.filter(association => association.user);
 
     res.json({
       success: true,
       data: {
-        coordinadores: associations.map(association => ({
+        coordinadores: filteredAssociations.map(association => ({
           _id: association.user._id,
           nombre: association.user.name,
           email: association.user.email,
@@ -1076,7 +1183,8 @@ exports.getCoordinatorsByDivision = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error obteniendo coordinadores por división:', error);
+    const logger = require('../utils/logger');
+    logger.error('Error obteniendo coordinadores por división', { error: error.message });
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor'

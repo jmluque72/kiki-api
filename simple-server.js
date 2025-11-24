@@ -49,20 +49,14 @@ const LoginMonitorService = require('./services/loginMonitorService');
 const PasswordExpirationService = require('./services/passwordExpirationService');
 const { generateRandomPassword } = require('./config/email.config');
 const { sendInstitutionWelcomeEmailToQueue, sendNewUserCreatedEmailToQueue, sendNotificationEmailToQueue, sendFamilyInvitationNotificationEmailToQueue, sendFamilyInvitationEmailToQueue } = require('./services/sqsEmailService');
+const { sendPushToStudentFamilyToQueue } = require('./services/sqsPushService');
 const emailService = require('./services/emailService');
 const formRequestService = require('./services/formRequestService');
 
 // Importar middleware de autenticación REAL con Cognito
 const { authenticateToken, requireRole, requireAdmin, requireSuperAdmin, setUserInstitution } = require('./middleware/mongoAuth');
 
-// Importar rate limiting
-const { 
-  loginRateLimit, 
-  registerRateLimit, 
-  passwordChangeRateLimit, 
-  generalRateLimit, 
-  sensitiveRateLimit 
-} = require('./middleware/rateLimiter');
+// Rate limiting deshabilitado
 
 // Middleware de institución simplificado (sin Cognito)
 // const { verifyAccountAccess, getAccountFilter, getAccountFilterMultiple, verifyDivisionAccess } = require('./middleware/cognitoInstitution');
@@ -210,6 +204,10 @@ const groupsRoutes = require('./routes/groups.routes');
 const accountsRoutes = require('./routes/accounts.routes');
 // Importar rutas de student actions
 const studentActionsRoutes = require('./routes/studentActions.routes');
+// Importar rutas de push notifications
+const pushRoutes = require('./routes/push.routes');
+// Importar rutas de push notifications administrativas
+const adminPushRoutes = require('./routes/adminPush.routes');
 
 // Configurar multer para subida de archivos
 const storage = multer.diskStorage({
@@ -313,44 +311,79 @@ const uploadExcel = multer({
 
 const app = express();
 
-// Middleware de seguridad
-app.use(helmet());
+// Middleware de seguridad mejorado
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      scriptSrc: ["'self'"],
+      imgSrc: ["'self'", "data:", "https:"],
+    },
+  },
+  crossOriginEmbedderPolicy: false, // Necesario para algunas integraciones
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
+}));
 
-// Rate limiting general
-app.use(generalRateLimit);
+// Rate limiting deshabilitado
 
-// CORS - Configurado para permitir conexiones desde apps móviles
+// Sanitización de inputs para prevenir NoSQL Injection
+const { sanitizeInputs, validateObjectId } = require('./middleware/security');
+app.use(sanitizeInputs);
+
+// CORS - Configurado de forma más restrictiva
 app.use(cors({
   origin: function (origin, callback) {
-    // Permitir requests sin origin (como apps móviles)
-    if (!origin) return callback(null, true);
+    // Permitir requests sin origin en ciertos casos legítimos
+    if (!origin) {
+      // En desarrollo, permitir sin origin
+      if (process.env.NODE_ENV === 'development') {
+        return callback(null, true);
+      }
+      // En producción, permitir sin origin solo para:
+      // - Health checks (AWS ELB, etc.)
+      // - Preflight OPTIONS requests
+      // - Requests internos del servidor
+      // Nota: Esto es necesario porque algunas requests legítimas no tienen origin
+      // (por ejemplo, health checks desde AWS ELB o requests de servidor a servidor)
+      return callback(null, true);
+    }
     
-    // Permitir localhost, IPs locales y dominios de producción
+    // Permitir localhost solo en desarrollo
+    if (process.env.NODE_ENV === 'development') {
+      if (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
+        return callback(null, true);
+      }
+    }
+    
+    // Lista estricta de orígenes permitidos en producción
     const allowedOrigins = [
-      'http://localhost:3000',
-      'http://localhost:5173',
-      'http://localhost:5174',
-      'http://localhost:8080',
-      'http://localhost:8081',
-      'http://127.0.0.1:3000',
-      'http://127.0.0.1:5173',
-      'http://127.0.0.1:5174',
-      'http://127.0.0.1:8080',
-      'http://127.0.0.1:8081',
       'https://backoffice.kiki.com.ar',
-      'http://backoffice.kiki.com.ar',
-      process.env.FRONTEND_URL
+      process.env.FRONTEND_URL,
+      process.env.MOBILE_APP_URL
     ].filter(Boolean);
     
-    if (allowedOrigins.includes(origin) || process.env.NODE_ENV === 'development') {
+    if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      // En producción, rechazar orígenes no permitidos
+      if (process.env.NODE_ENV === 'production') {
+        console.warn(`⚠️ [CORS] Origen no permitido: ${origin}`);
+        callback(new Error('Not allowed by CORS'));
+      } else {
+        // En desarrollo, permitir cualquier origen
+        callback(null, true);
+      }
     }
   },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  maxAge: 86400 // 24 horas
 }));
 
 // Rate limiting general
@@ -734,8 +767,10 @@ app.use((req, res, next) => {
       !req.path.startsWith('/api/documents') &&
       !req.path.startsWith('/api/events/export') &&
       !req.path.startsWith('/api/form-requests') &&
+      !req.path.startsWith('/api/admin/push-notifications') &&
       !req.path.match(/^\/api\/accounts\/[^\/]+\/(config|admin-users)$/)) {
-    // Remover el /api duplicado del inicio, excepto para student-actions, test-actions, debug, documents, events/export, form-requests, accounts config y accounts admin-users
+    // Remover el /api duplicado del inicio, excepto para student-actions, test-actions, debug, documents, events/export, form-requests, admin/push-notifications, accounts config y accounts admin-users
+    // Las rutas de upload se redirigen de /api/upload a /upload
     const newPath = req.path.replace(/^\/api/, '');
     console.log(`🔄 [REDIRECT] Redirigiendo ${req.method} ${req.path} -> ${newPath}`);
     req.url = newPath;
@@ -805,6 +840,10 @@ console.log('🔍 Registrando rutas de grupos...');
 app.use('/', groupsRoutes);
 console.log('✅ Rutas de grupos registradas');
 
+console.log('🔍 Registrando rutas de upload...');
+app.use('/upload', uploadRoutes);
+console.log('✅ Rutas de upload registradas');
+
 console.log('🔍 Registrando rutas de cuentas...');
 app.use('/', accountsRoutes);
 console.log('✅ Rutas de cuentas registradas');
@@ -812,6 +851,27 @@ console.log('✅ Rutas de cuentas registradas');
 console.log('🔍 Registrando rutas de student actions...');
 app.use('/', studentActionsRoutes);
 console.log('✅ Rutas de student actions registradas');
+console.log('🔍 Registrando rutas de push notifications...');
+app.use('/push', pushRoutes);
+console.log('✅ Rutas de push notifications registradas');
+console.log('🔍 Registrando rutas de push notifications administrativas...');
+try {
+  console.log('📋 [DEBUG] adminPushRoutes stack antes de registrar:', adminPushRoutes.stack?.length || 'N/A');
+  app.use('/api/admin/push-notifications', adminPushRoutes);
+  console.log('✅ Rutas de push notifications administrativas registradas');
+  console.log('📋 [DEBUG] Rutas disponibles en adminPushRoutes:', adminPushRoutes.stack?.length || 'N/A');
+  // Log de las rutas registradas
+  if (adminPushRoutes.stack) {
+    adminPushRoutes.stack.forEach((layer, index) => {
+      if (layer.route) {
+        console.log(`   ${index + 1}. ${Object.keys(layer.route.methods).join(', ').toUpperCase()} ${layer.route.path}`);
+      }
+    });
+  }
+} catch (error) {
+  console.error('❌ Error registrando rutas de push notifications administrativas:', error);
+  console.error(error.stack);
+}
 console.log('✅ Rutas de cuentas registradas');
 
 // Conectar a MongoDB
@@ -1109,7 +1169,7 @@ app.post('/debug/test-all-emails', async (req, res) => {
 
 // Código eliminado - movido a controllers/users.controller.js
 /*
-app.post('/users/login', loginRateLimit, async (req, res) => {
+app.post('/users/login', async (req, res) => {
   try {
     const { email, password } = req.body;
     const ipAddress = req.ip || req.connection.remoteAddress;
@@ -1853,7 +1913,7 @@ app.get('/grupos/:id', authenticateToken, setUserInstitution, async (req, res) =
 });
 
 // Actualizar grupo
-app.put('/grupos/:id', authenticateToken, setUserInstitution, async (req, res) => {
+app.put('/grupos/:id', authenticateToken, setUserInstitution, validateObjectId('id'), async (req, res) => {
   try {
     const { nombre, descripcion, activo } = req.body;
 
@@ -1928,7 +1988,7 @@ app.put('/grupos/:id', authenticateToken, setUserInstitution, async (req, res) =
 });
 
 // Eliminar grupo
-app.delete('/grupos/:id', authenticateToken, setUserInstitution, async (req, res) => {
+app.delete('/grupos/:id', authenticateToken, setUserInstitution, validateObjectId('id'), async (req, res) => {
   try {
     const grupo = await Grupo.findById(req.params.id)
       .populate('cuenta', 'nombre razonSocial');
@@ -2838,7 +2898,7 @@ app.put('/accounts/:id', authenticateToken, async (req, res) => {
 });
 
 // Eliminar cuenta
-app.delete('/accounts/:id', authenticateToken, async (req, res) => {
+app.delete('/accounts/:id', authenticateToken, validateObjectId('id'), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -3459,7 +3519,7 @@ app.put('/api/student-actions/:actionId', authenticateToken, setUserInstitution,
 });
 
 // Eliminar acción
-app.delete('/api/student-actions/:actionId', authenticateToken, setUserInstitution, async (req, res) => {
+app.delete('/api/student-actions/:actionId', authenticateToken, setUserInstitution, validateObjectId('actionId'), async (req, res) => {
   try {
     const { actionId } = req.params;
     const currentUser = req.user;
@@ -4318,188 +4378,39 @@ async function getFamilyUsersForStudent(studentId) {
  */
 async function sendPushNotificationToStudentFamily(studentId, notification) {
   try {
-    console.log('🔔 [PUSH SEND] Enviando push notification para estudiante:', studentId);
+    console.log('🔔 [PUSH SEND] Enviando push notification a cola SQS para estudiante:', studentId);
     
-    // Obtener usuarios familiares
-    const familyUsers = await getFamilyUsersForStudent(studentId);
+    const pushNotification = {
+      title: notification.title,
+      message: notification.message,
+      data: {
+        type: 'notification',
+        notificationId: notification._id,
+        studentId: studentId,
+        priority: notification.priority || 'normal'
+      },
+      badge: 1,
+      sound: 'default'
+    };
     
-    if (familyUsers.length === 0) {
-      console.log('🔔 [PUSH SEND] No se encontraron usuarios familiares con dispositivos');
-      return { sent: 0, failed: 0 };
+    const result = await sendPushToStudentFamilyToQueue(studentId, pushNotification);
+    
+    if (result.success) {
+      console.log('🔔 [PUSH SEND] ✅ Push notification enviado a cola SQS - MessageId:', result.messageId);
+      return { sent: 1, failed: 0, queued: true };
+    } else {
+      console.error('🔔 [PUSH SEND] ❌ Error enviando a cola SQS:', result.error);
+      return { sent: 0, failed: 1, queued: false };
     }
-    
-    const pushNotificationService = require('./pushNotificationService');
-    let sent = 0;
-    let failed = 0;
-    
-    // Enviar a cada usuario familiar
-    for (const familyUser of familyUsers) {
-      for (const device of familyUser.devices) {
-        try {
-          const pushNotification = {
-            title: notification.title,
-            message: notification.message,
-            data: {
-              type: 'notification',
-              notificationId: notification._id,
-              studentId: studentId,
-              priority: notification.priority || 'normal'
-            }
-          };
-          
-          await pushNotificationService.sendNotification(
-            device.pushToken,
-            device.platform,
-            pushNotification
-          );
-          
-          // Actualizar último uso del dispositivo
-          await device.updateLastUsed();
-          
-          sent++;
-          console.log('🔔 [PUSH SEND] ✅ Enviado a:', familyUser.user.name, '-', device.platform);
-          
-        } catch (error) {
-          failed++;
-          console.error('🔔 [PUSH SEND] ❌ Error enviando a:', familyUser.user.name, '-', error.message);
-          
-          // Si el token es inválido, desactivar el dispositivo
-          if (error.message.includes('InvalidRegistration') || error.message.includes('NotRegistered')) {
-            await device.deactivate();
-            console.log('🔔 [PUSH SEND] Dispositivo desactivado por token inválido');
-          }
-        }
-      }
-    }
-    
-    console.log('🔔 [PUSH SEND] Resumen - Enviados:', sent, 'Fallidos:', failed);
-    return { sent, failed };
-    
   } catch (error) {
     console.error('❌ [PUSH SEND] Error general:', error);
-    return { sent: 0, failed: 1 };
+    return { sent: 0, failed: 1, queued: false };
   }
 }
 
 // ==================== ENDPOINTS DE PUSH NOTIFICATIONS ====================
-
-// Registrar token de dispositivo para push notifications
-app.post('/push/register-token', authenticateToken, async (req, res) => {
-  try {
-    const { token, platform, deviceId, appVersion, osVersion } = req.body;
-    const userId = req.user.userId;
-
-    console.log('🔔 [PUSH REGISTER] Registrando token para usuario:', userId);
-
-    // Validar campos requeridos
-    if (!token || !platform) {
-      return res.status(400).json({
-        success: false,
-        message: 'Token y platform son requeridos'
-      });
-    }
-
-    // Validar plataforma
-    if (!['ios', 'android'].includes(platform)) {
-      return res.status(400).json({
-        success: false,
-        message: 'Platform debe ser "ios" o "android"'
-      });
-    }
-
-    // Buscar o crear dispositivo
-    const device = await Device.findOneAndUpdate(
-      { 
-        userId: userId,
-        pushToken: token 
-      },
-      {
-        userId: userId,
-        pushToken: token,
-        platform: platform,
-        deviceId: deviceId || null,
-        appVersion: appVersion || null,
-        osVersion: osVersion || null,
-        isActive: true,
-        lastUsed: new Date()
-      },
-      { 
-        upsert: true, 
-        new: true 
-      }
-    );
-
-    console.log('🔔 [PUSH REGISTER] Token registrado exitosamente:', device._id);
-
-    res.json({
-      success: true,
-      message: 'Token registrado exitosamente',
-      data: {
-        deviceId: device._id,
-        platform: device.platform,
-        isActive: device.isActive
-      }
-    });
-
-  } catch (error) {
-    console.error('❌ [PUSH REGISTER] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error registrando token de dispositivo'
-    });
-  }
-});
-
-// Desregistrar token de dispositivo
-app.post('/push/unregister-token', authenticateToken, async (req, res) => {
-  try {
-    const { token } = req.body;
-    const userId = req.user.userId;
-
-    console.log('🔔 [PUSH UNREGISTER] Desregistrando token para usuario:', userId);
-
-    if (!token) {
-      return res.status(400).json({
-        success: false,
-        message: 'Token es requerido'
-      });
-    }
-
-    // Desactivar dispositivo
-    const device = await Device.findOneAndUpdate(
-      { 
-        userId: userId,
-        pushToken: token 
-      },
-      { 
-        isActive: false,
-        lastUsed: new Date()
-      },
-      { new: true }
-    );
-
-    if (!device) {
-      return res.status(404).json({
-        success: false,
-        message: 'Token no encontrado'
-      });
-    }
-
-    console.log('🔔 [PUSH UNREGISTER] Token desregistrado exitosamente');
-
-    res.json({
-      success: true,
-      message: 'Token desregistrado exitosamente'
-    });
-
-  } catch (error) {
-    console.error('❌ [PUSH UNREGISTER] Error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Error desregistrando token de dispositivo'
-    });
-  }
-});
+// NOTA: Las rutas de push notifications han sido movidas a routes/push.routes.js
+// Las rutas están registradas arriba con: app.use('/push', pushRoutes);
 
 // ==================== ENDPOINTS DE NOTIFICACIONES ====================
 // NOTA: Las rutas de notificaciones han sido movidas a routes/notifications.routes.js
@@ -6580,6 +6491,17 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     });
   } else {
     console.log(`⚠️  Worker de emails no iniciado: SQS_EMAIL_QUEUE_URL no está configurada`);
+  }
+
+  // Iniciar worker de push notifications si está configurado
+  if (process.env.SQS_PUSH_QUEUE_URL) {
+    console.log(`🔔 Iniciando worker de push notifications...`);
+    const { startPushWorker } = require('./workers/pushWorker');
+    startPushWorker().catch(error => {
+      console.error('❌ Error iniciando worker de push notifications:', error);
+    });
+  } else {
+    console.log(`⚠️  Worker de push notifications no iniciado: SQS_PUSH_QUEUE_URL no está configurada`);
   }
 });
 

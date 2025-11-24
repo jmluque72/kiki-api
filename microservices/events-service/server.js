@@ -89,8 +89,11 @@ app.get('/api/events', authenticateToken, async (req, res) => {
     console.log('📅 [EVENTS] Usuario:', currentUser._id, currentUser.role?.nombre);
     console.log('📅 [EVENTS] Query params:', { accountId, search, page, limit });
 
-    // Verificar permisos
-    if (!['adminaccount', 'superadmin', 'coordinador'].includes(currentUser.role?.nombre)) {
+    // Verificar permisos por rol
+    const roleName = currentUser.role?.nombre;
+    const allowedRoles = ['adminaccount', 'superadmin', 'coordinador', 'familyadmin', 'familyviewer'];
+    
+    if (!allowedRoles.includes(roleName)) {
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para ver eventos'
@@ -474,7 +477,10 @@ app.get('/api/events/institution/:institutionId', authenticateToken, async (req,
     console.log('📅 [EVENTS BY INSTITUTION] InstitutionId:', institutionId);
 
     // Verificar permisos
-    if (!['adminaccount', 'superadmin', 'coordinador'].includes(currentUser.role?.nombre)) {
+    const roleName = currentUser.role?.nombre;
+    const allowedRoles = ['adminaccount', 'superadmin', 'coordinador', 'familyadmin', 'familyviewer'];
+
+    if (!allowedRoles.includes(roleName)) {
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para ver eventos'
@@ -490,28 +496,14 @@ app.get('/api/events/institution/:institutionId', authenticateToken, async (req,
       });
     }
 
-    // Verificar permisos de acceso a la institución
-    if (currentUser.role?.nombre === 'adminaccount') {
-      const hasAccess = await ActiveAssociation.findOne({
+    // Verificar permisos de acceso a la institución para todos los roles (excepto superadmin)
+    if (roleName !== 'superadmin') {
+      const activeAssociation = await ActiveAssociation.findOne({
         user: currentUser._id,
-        account: institutionId,
-        status: { $in: ['active', 'pending'] }
+        account: institutionId
       });
 
-      if (!hasAccess) {
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes acceso a esta institución'
-        });
-      }
-    } else if (currentUser.role?.nombre === 'coordinador') {
-      const hasAccess = await ActiveAssociation.findOne({
-        user: currentUser._id,
-        account: institutionId,
-        status: { $in: ['active', 'pending'] }
-      });
-
-      if (!hasAccess) {
+      if (!activeAssociation) {
         return res.status(403).json({
           success: false,
           message: 'No tienes acceso a esta institución'

@@ -32,7 +32,9 @@ const FROM_NAME = 'Kiki App';
 
 // Función helper para generar el HTML del logo de Kiki (URL pública)
 const getKikiLogoHTML = () => {
-  const logoUrl = 'https://drive.google.com/uc?export=download&id=1jPsauBej_P9NnG57YnrpnFz50UZQftpz';
+  // Usar URL pública permanente de Google Drive (formato que funciona en emails)
+  // Formato: https://drive.google.com/uc?export=view&id=FILE_ID
+  const logoUrl = 'https://drive.google.com/uc?export=view&id=1jPsauBej_P9NnG57YnrpnFz50UZQftpz';
   return `
     <div style="text-align: center; margin-bottom: 20px; padding: 20px 0;">
       <img src="${logoUrl}" alt="Kiki Logo" style="max-width: 200px; height: auto; margin: 0 auto; display: block;">
@@ -42,8 +44,10 @@ const getKikiLogoHTML = () => {
 
 // Función helper para generar badges de App Store y Google Play (URLs públicas)
 const getAppStoreBadgesHTML = () => {
-  const appleBadgeUrl = 'https://drive.google.com/uc?export=download&id=1iHl9TB11buK7j6eh8G-W48L82X6FbELi';
-  const googlePlayBadgeUrl = 'https://drive.google.com/uc?export=download&id=1Vmbu4esRamKgTsiWK_G9xLGz1oKOJdkz';
+  // Usar URLs públicas permanentes de Google Drive (formato que funciona en emails)
+  // Formato: https://drive.google.com/uc?export=view&id=FILE_ID
+  const appleBadgeUrl = 'https://drive.google.com/uc?export=view&id=1iHl9TB11buK7j6eh8G-W48L82X6FbELi';
+  const googlePlayBadgeUrl = 'https://drive.google.com/uc?export=view&id=1Vmbu4esRamKgTsiWK_G9xLGz1oKOJdkz';
   
   return `
     <div style="text-align: center; margin: 30px 0;">

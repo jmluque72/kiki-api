@@ -14,7 +14,11 @@
     "test:coverage": "jest --coverage",
     "test:ci": "jest --ci --coverage --watchAll=false",
     "worker:email": "node workers/start-email-worker.js",
-    "sqs:create-queue": "node scripts/create-sqs-queue.js"
+    "worker:push": "node workers/start-push-worker.js",
+    "sqs:create-queue": "node scripts/create-sqs-queue.js",
+    "sqs:create-push-queue": "node scripts/create-push-sqs-queue.js",
+    "db:add-indexes": "node scripts/add-recommended-indexes.js",
+    "migrate:fix-form-responses": "node scripts/fix-form-responses-preguntaid.js"
   },
   "keywords": [
     "node",
@@ -30,6 +34,7 @@
     "@aws-sdk/client-s3": "^3.879.0",
     "@aws-sdk/client-ses": "^3.879.0",
     "@aws-sdk/client-sqs": "^3.879.0",
+    "apn": "^2.2.0",
     "aws-sdk": "^2.1692.0",
     "axios": "^1.11.0",
     "bcrypt": "^6.0.0",
@@ -38,6 +43,7 @@
     "dotenv": "^17.2.1",
     "express": "^4.18.2",
     "express-rate-limit": "^8.1.0",
+    "firebase-admin": "^12.0.0",
     "form-data": "^4.0.4",
     "googleapis": "^159.0.0",
     "helmet": "^8.1.0",

@@ -148,20 +148,20 @@ formResponseSchema.statics.hasRequiredPending = async function(tutorId, studentI
   
   if (validAssociations.length === 0) return false;
   
-  // Verificar si todas las respuestas requeridas están aprobadas
+  // Verificar si todas las respuestas requeridas están completadas (no necesitan estar aprobadas)
   const formRequestIds = validAssociations.map(a => a.formRequest._id);
-  const approvedResponses = await this.find({
+  const completedResponses = await this.find({
     tutor: tutorId,
     student: studentId,
     formRequest: { $in: formRequestIds },
-    estado: 'aprobado'
+    completado: true  // Solo verificar que esté completado, no que esté aprobado
   }).distinct('formRequest');
   
-  const approvedFormIds = approvedResponses.map(id => id.toString());
+  const completedFormIds = completedResponses.map(id => id.toString());
   const requiredFormIds = formRequestIds.map(id => id.toString());
   
-  // Si hay algún formulario requerido sin aprobar, retornar true
-  return requiredFormIds.some(id => !approvedFormIds.includes(id));
+  // Si hay algún formulario requerido sin completar, retornar true (bloquear app)
+  return requiredFormIds.some(id => !completedFormIds.includes(id));
 };
 
 module.exports = mongoose.model('FormResponse', formResponseSchema);

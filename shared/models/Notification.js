@@ -191,7 +191,12 @@ notificationSchema.statics.getUserNotifications = async function(userId, options
 
   // Filtrar por no leídas si se solicita
   if (unreadOnly) {
-    query['readBy.user'] = { $ne: userId };
+    // Usar $not con $elemMatch para verificar que el usuario NO está en el array readBy
+    query.$or = [
+      { readBy: { $exists: false } },
+      { readBy: { $size: 0 } },
+      { readBy: { $not: { $elemMatch: { user: userId } } } }
+    ];
   }
 
   console.log('🔔 [MODEL] Query final:', JSON.stringify(query, null, 2));

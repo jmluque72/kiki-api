@@ -290,15 +290,42 @@ async function getPendingFormsForTutor(tutorId, studentId) {
       tutor: tutorId,
       student: studentId,
       formRequest: { $in: formRequestIds }
-    }).select('formRequest completado');
+    }).select('formRequest completado estado');
+
+    console.log('📋 [FORM-SERVICE] Respuestas existentes encontradas:', existingResponses.length);
+    existingResponses.forEach(r => {
+      const formId = r.formRequest?.toString ? r.formRequest.toString() : String(r.formRequest);
+      console.log('📋 [FORM-SERVICE] Respuesta:', {
+        formRequestId: formId,
+        completado: r.completado,
+        estado: r.estado,
+        completadoType: typeof r.completado
+      });
+    });
 
     const completedFormIds = existingResponses
-      .filter(r => r.completado)
-      .map(r => r.formRequest.toString());
+      .filter(r => r.completado === true)
+      .map(r => {
+        const formId = r.formRequest?.toString ? r.formRequest.toString() : String(r.formRequest);
+        console.log('✅ [FORM-SERVICE] Formulario completado:', formId);
+        return formId;
+      });
+
+    console.log('📋 [FORM-SERVICE] IDs de formularios completados:', completedFormIds);
+    console.log('📋 [FORM-SERVICE] Total de formularios asociados:', validAssociations.length);
 
     // Filtrar formularios que no están completados
     const pendingForms = validAssociations
-      .filter(a => !completedFormIds.includes(a.formRequest._id.toString()))
+      .filter(a => {
+        const formId = a.formRequest._id.toString();
+        const isCompleted = completedFormIds.includes(formId);
+        if (isCompleted) {
+          console.log('⏭️  [FORM-SERVICE] Formulario completado, omitiendo:', formId, a.formRequest.nombre);
+        } else {
+          console.log('📝 [FORM-SERVICE] Formulario pendiente:', formId, a.formRequest.nombre);
+        }
+        return !isCompleted;
+      })
       .map(a => {
         const hasDraft = existingResponses.some(r => 
           r.formRequest.toString() === a.formRequest._id.toString() && !r.completado
@@ -444,12 +471,25 @@ async function saveFormResponse(formId, studentId, tutorId, respuestas, completa
       throw new Error('El formulario no está publicado');
     }
 
+    // Normalizar respuestas: asegurar que preguntaId sea ObjectId válido
+    const normalizedRespuestas = respuestas.map(respuesta => {
+      if (!respuesta.preguntaId) {
+        throw new Error('Todas las respuestas deben tener un preguntaId válido');
+      }
+      return {
+        preguntaId: mongoose.Types.ObjectId.isValid(respuesta.preguntaId) 
+          ? new mongoose.Types.ObjectId(respuesta.preguntaId)
+          : respuesta.preguntaId,
+        valor: respuesta.valor
+      };
+    });
+
     // Validar respuestas si está completado
     if (completado) {
       // Verificar que todas las preguntas requeridas tienen respuesta
       const requiredQuestions = formRequest.preguntas.filter(p => p.requerido);
       for (const question of requiredQuestions) {
-        const respuesta = respuestas.find(r => r.preguntaId.toString() === question._id.toString());
+        const respuesta = normalizedRespuestas.find(r => r.preguntaId.toString() === question._id.toString());
         if (!respuesta || !respuesta.valor || 
             (Array.isArray(respuesta.valor) && respuesta.valor.length === 0)) {
           throw new Error(`La pregunta "${question.texto}" es requerida`);
@@ -466,7 +506,7 @@ async function saveFormResponse(formId, studentId, tutorId, respuestas, completa
 
     if (formResponse) {
       // Actualizar respuesta existente
-      formResponse.respuestas = respuestas;
+      formResponse.respuestas = normalizedRespuestas;
       formResponse.completado = completado;
       if (completado && !formResponse.fechaCompletado) {
         formResponse.fechaCompletado = new Date();
@@ -480,6 +520,12 @@ async function saveFormResponse(formId, studentId, tutorId, respuestas, completa
         formResponse.fechaCompletado = undefined;
       }
       await formResponse.save();
+      console.log('✅ [FORM-SERVICE] Respuesta actualizada:', {
+        formRequestId: formId,
+        completado: formResponse.completado,
+        estado: formResponse.estado,
+        fechaCompletado: formResponse.fechaCompletado
+      });
     } else {
       // Crear nueva respuesta
       formResponse = new FormResponse({
@@ -487,12 +533,18 @@ async function saveFormResponse(formId, studentId, tutorId, respuestas, completa
         student: studentId,
         tutor: tutorId,
         division: student.division,
-        respuestas,
+        respuestas: normalizedRespuestas,
         completado,
         estado: completado ? 'completado' : 'en_progreso',
         fechaCompletado: completado ? new Date() : undefined
       });
       await formResponse.save();
+      console.log('✅ [FORM-SERVICE] Nueva respuesta creada:', {
+        formRequestId: formId,
+        completado: formResponse.completado,
+        estado: formResponse.estado,
+        fechaCompletado: formResponse.fechaCompletado
+      });
     }
 
     await formResponse.populate('formRequest', 'nombre descripcion preguntas');
@@ -712,8 +764,16 @@ async function processFormResponseUrls(formResponse) {
     // Procesar cada respuesta
     const processedRespuestas = await Promise.all(
       response.respuestas.map(async (respuesta) => {
+        // Asegurarse de que preguntaId se preserve correctamente
+        const preguntaId = respuesta.preguntaId ? 
+          (respuesta.preguntaId.toString ? respuesta.preguntaId.toString() : String(respuesta.preguntaId)) : 
+          null;
+        
         if (!respuesta.valor) {
-          return respuesta;
+          return {
+            preguntaId: preguntaId,
+            valor: respuesta.valor
+          };
         }
         
         // Si el valor es un string y parece ser una key de S3 (no es una URL completa)
@@ -724,13 +784,25 @@ async function processFormResponseUrls(formResponse) {
           try {
             const signedUrl = await generateSignedUrl(respuesta.valor, 172800); // 2 días
             return {
-              ...respuesta,
+              preguntaId: preguntaId,
               valor: signedUrl || respuesta.valor // Fallback si falla
             };
           } catch (error) {
             console.error('Error generando signed URL para respuesta:', error);
-            return respuesta;
+            return {
+              preguntaId: preguntaId,
+              valor: respuesta.valor
+            };
           }
+        }
+        
+        // Si el valor ya es una URL completa, preservar el preguntaId
+        if (typeof respuesta.valor === 'string' && 
+            (respuesta.valor.startsWith('http://') || respuesta.valor.startsWith('https://'))) {
+          return {
+            preguntaId: preguntaId,
+            valor: respuesta.valor
+          };
         }
         
         // Si es un array (para checkboxes), procesar cada elemento
@@ -752,12 +824,16 @@ async function processFormResponseUrls(formResponse) {
             })
           );
           return {
-            ...respuesta,
+            preguntaId: preguntaId,
             valor: processedArray
           };
         }
         
-        return respuesta;
+        // Fallback: preservar preguntaId siempre
+        return {
+          preguntaId: preguntaId,
+          valor: respuesta.valor
+        };
       })
     );
     

@@ -87,10 +87,37 @@ const generateSignedUrls = async (keys, expiresIn = 172800) => { // 2 días = 17
   return results;
 };
 
+// Función para generar URL pública de S3 (para emails - no expira)
+// Asume que el bucket tiene objetos públicos o CloudFront configurado
+const getPublicUrl = (key) => {
+  if (!key) return null;
+  
+  // Si ya es una URL completa, retornarla
+  if (key.startsWith('http://') || key.startsWith('https://')) {
+    return key;
+  }
+  
+  // Generar URL pública de S3
+  // Formato: https://bucket-name.s3.region.amazonaws.com/key
+  // O si hay CloudFront: https://cloudfront-domain.com/key
+  const cloudfrontDomain = process.env.AWS_CLOUDFRONT_DOMAIN;
+  
+  if (cloudfrontDomain) {
+    // Usar CloudFront si está configurado (mejor para emails)
+    return `https://${cloudfrontDomain}/${key}`;
+  } else {
+    // Usar URL directa de S3 (requiere que el objeto sea público)
+    const region = s3Config.region || 'us-east-1';
+    const bucketName = s3Config.bucketName;
+    return `https://${bucketName}.s3.${region}.amazonaws.com/${key}`;
+  }
+};
+
 module.exports = {
   s3,
   s3Config,
   multerS3Config,
   generateSignedUrl,
-  generateSignedUrls
+  generateSignedUrls,
+  getPublicUrl
 };

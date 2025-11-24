@@ -1,12 +1,18 @@
 const config = require('../../config/env.config');
+const logger = require('../../utils/logger');
 
 // Middleware para manejar errores
 const errorHandler = (err, req, res, next) => {
   let error = { ...err };
   error.message = err.message;
 
-  // Log del error
-  console.error('Error:', err);
+  // Log del error (sin exponer información sensible)
+  logger.error('Error en request', {
+    path: req.path,
+    method: req.method,
+    error: err.message,
+    name: err.name
+  });
 
   // Error de validación de Mongoose
   if (err.name === 'ValidationError') {
@@ -54,11 +60,18 @@ const errorHandler = (err, req, res, next) => {
     };
   }
 
-  res.status(error.statusCode || 500).json({
+  // Respuesta de error - NUNCA exponer stack traces en producción
+  const response = {
     success: false,
-    message: error.message || 'Error interno del servidor',
-    ...(config.NODE_ENV === 'development' && { stack: err.stack })
-  });
+    message: error.message || 'Error interno del servidor'
+  };
+
+  // Solo en desarrollo y si NODE_ENV está explícitamente configurado
+  if (config.NODE_ENV === 'development' && process.env.NODE_ENV === 'development') {
+    response.stack = err.stack;
+  }
+
+  res.status(error.statusCode || 500).json(response);
 };
 
 // Middleware para manejar rutas no encontradas

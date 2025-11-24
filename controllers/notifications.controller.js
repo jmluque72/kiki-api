@@ -57,89 +57,40 @@ async function getFamilyUsersForStudent(studentId) {
   }
 }
 
-// Función helper para enviar push notifications (importación condicional)
-let sendPushNotificationToStudentFamily;
-try {
-  // Intentar importar pushNotificationService, pero no fallar si no está disponible
-  const pushNotificationService = require('../pushNotificationService');
-  
-  // Función para enviar push notifications
-  sendPushNotificationToStudentFamily = async function(studentId, notification) {
-    try {
-      console.log('🔔 [PUSH SEND] Enviando push notification para estudiante:', studentId);
-      
-      // Obtener usuarios familiares
-      const familyUsers = await getFamilyUsersForStudent(studentId);
-      
-      if (familyUsers.length === 0) {
-        console.log('🔔 [PUSH SEND] No se encontraron usuarios familiares con dispositivos');
-        return { sent: 0, failed: 0 };
-      }
-      
-      let sent = 0;
-      let failed = 0;
-      
-      // Enviar a cada usuario familiar
-      for (const familyUser of familyUsers) {
-        for (const device of familyUser.devices) {
-          try {
-            const pushNotification = {
-              title: notification.title,
-              message: notification.message,
-              data: {
-                type: 'notification',
-                notificationId: notification._id,
-                studentId: studentId,
-                priority: notification.priority || 'normal'
-              }
-            };
-            
-            await pushNotificationService.sendNotification(
-              device.pushToken,
-              device.platform,
-              pushNotification
-            );
-            
-            // Actualizar último uso del dispositivo
-            if (device.updateLastUsed) {
-              await device.updateLastUsed();
-            }
-            
-            sent++;
-            console.log('🔔 [PUSH SEND] ✅ Enviado a:', familyUser.user.name, '-', device.platform);
-            
-          } catch (error) {
-            failed++;
-            console.error('🔔 [PUSH SEND] ❌ Error enviando a:', familyUser.user.name, '-', error.message);
-            
-            // Si el token es inválido, desactivar el dispositivo
-            if (error.message.includes('InvalidRegistration') || error.message.includes('NotRegistered')) {
-              if (device.deactivate) {
-                await device.deactivate();
-              } else {
-                await Device.findByIdAndUpdate(device._id, { activo: false });
-              }
-            }
-          }
-        }
-      }
-      
-      console.log('🔔 [PUSH SEND] Total enviados:', sent, 'Fallidos:', failed);
-      return { sent, failed };
-      
-    } catch (error) {
-      console.error('🔔 [PUSH SEND] Error general:', error);
-      return { sent: 0, failed: 0 };
+// Función helper para enviar push notifications usando SQS
+const { sendPushToStudentFamilyToQueue } = require('../services/sqsPushService');
+
+const sendPushNotificationToStudentFamily = async function(studentId, notification) {
+  try {
+    console.log('🔔 [PUSH SEND] Enviando push notification a cola SQS para estudiante:', studentId);
+    
+    const pushNotification = {
+      title: notification.title,
+      message: notification.message,
+      data: {
+        type: 'notification',
+        notificationId: notification._id,
+        studentId: studentId,
+        priority: notification.priority || 'normal'
+      },
+      badge: 1,
+      sound: 'default'
+    };
+    
+    const result = await sendPushToStudentFamilyToQueue(studentId, pushNotification);
+    
+    if (result.success) {
+      console.log('🔔 [PUSH SEND] ✅ Push notification enviado a cola SQS - MessageId:', result.messageId);
+      return { sent: 1, failed: 0, queued: true };
+    } else {
+      console.error('🔔 [PUSH SEND] ❌ Error enviando a cola SQS:', result.error);
+      return { sent: 0, failed: 1, queued: false };
     }
-  };
-} catch (error) {
-  console.warn('⚠️ [NOTIFICATIONS] pushNotificationService no disponible:', error.message);
-  // Función stub que no hace nada si el servicio no está disponible
-  sendPushNotificationToStudentFamily = async function(studentId, notification) {
-    console.warn('⚠️ [PUSH SEND] Push notifications no disponibles');
-    return { sent: 0, failed: 0 };
-  };
-}
+  } catch (error) {
+    console.error('🔔 [PUSH SEND] Error general:', error);
+    return { sent: 0, failed: 1, queued: false };
+  }
+};
 
 /**
  * Obtener notificaciones del calendario para backoffice
@@ -276,7 +227,7 @@ const getNotifications = async (req, res) => {
   try {
     const userId = req.user._id;
     const { 
-      limit = 20, 
+      limit = 10000, // Límite muy alto para mostrar todas las notificaciones
       skip = 0, 
       unreadOnly = false,
       accountId,
@@ -398,7 +349,7 @@ const getFamilyNotifications = async (req, res) => {
   try {
     const userId = req.user._id;
     const { 
-      limit = 20, 
+      limit = 10000, // Límite muy alto para mostrar todas las notificaciones
       skip = 0, 
       unreadOnly = false,
       accountId,
@@ -417,24 +368,38 @@ const getFamilyNotifications = async (req, res) => {
       });
     }
     
-    // Obtener la asociación activa del usuario
-    const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
+    // Obtener la asociación activa del usuario usando el método estático que ya hace populate
+    const activeAssociation = await ActiveAssociation.getActiveAssociation(userId);
     console.log('🔔 [GET FAMILY NOTIFICATIONS] Buscando ActiveAssociation para userId:', userId);
     console.log('🔔 [GET FAMILY NOTIFICATIONS] ActiveAssociation encontrada:', activeAssociation ? {
       id: activeAssociation._id,
-      activeShared: activeAssociation.activeShared,
-      role: activeAssociation.role?.nombre
+      student: activeAssociation.student?._id || activeAssociation.student,
+      activeShared: activeAssociation.activeShared?._id || activeAssociation.activeShared,
+      role: activeAssociation.role?.nombre,
+      account: activeAssociation.account?._id || activeAssociation.account
     } : null);
     
-    if (!activeAssociation || !activeAssociation.activeShared || !activeAssociation.activeShared.student) {
+    // Verificar que haya asociación activa y estudiante
+    // El modelo ActiveAssociation tiene student directamente, pero también puede estar en activeShared si se hace populate
+    let studentId = null;
+    
+    if (activeAssociation) {
+      // Intentar obtener student de diferentes formas
+      if (activeAssociation.student) {
+        studentId = activeAssociation.student._id || activeAssociation.student;
+      } else if (activeAssociation.activeShared && activeAssociation.activeShared.student) {
+        // Si activeShared está populado, puede tener student
+        studentId = activeAssociation.activeShared.student._id || activeAssociation.activeShared.student;
+      }
+    }
+    
+    if (!activeAssociation || !studentId) {
       console.log('🔔 [GET FAMILY NOTIFICATIONS] No hay asociación activa o estudiante activo');
       return res.json({
         success: true,
         data: []
       });
     }
-    
-    const studentId = activeAssociation.activeShared.student;
     console.log('🔔 [GET FAMILY NOTIFICATIONS] Estudiante activo:', studentId);
     
     // Construir query para notificaciones
@@ -451,7 +416,12 @@ const getFamilyNotifications = async (req, res) => {
     }
     
     if (unreadOnly === 'true') {
-      query['readBy.user'] = { $ne: userId };
+      // Usar $not con $elemMatch para verificar que el usuario NO está en el array readBy
+      query.$or = [
+        { readBy: { $exists: false } },
+        { readBy: { $size: 0 } },
+        { readBy: { $not: { $elemMatch: { user: userId } } } }
+      ];
     }
     
     console.log('🔔 [GET FAMILY NOTIFICATIONS] Query:', JSON.stringify(query, null, 2));
@@ -562,20 +532,26 @@ const getNotificationDetails = async (req, res) => {
       notificationObj.recipients = populatedRecipients;
     }
 
-    // Poblar readBy.user manualmente para asegurar que tenga el campo nombre
+    // Poblar readBy.user manualmente para asegurar que tenga el campo nombre y role
     if (notificationObj.readBy && notificationObj.readBy.length > 0) {
       const populatedReadBy = [];
       
       for (let readEntry of notificationObj.readBy) {
         if (readEntry.user && readEntry.user._id) {
-          // Buscar el usuario completo
-          const user = await User.findById(readEntry.user._id).select('name email');
+          // Buscar el usuario completo con role
+          const user = await User.findById(readEntry.user._id)
+            .select('name email')
+            .populate('role', 'nombre');
           if (user) {
             populatedReadBy.push({
               user: {
                 _id: user._id,
                 nombre: user.name, // User model usa 'name', no 'nombre'
-                email: user.email
+                email: user.email,
+                role: user.role ? {
+                  _id: user.role._id,
+                  nombre: user.role.nombre
+                } : null
               },
               readAt: readEntry.readAt,
               _id: readEntry._id
@@ -787,8 +763,10 @@ const deleteNotification = async (req, res) => {
 const getUnreadCount = async (req, res) => {
   try {
     const userId = req.user._id;
+    const { accountId, divisionId } = req.query; // Aceptar filtros opcionales
     
     console.log('🔔 [UNREAD COUNT] Usuario:', userId);
+    console.log('🔔 [UNREAD COUNT] Filtros - accountId:', accountId, 'divisionId:', divisionId);
     
     // Obtener información del usuario para verificar su rol
     const user = await User.findById(userId).populate('role');
@@ -812,14 +790,25 @@ const getUnreadCount = async (req, res) => {
     // Para familyadmin/familyviewer: buscar estudiantes asociados y obtener sus notificaciones
     console.log('🔔 [UNREAD COUNT] Usuario es familyadmin/familyviewer - buscando notificaciones de estudiantes asociados');
     
-    // Obtener todas las asociaciones del usuario
-    const userAssociations = await Shared.find({ 
+    // Obtener asociaciones del usuario, filtrando por accountId si se proporciona
+    const associationQuery = { 
       user: userId, 
       status: 'active' 
-    }).populate('account division student');
+    };
+    
+    if (accountId) {
+      associationQuery.account = accountId;
+    }
+    
+    if (divisionId) {
+      associationQuery.division = divisionId;
+    }
+    
+    const userAssociations = await Shared.find(associationQuery)
+      .populate('account division student');
     
     if (userAssociations.length === 0) {
-      console.log('🔔 [UNREAD COUNT] No se encontraron asociaciones activas');
+      console.log('🔔 [UNREAD COUNT] No se encontraron asociaciones activas con los filtros');
       return res.json({
         success: true,
         data: { count: 0 }
@@ -831,7 +820,7 @@ const getUnreadCount = async (req, res) => {
       .map(assoc => assoc.student?._id)
       .filter(id => id); // Filtrar IDs válidos
     
-    console.log('🔔 [UNREAD COUNT] Estudiantes asociados:', studentIds);
+    console.log('🔔 [UNREAD COUNT] Estudiantes asociados:', studentIds.length);
     
     if (studentIds.length === 0) {
       console.log('🔔 [UNREAD COUNT] No hay estudiantes válidos asociados');
@@ -841,17 +830,27 @@ const getUnreadCount = async (req, res) => {
       });
     }
     
-    // Obtener IDs de cuentas del usuario
+    // Obtener IDs de cuentas del usuario (ya filtradas si se proporcionó accountId)
     const accountIds = userAssociations.map(assoc => assoc.account._id);
     
-    console.log('🔔 [UNREAD COUNT] Cuentas del usuario:', accountIds);
+    console.log('🔔 [UNREAD COUNT] Cuentas del usuario:', accountIds.length);
     
     // Construir query para notificaciones
+    // Usar $not con $elemMatch para verificar que el usuario NO está en el array readBy
     const query = {
       account: { $in: accountIds },
       recipients: { $in: studentIds }, // Notificaciones dirigidas a los estudiantes asociados
-      'readBy.user': { $ne: userId } // Excluir las que ya fueron leídas por este usuario
+      $or: [
+        { readBy: { $exists: false } },
+        { readBy: { $size: 0 } },
+        { readBy: { $not: { $elemMatch: { user: userId } } } }
+      ]
     };
+    
+    // Agregar filtro de división si se proporciona
+    if (divisionId) {
+      query.division = divisionId;
+    }
     
     console.log('🔔 [UNREAD COUNT] Query:', JSON.stringify(query, null, 2));
     
@@ -880,10 +879,10 @@ const getUnreadCount = async (req, res) => {
 const getFamilyUnreadCount = async (req, res) => {
   try {
     const userId = req.user._id;
-    const { accountId } = req.query;
+    const { accountId, divisionId } = req.query;
     
     console.log('🔔 [FAMILY UNREAD COUNT] Usuario:', userId);
-    console.log('🔔 [FAMILY UNREAD COUNT] AccountId:', accountId);
+    console.log('🔔 [FAMILY UNREAD COUNT] AccountId:', accountId, 'DivisionId:', divisionId);
     
     // Obtener información del usuario para verificar su rol
     const user = await User.findById(userId).populate('role');
@@ -894,30 +893,96 @@ const getFamilyUnreadCount = async (req, res) => {
       });
     }
     
-    // Obtener la asociación activa del usuario
-    const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
+    // Obtener la asociación activa del usuario usando el método estático
+    const activeAssociation = await ActiveAssociation.getActiveAssociation(userId);
     
-    if (!activeAssociation || !activeAssociation.activeShared || !activeAssociation.activeShared.student) {
+    if (!activeAssociation) {
+      console.log('🔔 [FAMILY UNREAD COUNT] No hay asociación activa');
       return res.json({
         success: true,
         data: { count: 0 }
       });
     }
     
-    const studentId = activeAssociation.activeShared.student;
+    // Obtener el estudiante activo de la asociación
+    let studentId = null;
+    if (activeAssociation.student) {
+      studentId = activeAssociation.student._id || activeAssociation.student;
+    } else if (activeAssociation.activeShared) {
+      // Si activeShared está populado, puede tener student
+      const shared = await Shared.findById(activeAssociation.activeShared).populate('student');
+      if (shared && shared.student) {
+        studentId = shared.student._id || shared.student;
+      }
+    }
+    
+    if (!studentId) {
+      console.log('🔔 [FAMILY UNREAD COUNT] No hay estudiante activo');
+      return res.json({
+        success: true,
+        data: { count: 0 }
+      });
+    }
+    
+    console.log('🔔 [FAMILY UNREAD COUNT] Estudiante activo:', studentId);
     
     // Construir query para notificaciones
+    // Usar $not con $elemMatch para verificar que el usuario NO está en el array readBy
     let query = {
       recipients: studentId,
-      'readBy.user': { $ne: userId }
+      $or: [
+        { readBy: { $exists: false } },
+        { readBy: { $size: 0 } },
+        { readBy: { $not: { $elemMatch: { user: userId } } } }
+      ]
     };
     
+    // Filtrar por accountId si se proporciona
     if (accountId) {
       query.account = accountId;
     }
     
-    // Contar notificaciones sin leer
-    const unreadCount = await Notification.countDocuments(query);
+    // Filtrar por divisionId si se proporciona
+    if (divisionId) {
+      query.division = divisionId;
+    }
+    
+    // Construir query base para obtener todas las notificaciones del estudiante
+    const baseQuery = {
+      recipients: studentId
+    };
+    
+    if (accountId) {
+      baseQuery.account = accountId;
+    }
+    
+    if (divisionId) {
+      baseQuery.division = divisionId;
+    }
+    
+    console.log('🔔 [FAMILY UNREAD COUNT] Query base:', JSON.stringify(baseQuery, null, 2));
+    
+    // Obtener todas las notificaciones que coinciden con los filtros
+    const allMatchingNotifications = await Notification.find(baseQuery)
+      .select('_id title readBy');
+    
+    console.log('🔔 [FAMILY UNREAD COUNT] Total notificaciones del estudiante:', allMatchingNotifications.length);
+    
+    // Contar manualmente las no leídas por este usuario específico
+    let unreadCount = 0;
+    for (const notif of allMatchingNotifications) {
+      const isRead = notif.readBy && notif.readBy.some((read) => {
+        // read.user puede ser ObjectId o objeto populado
+        const readUserId = read.user?._id?.toString() || read.user?.toString();
+        const currentUserId = userId.toString();
+        return readUserId === currentUserId;
+      });
+      if (!isRead) {
+        unreadCount++;
+      }
+    }
+    
+    console.log('🔔 [FAMILY UNREAD COUNT] Conteo final (manual):', unreadCount);
     
     res.json({
       success: true,
@@ -926,6 +991,7 @@ const getFamilyUnreadCount = async (req, res) => {
     
   } catch (error) {
     console.error('❌ [FAMILY UNREAD COUNT] Error:', error);
+    console.error('❌ [FAMILY UNREAD COUNT] Stack:', error.stack);
     res.status(500).json({
       success: false,
       message: 'Error al obtener conteo de notificaciones familia'
@@ -956,7 +1022,7 @@ const getBackofficeNotifications = async (req, res) => {
     
     const userId = currentUser._id;
     const { 
-      limit = 100, 
+      limit = 10000, // Límite muy alto para mostrar todas las notificaciones
       skip = 0, 
       accountId,
       divisionId,
