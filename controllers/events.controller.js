@@ -383,10 +383,33 @@ exports.createEventFromBackoffice = async (req, res) => {
     const currentUser = req.user;
 
     console.log('📅 [CREATE EVENT BACKOFFICE] Datos recibidos:', { titulo, descripcion, fecha, hora, lugar, institucion, division, requiereAutorizacion });
-    console.log('👤 [CREATE EVENT BACKOFFICE] Usuario:', currentUser._id, currentUser.role?.nombre);
+    console.log('👤 [CREATE EVENT BACKOFFICE] Usuario completo:', JSON.stringify({
+      _id: currentUser._id,
+      role: currentUser.role,
+      roleType: typeof currentUser.role,
+      roleNombre: currentUser.role?.nombre,
+      roleId: currentUser.role?._id
+    }, null, 2));
+
+    // Obtener el rol del usuario de manera flexible
+    let userRole = null;
+    if (typeof currentUser.role === 'string') {
+      userRole = currentUser.role;
+    } else if (currentUser.role?.nombre) {
+      userRole = currentUser.role.nombre;
+    } else if (currentUser.role?._id) {
+      // Si el rol no está poblado, obtenerlo de la base de datos
+      const User = require('../shared/models/User');
+      const user = await User.findById(currentUser._id).populate('role');
+      userRole = user?.role?.nombre;
+      console.log('👤 [CREATE EVENT BACKOFFICE] Rol obtenido de BD:', userRole);
+    }
+
+    console.log('👤 [CREATE EVENT BACKOFFICE] Rol final del usuario:', userRole);
 
     // Verificar que el usuario tiene permisos para crear eventos
-    if (!['adminaccount', 'superadmin'].includes(currentUser.role?.nombre)) {
+    if (!['adminaccount', 'superadmin'].includes(userRole)) {
+      console.log('❌ [CREATE EVENT BACKOFFICE] Acceso denegado. Rol:', userRole, 'Permitidos: adminaccount, superadmin');
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para crear eventos'
@@ -496,12 +519,36 @@ exports.createEvent = async (req, res) => {
       divisionId: divisionId || 'FALTANTE', 
       requiereAutorizacion: requiereAutorizacion 
     });
-    console.log('👤 [CREATE EVENT] Usuario:', currentUser?._id || 'NO ENCONTRADO', currentUser?.role?.nombre || 'SIN ROL');
+    console.log('👤 [CREATE EVENT] Usuario completo:', JSON.stringify({
+      _id: currentUser?._id,
+      role: currentUser?.role,
+      roleType: typeof currentUser?.role,
+      roleNombre: currentUser?.role?.nombre,
+      roleId: currentUser?.role?._id
+    }, null, 2));
 
-    // Verificar que el usuario tiene permisos para crear eventos
-    // Para adminaccount y superadmin, usar el rol directo del usuario
-    // Para coordinadores, verificar el rol efectivo desde ActiveAssociation
-    const userRole = currentUser.role?.nombre;
+    // Obtener el rol del usuario de manera flexible y robusta
+    let userRole = null;
+    
+    // Primero intentar obtener el rol del objeto currentUser
+    if (typeof currentUser?.role === 'string') {
+      userRole = currentUser.role;
+    } else if (currentUser?.role?.nombre) {
+      userRole = currentUser.role.nombre;
+    } else if (currentUser?.role?._id) {
+      // Si el rol tiene _id pero no nombre, obtenerlo de la base de datos
+      const user = await User.findById(currentUser._id).populate('role');
+      userRole = user?.role?.nombre;
+      console.log('👤 [CREATE EVENT] Rol obtenido de BD (por _id):', userRole);
+    }
+    
+    // Si aún no tenemos el rol, obtenerlo directamente de la base de datos
+    if (!userRole) {
+      const user = await User.findById(currentUser._id).populate('role');
+      userRole = user?.role?.nombre;
+      console.log('👤 [CREATE EVENT] Rol obtenido de BD (fallback):', userRole);
+    }
+    
     let effectiveRole = userRole;
     
     // Solo verificar ActiveAssociation para coordinadores
@@ -513,12 +560,26 @@ exports.createEvent = async (req, res) => {
       console.log('🔍 [CREATE EVENT] Rol del usuario:', effectiveRole);
     }
 
-    if (!['coordinador', 'adminaccount', 'superadmin'].includes(effectiveRole)) {
+    // Verificar permisos - adminaccount y superadmin siempre pueden crear eventos
+    const allowedRoles = ['coordinador', 'adminaccount', 'superadmin'];
+    
+    if (!effectiveRole) {
+      console.error('❌ [CREATE EVENT] No se pudo determinar el rol del usuario');
+      // Último intento: obtener el usuario completo de la BD
+      const user = await User.findById(currentUser._id).populate('role');
+      effectiveRole = user?.role?.nombre;
+      console.log('👤 [CREATE EVENT] Rol obtenido en último intento:', effectiveRole);
+    }
+    
+    if (!effectiveRole || !allowedRoles.includes(effectiveRole)) {
+      console.log('❌ [CREATE EVENT] Acceso denegado. Rol:', effectiveRole, 'Permitidos:', allowedRoles.join(', '));
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para crear eventos'
       });
     }
+    
+    console.log('✅ [CREATE EVENT] Usuario autorizado. Rol:', effectiveRole);
 
     // Validar campos requeridos
     const missingFields = [];

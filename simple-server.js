@@ -2,7 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const rateLimit = require('express-rate-limit');
+// Rate limiting removido completamente
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -386,16 +386,7 @@ app.use(cors({
   maxAge: 86400 // 24 horas
 }));
 
-// Rate limiting general
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutos
-  max: 200, // límite de 200 requests por IP por ventana
-  message: {
-    success: false,
-    message: 'Demasiadas solicitudes, intenta de nuevo más tarde'
-  }
-});
-app.use(limiter);
+// Rate limiting removido completamente - no se aplica ningún límite
 
 // Logging
 app.use(morgan('combined'));
@@ -1195,15 +1186,15 @@ app.post('/users/login', async (req, res) => {
       });
     }
 
-    // Verificar si la IP está bloqueada
-    const isIPBlocked = await LoginMonitorService.isIPBlocked(ipAddress);
-    if (isIPBlocked) {
-      console.log('🚫 IP bloqueada:', ipAddress);
-      return res.status(403).json({
-        success: false,
-        message: 'Acceso bloqueado temporalmente. Intenta más tarde.'
-      });
-    }
+    // Verificar si la IP está bloqueada - DESACTIVADO
+    // const isIPBlocked = await LoginMonitorService.isIPBlocked(ipAddress);
+    // if (isIPBlocked) {
+    //   console.log('🚫 IP bloqueada:', ipAddress);
+    //   return res.status(403).json({
+    //     success: false,
+    //     message: 'Acceso bloqueado temporalmente. Intenta más tarde.'
+    //   });
+    // }
 
     // Buscar usuario en la base de datos
     const user = await User.findOne({ email }).populate('role').select('+password');

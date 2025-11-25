@@ -40,14 +40,15 @@ exports.login = async (req, res) => {
       });
     }
 
-    const isIPBlocked = await LoginMonitorService.isIPBlocked(ipAddress);
-    if (isIPBlocked) {
-      console.log('🚫 IP bloqueada:', ipAddress);
-      return res.status(403).json({
-        success: false,
-        message: 'Acceso bloqueado temporalmente. Intenta más tarde.'
-      });
-    }
+    // IP blocking deshabilitado
+    // const isIPBlocked = await LoginMonitorService.isIPBlocked(ipAddress);
+    // if (isIPBlocked) {
+    //   console.log('🚫 IP bloqueada:', ipAddress);
+    //   return res.status(403).json({
+    //     success: false,
+    //     message: 'Acceso bloqueado temporalmente. Intenta más tarde.'
+    //   });
+    // }
 
     const user = await User.findOne({ email }).populate('role').select('+password');
     
