@@ -3,6 +3,7 @@ const Shared = require('../shared/models/Shared');
 const Account = require('../shared/models/Account');
 const Grupo = require('../shared/models/Grupo');
 const Role = require('../shared/models/Role');
+const ActiveAssociation = require('../shared/models/ActiveAssociation');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const fs = require('fs');
@@ -233,7 +234,88 @@ exports.login = async (req, res) => {
       return associationObj;
     }));
     
-    const activeAssociation = associationsWithProcessedAvatars.length > 0 ? associationsWithProcessedAvatars[0] : null;
+    // Obtener la asociación activa real desde la base de datos
+    let activeAssociation = null;
+    try {
+      console.log('🎯 [LOGIN] Obteniendo asociación activa real del usuario:', user._id);
+      const realActiveAssociation = await ActiveAssociation.getActiveAssociation(user._id);
+      
+      if (realActiveAssociation) {
+        console.log('✅ [LOGIN] Asociación activa encontrada:', {
+          activeSharedId: realActiveAssociation.activeShared?._id?.toString(),
+          account: realActiveAssociation.account?.nombre,
+          studentId: realActiveAssociation.student?._id?.toString(),
+          studentNombre: realActiveAssociation.student?.nombre
+        });
+        
+        // Buscar la asociación activa en el array de asociaciones procesadas
+        const activeSharedId = realActiveAssociation.activeShared?._id?.toString() || realActiveAssociation.activeShared?.toString();
+        const foundAssociation = associationsWithProcessedAvatars.find(assoc => {
+          const assocId = assoc._id?.toString();
+          return assocId === activeSharedId;
+        });
+        
+        if (foundAssociation) {
+          console.log('✅ [LOGIN] Asociación activa encontrada en el array de asociaciones');
+          activeAssociation = foundAssociation;
+        } else {
+          console.log('⚠️ [LOGIN] Asociación activa no encontrada en el array, construyendo desde ActiveAssociation');
+          // Construir la asociación activa desde ActiveAssociation
+          const activeShared = await Shared.findById(realActiveAssociation.activeShared)
+            .populate('account', 'nombre razonSocial')
+            .populate('division', 'nombre descripcion')
+            .populate('student', 'nombre apellido avatar')
+            .populate('role', 'nombre');
+          
+          if (activeShared && activeShared.status === 'active') {
+            const activeAssociationObj = activeShared.toObject ? activeShared.toObject() : activeShared;
+            
+            // Procesar avatar del estudiante si existe
+            if (activeAssociationObj.student && activeAssociationObj.student.avatar) {
+              try {
+                const originalAvatar = activeAssociationObj.student.avatar;
+                let processedAvatar = originalAvatar;
+                
+                if (originalAvatar.startsWith('http')) {
+                  // URL completa
+                } else if (originalAvatar.includes('students/')) {
+                  try {
+                    const signedUrl = await generateSignedUrl(originalAvatar, 172800);
+                    processedAvatar = signedUrl || originalAvatar;
+                  } catch (s3Error) {
+                    console.error('❌ [LOGIN] Error generando URL firmada para asociación activa:', s3Error);
+                    processedAvatar = originalAvatar;
+                  }
+                } else {
+                  const localUrl = `${req.protocol}://${req.get('host')}/uploads/${originalAvatar.split('/').pop()}`;
+                  processedAvatar = localUrl;
+                }
+                
+                activeAssociationObj.student.avatar = processedAvatar;
+              } catch (error) {
+                console.error('❌ [LOGIN] Error procesando avatar del estudiante en asociación activa:', error);
+                if (activeAssociationObj.student && activeAssociationObj.student.avatar) {
+                  const fallbackUrl = `${req.protocol}://${req.get('host')}/uploads/${activeAssociationObj.student.avatar.split('/').pop()}`;
+                  activeAssociationObj.student.avatar = fallbackUrl;
+                }
+              }
+            }
+            
+            activeAssociation = activeAssociationObj;
+          }
+        }
+      } else {
+        console.log('⚠️ [LOGIN] No hay asociación activa guardada, usando primera del array como fallback');
+      }
+    } catch (activeAssocError) {
+      console.error('❌ [LOGIN] Error obteniendo asociación activa:', activeAssocError);
+    }
+    
+    // Fallback: usar la primera asociación si no hay asociación activa
+    if (!activeAssociation && associationsWithProcessedAvatars.length > 0) {
+      console.log('⚠️ [LOGIN] Usando primera asociación del array como fallback');
+      activeAssociation = associationsWithProcessedAvatars[0];
+    }
     
     const accessToken = jwt.sign(
       { 

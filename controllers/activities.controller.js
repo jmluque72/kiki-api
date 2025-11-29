@@ -5,6 +5,7 @@ const Shared = require('../shared/models/Shared');
 const AccountConfig = require('../shared/models/AccountConfig');
 const ActivityFavorite = require('../shared/models/ActivityFavorite');
 const Student = require('../shared/models/Student');
+const ActiveAssociation = require('../shared/models/ActiveAssociation');
 const { generateSignedUrl } = require('../config/s3.config');
 
 /**
@@ -426,29 +427,59 @@ exports.getMobileActivities = async (req, res) => {
       });
     }
 
-    // Verificar que el usuario tenga acceso a esta cuenta
-    const userAssociation = await Shared.findOne({
-      user: userId,
-      account: accountId,
-      status: 'active'
-    }).populate('role student');
-
-    if (!userAssociation) {
+    // Obtener la asociación activa del usuario (fuente de verdad única)
+    const activeAssociation = await ActiveAssociation.getActiveAssociation(userId);
+    
+    if (!activeAssociation) {
       return res.status(403).json({
         success: false,
-        message: 'No tienes acceso a esta institución'
+        message: 'No tienes una asociación activa configurada'
       });
     }
 
-    console.log('🔍 [ACTIVITIES MOBILE] Asociación del usuario:', {
-      role: userAssociation.role?.nombre,
-      student: userAssociation.student?._id,
-      studentName: userAssociation.student ? `${userAssociation.student.nombre} ${userAssociation.student.apellido}` : 'N/A'
-    });
+    // Verificar que la asociación activa pertenezca a la cuenta solicitada
+    if (activeAssociation.account._id.toString() !== accountId) {
+      return res.status(403).json({
+        success: false,
+        message: 'La asociación activa no pertenece a esta institución'
+      });
+    }
 
-    // Construir query base según el rol del usuario
-    const userRole = userAssociation.role?.nombre;
-    const userStudent = userAssociation.student?._id;
+    // CRÍTICO: Obtener el estudiante desde activeShared (Shared), no del campo desnormalizado
+    // activeShared es la fuente de verdad única
+    let userStudent = null;
+    let userRole = null;
+    
+    if (activeAssociation.activeShared) {
+      // Obtener el Shared document completo con populate
+      const sharedDoc = await Shared.findById(activeAssociation.activeShared)
+        .populate('role')
+        .populate('student');
+      
+      if (sharedDoc) {
+        userStudent = sharedDoc.student?._id;
+        userRole = sharedDoc.role?.nombre;
+        
+        console.log('🔍 [ACTIVITIES MOBILE] Asociación activa (desde activeShared):', {
+          activeSharedId: activeAssociation.activeShared._id || activeAssociation.activeShared,
+          role: userRole,
+          student: userStudent,
+          studentName: sharedDoc.student ? `${sharedDoc.student.nombre} ${sharedDoc.student.apellido}` : 'N/A'
+        });
+      } else {
+        console.error('❌ [ACTIVITIES MOBILE] activeShared no encontrado:', activeAssociation.activeShared);
+        return res.status(403).json({
+          success: false,
+          message: 'La asociación activa no es válida'
+        });
+      }
+    } else {
+      console.error('❌ [ACTIVITIES MOBILE] activeAssociation no tiene activeShared');
+      return res.status(403).json({
+        success: false,
+        message: 'La asociación activa no tiene una asociación compartida válida'
+      });
+    }
     
     console.log('🎭 [ACTIVITIES MOBILE] Rol del usuario:', userRole);
     console.log('👨‍🎓 [ACTIVITIES MOBILE] Estudiante vinculado:', userStudent);

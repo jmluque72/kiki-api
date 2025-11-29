@@ -559,33 +559,70 @@ exports.getActiveAssociation = async (req, res) => {
       });
     }
 
+    // CRÍTICO: Obtener el estudiante desde activeShared (Shared), no del campo desnormalizado
+    const Shared = require('../shared/models/Shared');
+    const activeShared = await Shared.findById(activeAssociation.activeShared)
+      .populate('student', 'nombre apellido avatar');
+    
+    // Usar el estudiante de activeShared como fuente de verdad
+    const studentFromShared = activeShared?.student || null;
+    
+    // LOG CRÍTICO: Verificar qué estudiante tiene la asociación activa
+    console.log('🔍 [ACTIVE ASSOCIATION GET] DEBUG - Estudiante desde activeShared:', {
+      activeSharedId: activeAssociation.activeShared?._id?.toString() || activeAssociation.activeShared?.toString(),
+      studentId: studentFromShared?._id?.toString(),
+      studentNombre: studentFromShared?.nombre,
+      studentApellido: studentFromShared?.apellido,
+      // Comparar con el campo desnormalizado (puede estar desactualizado)
+      studentDesnormalizadoId: activeAssociation.student?._id?.toString(),
+      studentDesnormalizadoNombre: activeAssociation.student?.nombre
+    });
+
     let studentWithSignedUrl = null;
-    if (activeAssociation.student) {
+    // CRÍTICO: Usar el estudiante de activeShared, no el campo desnormalizado
+    const studentToUse = studentFromShared || activeAssociation.student;
+    
+    if (studentToUse) {
+      // VALIDACIÓN: Verificar que el estudiante tenga todos los campos necesarios
+      if (!studentToUse._id) {
+        console.error('❌ [ACTIVE ASSOCIATION GET] ERROR: studentToUse no tiene _id!', studentToUse);
+      }
+      
       studentWithSignedUrl = {
-        _id: activeAssociation.student._id,
-        nombre: activeAssociation.student.nombre,
-        apellido: activeAssociation.student.apellido,
-        avatar: activeAssociation.student.avatar
+        _id: studentToUse._id,
+        nombre: studentToUse.nombre,
+        apellido: studentToUse.apellido,
+        avatar: studentToUse.avatar
       };
       
-      if (activeAssociation.student.avatar) {
+      console.log('✅ [ACTIVE ASSOCIATION GET] Estudiante preparado para respuesta:', {
+        id: studentWithSignedUrl._id?.toString(),
+        nombre: studentWithSignedUrl.nombre,
+        apellido: studentWithSignedUrl.apellido,
+        fuente: studentFromShared ? 'activeShared' : 'campo desnormalizado'
+      });
+      
+      // Procesar avatar del estudiante
+      if (studentToUse.avatar) {
         try {
-          if (activeAssociation.student.avatar.startsWith('http')) {
+          if (studentToUse.avatar.startsWith('http')) {
             // URL completa
-          } else if (activeAssociation.student.avatar.includes('students/')) {
-            const signedUrl = await generateSignedUrl(activeAssociation.student.avatar, 172800);
+          } else if (studentToUse.avatar.includes('students/')) {
+            const signedUrl = await generateSignedUrl(studentToUse.avatar, 172800);
             studentWithSignedUrl.avatar = signedUrl;
           } else {
-            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${activeAssociation.student.avatar.split('/').pop()}`;
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${studentToUse.avatar.split('/').pop()}`;
             studentWithSignedUrl.avatar = localUrl;
           }
         } catch (error) {
           console.error('Error procesando avatar:', error);
         }
       }
+    } else {
+      console.warn('⚠️ [ACTIVE ASSOCIATION GET] activeAssociation no tiene estudiante');
     }
 
-    res.json({
+    const responseData = {
       success: true,
       data: {
         _id: activeAssociation._id,
@@ -596,7 +633,16 @@ exports.getActiveAssociation = async (req, res) => {
         student: studentWithSignedUrl,
         activatedAt: activeAssociation.activatedAt
       }
+    };
+
+    // LOG CRÍTICO: Verificar qué estudiante se está enviando en la respuesta
+    console.log('🔍 [ACTIVE ASSOCIATION GET] DEBUG - Estudiante en respuesta:', {
+      studentId: responseData.data.student?._id?.toString(),
+      studentNombre: responseData.data.student?.nombre,
+      studentApellido: responseData.data.student?.apellido
     });
+
+    res.json(responseData);
 
   } catch (error) {
     console.error('❌ [ACTIVE ASSOCIATION GET] Error:', error);
@@ -693,6 +739,11 @@ exports.setActiveAssociation = async (req, res) => {
     const { userId } = req.user;
     const { sharedId } = req.body;
 
+    console.log('🔍 [ACTIVE ASSOCIATION SET] Parámetros recibidos:', {
+      userId: userId.toString(),
+      sharedId: sharedId
+    });
+
     if (!sharedId) {
       return res.status(400).json({
         success: false,
@@ -700,7 +751,32 @@ exports.setActiveAssociation = async (req, res) => {
       });
     }
 
+    // Verificar qué Shared se está intentando activar
+    const sharedToActivate = await Shared.findById(sharedId)
+      .populate('student', 'nombre apellido');
+    
+    if (sharedToActivate) {
+      console.log('🔍 [ACTIVE ASSOCIATION SET] Shared a activar:', {
+        sharedId: sharedToActivate._id.toString(),
+        studentId: sharedToActivate.student?._id?.toString(),
+        studentNombre: sharedToActivate.student?.nombre,
+        studentApellido: sharedToActivate.student?.apellido
+      });
+    } else {
+      console.error('❌ [ACTIVE ASSOCIATION SET] Shared no encontrada:', sharedId);
+    }
+
     const activeAssociation = await ActiveAssociation.setActiveAssociation(userId, sharedId);
+    
+    // LOG CRÍTICO: Verificar qué se devuelve
+    const activeAssociationWithPopulate = await ActiveAssociation.findById(activeAssociation._id)
+      .populate('student', 'nombre apellido');
+    
+    console.log('🔍 [ACTIVE ASSOCIATION SET] Asociación activa devuelta:', {
+      studentId: activeAssociationWithPopulate.student?._id?.toString(),
+      studentNombre: activeAssociationWithPopulate.student?.nombre,
+      studentApellido: activeAssociationWithPopulate.student?.apellido
+    });
 
     res.json({
       success: true,

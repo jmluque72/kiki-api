@@ -32,9 +32,9 @@ const studentActionSchema = new mongoose.Schema({
   // Categoría de la acción
   categoria: {
     type: String,
-    enum: ['alimentacion', 'sueño', 'higiene', 'juego', 'aprendizaje', 'social', 'otro'],
+    enum: ['comida', 'bano', 'dormir', 'salud', 'emociones', 'otros'],
     required: true,
-    default: 'otro'
+    default: 'comida'
   },
   
   // Icono para la interfaz móvil
@@ -63,6 +63,22 @@ const studentActionSchema = new mongoose.Schema({
     type: Number,
     default: 0,
     required: true
+  },
+  
+  // Valores posibles que puede tomar la acción (ej: ["1 vez", "2 veces", "3 veces"] para "hizo caca")
+  valores: {
+    type: [String],
+    required: false,
+    default: null,
+    validate: {
+      validator: function(val) {
+        // Si es null/undefined, está bien (acción sin valores)
+        if (!val || val.length === 0) return true;
+        // Si tiene valores, deben ser strings no vacíos
+        return val.every(v => typeof v === 'string' && v.trim().length > 0);
+      },
+      message: 'Los valores deben ser texto no vacío'
+    }
   },
   
   // Usuario que creó la acción

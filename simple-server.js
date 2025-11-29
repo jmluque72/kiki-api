@@ -204,6 +204,8 @@ const groupsRoutes = require('./routes/groups.routes');
 const accountsRoutes = require('./routes/accounts.routes');
 // Importar rutas de student actions
 const studentActionsRoutes = require('./routes/studentActions.routes');
+// Importar rutas de tutor actions
+const tutorActionsRoutes = require('./routes/tutorActions.routes');
 // Importar rutas de push notifications
 const pushRoutes = require('./routes/push.routes');
 // Importar rutas de push notifications administrativas
@@ -759,6 +761,7 @@ app.use((req, res, next) => {
       !req.path.startsWith('/api/events/export') &&
       !req.path.startsWith('/api/form-requests') &&
       !req.path.startsWith('/api/admin/push-notifications') &&
+      !req.path.startsWith('/api/tutor-actions') &&
       !req.path.match(/^\/api\/accounts\/[^\/]+\/(config|admin-users)$/)) {
     // Remover el /api duplicado del inicio, excepto para student-actions, test-actions, debug, documents, events/export, form-requests, admin/push-notifications, accounts config y accounts admin-users
     // Las rutas de upload se redirigen de /api/upload a /upload
@@ -842,6 +845,11 @@ console.log('✅ Rutas de cuentas registradas');
 console.log('🔍 Registrando rutas de student actions...');
 app.use('/', studentActionsRoutes);
 console.log('✅ Rutas de student actions registradas');
+
+console.log('🔍 Registrando rutas de tutor actions...');
+app.use('/', tutorActionsRoutes);
+console.log('✅ Rutas de tutor actions registradas');
+
 console.log('🔍 Registrando rutas de push notifications...');
 app.use('/push', pushRoutes);
 console.log('✅ Rutas de push notifications registradas');
