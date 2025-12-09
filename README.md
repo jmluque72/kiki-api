@@ -1,7 +1,7 @@
 # Microservicios API REST
 
 ## Descripción
-
+#
 API REST completa construida con arquitectura de microservicios utilizando Node.js, Express y MongoDB. El sistema incluye gestión de usuarios, cuentas, grupos, roles, eventos y autenticación con JWT. Diseñado para ser escalable, seguro y fácil de mantener.
 
 ## ✨ Características Principales
