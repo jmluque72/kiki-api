@@ -238,9 +238,6 @@ const getNotifications = async (req, res) => {
       isCoordinador
     } = req.query;
     
-    console.log('🔔 [GET NOTIFICATIONS] Usuario:', userId);
-    console.log('🔔 [GET NOTIFICATIONS] Parámetros:', { accountId, divisionId, userRole, isCoordinador });
-    
     // Obtener información del usuario para verificar su rol
     const user = await User.findById(userId).populate('role');
     if (!user) {
@@ -249,14 +246,11 @@ const getNotifications = async (req, res) => {
         message: 'Usuario no encontrado'
       });
     }
-    
-    console.log('🔔 [GET NOTIFICATIONS] Rol del usuario (base):', user.role?.nombre);
 
     // Usar rol de la asociación activa si existe
     const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
     const effectiveRole = activeAssociation?.role?.nombre || user.role?.nombre;
     const effectiveIsCoordinador = effectiveRole === 'coordinador';
-    console.log('🔔 [GET NOTIFICATIONS] Rol efectivo:', effectiveRole);
     
     const options = {
       limit: parseInt(limit),
@@ -270,22 +264,10 @@ const getNotifications = async (req, res) => {
     
     let notifications = await Notification.getUserNotifications(userId, options);
     
-    console.log('🔔 [GET NOTIFICATIONS] Notificaciones encontradas:', notifications.length);
-    
     // Poblar recipients con información completa (estudiantes y usuarios) para todos los roles
     // Recopilar todos los recipient IDs de todas las notificaciones
     const allRecipientIds = [];
-    notifications.forEach((notification, index) => {
-      console.log(`🔍 [GET NOTIFICATIONS] Notificación ${index + 1}:`, {
-        id: notification._id,
-        recipientsCount: notification.recipients?.length || 0,
-        recipients: notification.recipients?.map(r => {
-          if (typeof r === 'object' && r._id) {
-            return r._id.toString();
-          }
-          return r.toString();
-        }) || []
-      });
+    notifications.forEach((notification) => {
       if (notification.recipients && notification.recipients.length > 0) {
         notification.recipients.forEach(r => {
           const recipientId = r._id || r;
@@ -295,8 +277,6 @@ const getNotifications = async (req, res) => {
         });
       }
     });
-    
-    console.log('🔍 [GET NOTIFICATIONS] Total recipient IDs recopilados:', allRecipientIds.length);
     
     // Hacer consultas en batch para estudiantes y usuarios
     const uniqueRecipientIds = [...new Set(allRecipientIds.map(id => id.toString()))];
@@ -327,12 +307,6 @@ const getNotifications = async (req, res) => {
       studentsMap.has(id) && !usersMap.has(id)
     );
     
-    console.log('🔍 [POPULATE] Total unique recipient IDs:', uniqueRecipientIds.length);
-    console.log('🔍 [POPULATE] Recipients que son estudiantes:', studentRecipientIds.length);
-    console.log('🔍 [POPULATE] Recipients que son usuarios:', uniqueRecipientIds.filter(id => usersMap.has(id)).length);
-    console.log('🔍 [POPULATE] Estudiantes en studentsMap:', studentsMap.size);
-    console.log('🔍 [POPULATE] Usuarios en usersMap:', usersMap.size);
-    
     // Obtener roles de tutores primero
     const tutorRoles = await Role.find({ nombre: { $in: ['familyadmin', 'familyviewer'] } }).select('_id');
     const tutorRoleIds = tutorRoles.map(r => r._id);
@@ -344,16 +318,11 @@ const getNotifications = async (req, res) => {
       .filter(id => mongoose.Types.ObjectId.isValid(id))
       .map(id => new mongoose.Types.ObjectId(id));
     
-    console.log('🔍 [POPULATE] Tutor user IDs para buscar asociaciones:', tutorUserIds);
-    console.log('🔍 [POPULATE] Tutor user ObjectIds:', tutorUserObjectIds.map(id => id.toString()));
-    
     const tutorAssociationsForUsers = tutorUserObjectIds.length > 0 ? await Shared.find({
       user: { $in: tutorUserObjectIds },
       role: { $in: tutorRoleIds },
       status: { $in: ['active', 'pending'] }
     }).populate('student', 'nombre apellido').select('user student status') : [];
-    
-    console.log('🔍 [POPULATE] Asociaciones encontradas para usuarios tutores:', tutorAssociationsForUsers.length);
     
     // 2. Para identificar tutores asociados a estudiantes que son recipients
     // Convertir IDs de estudiantes a ObjectId si es necesario
@@ -369,36 +338,6 @@ const getNotifications = async (req, res) => {
       role: { $in: tutorRoleIds },
       status: { $in: ['active', 'pending'] }
     }).populate('user', 'name email').populate('student', 'nombre apellido').select('user student role status') : [];
-    
-    console.log('🔍 [POPULATE] IDs de estudiantes recipients:', studentRecipientIds);
-    console.log('🔍 [POPULATE] IDs de estudiantes convertidos a ObjectId:', studentObjectIds.map(id => id.toString()));
-    console.log('🔍 [POPULATE] Tutor role IDs buscados:', tutorRoleIds.map(id => id.toString()));
-    console.log('🔍 [POPULATE] Asociaciones encontradas para estudiantes:', tutorAssociationsForStudents.length);
-    if (tutorAssociationsForStudents.length > 0) {
-      tutorAssociationsForStudents.forEach((assoc, idx) => {
-        console.log(`🔍 [POPULATE] Asociación ${idx + 1}:`, {
-          studentId: assoc.student?._id?.toString(),
-          studentNombre: assoc.student?.nombre,
-          tutorId: assoc.user?._id?.toString(),
-          tutorNombre: assoc.user?.name || assoc.user?.nombre,
-          status: assoc.status
-        });
-      });
-    } else {
-      console.log('⚠️ [POPULATE] NO se encontraron asociaciones. Verificando consulta...');
-      // Hacer una consulta de prueba sin filtros para ver qué hay
-      const testQuery = await Shared.find({
-        student: { $in: studentObjectIds }
-      }).populate('user', 'name email').populate('student', 'nombre apellido').populate('role', 'nombre').select('user student role status').limit(5);
-      console.log('🔍 [POPULATE] Consulta de prueba (sin filtro de rol):', testQuery.length, 'resultados');
-      testQuery.forEach((assoc, idx) => {
-        console.log(`🔍 [POPULATE] Test ${idx + 1}:`, {
-          studentId: assoc.student?._id?.toString(),
-          roleNombre: assoc.role?.nombre,
-          status: assoc.status
-        });
-      });
-    }
     
     // Combinar ambas asociaciones
     const allTutorAssociations = [...tutorAssociationsForUsers, ...tutorAssociationsForStudents];
@@ -416,11 +355,9 @@ const getNotifications = async (req, res) => {
     
     // Crear mapa de estudiante -> tutores (para recipients que son estudiantes)
     const studentTutorsMap = new Map();
-    console.log('🔍 [POPULATE] Asociaciones de tutores para estudiantes:', tutorAssociationsForStudents.length);
     tutorAssociationsForStudents.forEach(assoc => {
       if (assoc.student && assoc.user) {
         const studentId = assoc.student._id.toString();
-        console.log('🔍 [POPULATE] Asociación encontrada - Estudiante:', studentId, 'Tutor:', assoc.user.name || assoc.user.nombre);
         if (!studentTutorsMap.has(studentId)) {
           studentTutorsMap.set(studentId, []);
         }
@@ -431,10 +368,16 @@ const getNotifications = async (req, res) => {
       }
     });
     
-    console.log('🔍 [POPULATE] Mapa estudiante->tutores creado con', studentTutorsMap.size, 'estudiantes');
-    
     // Poblar recipients y sender para cada notificación
+    const targetNotificationId = '692b71d6ee867593a6942b2a';
     const populatedNotifications = notifications.map(notification => {
+      const isTargetNotification = notification._id.toString() === targetNotificationId;
+      
+      if (isTargetNotification) {
+        console.log('🔍 [POPULATE] Procesando notificación TARGET:', targetNotificationId);
+        console.log('  - Recipients antes de procesar:', notification.recipients?.map(r => r.toString()).join(', '));
+      }
+      
       let notificationObj = notification.toObject();
       
       // Poblar sender con información del estudiante si es tutor
@@ -450,14 +393,17 @@ const getNotifications = async (req, res) => {
             senderObj.associatedStudent = studentInfo;
           }
           notificationObj.sender = senderObj;
+        } else if (isTargetNotification) {
+          console.log('  ⚠️ Sender no encontrado en usersMap:', senderId);
         }
       }
       
       if (notification.recipients && notification.recipients.length > 0) {
         const populatedRecipients = [];
         
-        console.log('🔍 [POPULATE] Procesando recipients para notificación:', notificationObj._id);
-        console.log('🔍 [POPULATE] Recipients raw:', notification.recipients);
+        if (isTargetNotification) {
+          console.log('  - Procesando', notification.recipients.length, 'recipients');
+        }
         
         for (const recipientId of notification.recipients) {
           // Manejar diferentes formatos de recipientId
@@ -468,7 +414,9 @@ const getNotifications = async (req, res) => {
             } else if (recipientId.toString) {
               id = recipientId.toString();
             } else {
-              console.log('⚠️ [POPULATE] Recipient ID en formato desconocido:', recipientId);
+              if (isTargetNotification) {
+                console.log('  ⚠️ Recipient ID en formato desconocido:', recipientId);
+              }
               continue;
             }
           } else if (typeof recipientId === 'string') {
@@ -477,12 +425,16 @@ const getNotifications = async (req, res) => {
             id = recipientId.toString();
           }
           
-          console.log('🔍 [POPULATE] Procesando recipient ID:', id, 'Tipo:', typeof recipientId);
+          if (isTargetNotification) {
+            console.log('  - Procesando recipient ID:', id);
+          }
           
           // Buscar primero en estudiantes
           let recipient = studentsMap.get(id);
           if (recipient) {
-            console.log('✅ [POPULATE] Recipient es estudiante:', recipient.nombre, recipient.apellido);
+            if (isTargetNotification) {
+              console.log('    ✅ Encontrado en studentsMap');
+            }
             // Si el recipient es un estudiante, buscar a los tutores asociados
             const studentObj = recipient.toObject();
             const studentFullName = `${studentObj.nombre} ${studentObj.apellido}`.trim();
@@ -490,14 +442,11 @@ const getNotifications = async (req, res) => {
             // Buscar tutores asociados a este estudiante usando el mapa
             const tutorsForStudent = studentTutorsMap.get(id) || [];
             
-            console.log('🔍 [POPULATE] Tutores encontrados para estudiante:', tutorsForStudent.length);
-            
             if (tutorsForStudent.length > 0) {
               // Si hay tutores asociados, crear un receptor por cada tutor
               tutorsForStudent.forEach(tutorAssoc => {
                 if (tutorAssoc.user) {
                   const tutorUser = tutorAssoc.user;
-                  console.log('✅ [POPULATE] Agregando tutor como receptor:', tutorUser.name || tutorUser.nombre);
                   const tutorObj = {
                     _id: tutorUser._id,
                     nombre: tutorUser.name || tutorUser.nombre,
@@ -511,7 +460,6 @@ const getNotifications = async (req, res) => {
                 }
               });
             } else {
-              console.log('⚠️ [POPULATE] No se encontraron tutores para el estudiante, mostrando estudiante directamente');
               // Si no hay tutores asociados, mostrar el estudiante directamente
               const recipientObj = studentObj;
               recipientObj.nombre = studentFullName;
@@ -524,30 +472,49 @@ const getNotifications = async (req, res) => {
           // Si no es estudiante, buscar en usuarios
           recipient = usersMap.get(id);
           if (recipient) {
-            console.log('✅ [POPULATE] Recipient es usuario:', recipient.name);
+            if (isTargetNotification) {
+              console.log('    ✅ Encontrado en usersMap');
+            }
             const recipientObj = recipient.toObject();
             recipientObj.nombre = recipientObj.name;
             // Si el receptor es tutor, agregar información del estudiante
             const studentInfo = tutorStudentMap.get(id);
             if (studentInfo) {
-              console.log('✅ [POPULATE] Usuario es tutor, agregando estudiante asociado');
               recipientObj.associatedStudent = studentInfo;
             }
             populatedRecipients.push(recipientObj);
             continue;
           }
           
-          console.log('⚠️ [POPULATE] Recipient no encontrado ni como estudiante ni como usuario:', id);
+          if (isTargetNotification) {
+            console.log('    ❌ NO encontrado ni en studentsMap ni en usersMap');
+          }
         }
         
-        console.log('🔍 [POPULATE] Recipients poblados:', populatedRecipients.length);
+        if (isTargetNotification) {
+          console.log('  - Recipients después de procesar:', populatedRecipients.length);
+          console.log('  - Recipients IDs:', populatedRecipients.map(r => r._id?.toString() || r._id).join(', '));
+        }
+        
         notificationObj.recipients = populatedRecipients;
-      } else {
-        console.log('⚠️ [POPULATE] Notificación sin recipients:', notificationObj._id);
+      }
+      
+      if (isTargetNotification) {
+        console.log('  ✅ Notificación TARGET procesada, retornando');
       }
       
       return notificationObj;
     });
+    
+    // Verificar si la notificación target está en los resultados finales
+    const targetInFinal = populatedNotifications.find(n => n._id.toString() === targetNotificationId);
+    if (targetInFinal) {
+      console.log('✅ [POPULATE] Notificación TARGET está en resultados finales');
+    } else {
+      console.log('❌ [POPULATE] Notificación TARGET NO está en resultados finales');
+      console.log('  - Total notificaciones en resultados:', populatedNotifications.length);
+      console.log('  - IDs en resultados:', populatedNotifications.map(n => n._id.toString()));
+    }
     
     notifications = populatedNotifications;
     

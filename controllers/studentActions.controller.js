@@ -482,10 +482,15 @@ exports.createLog = async (req, res) => {
       division: student.division._id,
       account: student.division.cuenta,
       fechaAccion: fechaAccion ? new Date(fechaAccion) : new Date(),
-      comentarios,
       imagenes: imagenes || [],
       estado: 'registrado'
     };
+
+    // Agregar comentarios solo si existe y no está vacío
+    if (comentarios && typeof comentarios === 'string' && comentarios.trim().length > 0) {
+      actionLogData.comentarios = comentarios.trim();
+      console.log('✅ [STUDENT ACTION LOG CREATE] Comentarios a guardar:', actionLogData.comentarios);
+    }
 
     // Agregar valor solo si existe y no está vacío
     if (valor && typeof valor === 'string' && valor.trim().length > 0) {

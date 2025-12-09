@@ -142,15 +142,16 @@ exports.createTutorAction = async (req, res) => {
       console.log('👥 [TUTOR ACTION] Coordinadores encontrados:', coordinatorUsers.length);
 
       if (coordinatorUsers.length > 0) {
-        // Crear notificación para cada coordinador
+        // Crear UNA sola notificación con el tutor como sender y todos los coordinadores como recipients
         const notification = new Notification({
           title: actionTitle,
           message: comment,
-          type: 'coordinador',
-          sender: userId,
+          type: 'tutor', // Tipo "tutor" para notificaciones de acciones rápidas
+          sender: userId, // El tutor que genera la acción
           account: accountId,
           division: divisionId,
-          recipients: coordinatorUsers,
+          recipients: coordinatorUsers, // Todos los coordinadores de la división
+          associatedStudent: studentId, // Estudiante activo del tutor en el momento de crear la acción
           status: 'sent',
           priority: 'normal',
           readBy: [],
@@ -158,10 +159,12 @@ exports.createTutorAction = async (req, res) => {
         });
 
         await notification.save();
-        console.log('✅ [TUTOR ACTION] Notificación creada para coordinadores:', notification._id);
+        console.log('✅ [TUTOR ACTION] Notificación única creada:', notification._id);
+        console.log('   - Emisor (tutor):', userId.toString());
+        console.log('   - Recipients (coordinadores):', coordinatorUsers.length, 'coordinadores');
+        console.log('   - Coordinadores IDs:', coordinatorUsers.map(id => id.toString()));
 
-        // TODO: Aquí se podría agregar el envío de push notifications
-        // await sendPushNotificationToCoordinators(coordinatorUsers, notification);
+        // TODO: Aquí se podría agregar el envío de push notifications a coordinadores
       } else {
         console.log('⚠️ [TUTOR ACTION] No se encontraron coordinadores para la división');
       }

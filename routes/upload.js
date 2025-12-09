@@ -28,9 +28,16 @@ const uploadVideoToMemory = multer({
     fileSize: 50 * 1024 * 1024, // 50MB máximo para videos (coincide con el límite del cliente)
   },
   fileFilter: (req, file, cb) => {
+    console.log('📹 [MULTER] fileFilter llamado');
+    console.log('📹 [MULTER] file.fieldname:', file.fieldname);
+    console.log('📹 [MULTER] file.originalname:', file.originalname);
+    console.log('📹 [MULTER] file.mimetype:', file.mimetype);
+    
     if (file.mimetype.startsWith('video/')) {
+      console.log('✅ [MULTER] Video aceptado');
       cb(null, true);
     } else {
+      console.error('❌ [MULTER] Tipo de archivo no es video:', file.mimetype);
       cb(new Error('Solo se permiten archivos de video'), false);
     }
   }
@@ -352,17 +359,57 @@ router.post('/s3/image', authenticateToken, uploadToMemory.single('image'), asyn
 });
 
 // Upload de video a S3
-router.post('/s3/video', authenticateToken, uploadVideoToMemory.single('video'), async (req, res) => {
+router.post('/s3/video', authenticateToken, (req, res, next) => {
+  console.log('📹 [UPLOAD] Middleware antes de multer');
+  console.log('📹 [UPLOAD] Content-Type recibido:', req.headers['content-type']);
+  console.log('📹 [UPLOAD] Content-Length:', req.headers['content-length']);
+  
+  // Llamar a multer
+  uploadVideoToMemory.single('video')(req, res, (err) => {
+    if (err) {
+      console.error('❌ [UPLOAD] Error en multer:', err);
+      console.error('❌ [UPLOAD] Error message:', err.message);
+      console.error('❌ [UPLOAD] Error code:', err.code);
+      return next(err);
+    }
+    console.log('✅ [UPLOAD] Multer procesado exitosamente');
+    console.log('📹 [UPLOAD] req.file después de multer:', req.file ? 'presente' : 'ausente');
+    if (req.file) {
+      console.log('📹 [UPLOAD] req.file.fieldname:', req.file.fieldname);
+      console.log('📹 [UPLOAD] req.file.originalname:', req.file.originalname);
+      console.log('📹 [UPLOAD] req.file.mimetype:', req.file.mimetype);
+      console.log('📹 [UPLOAD] req.file.size:', req.file.size);
+    }
+    next();
+  });
+}, async (req, res) => {
   const startTime = Date.now();
   try {
     console.log('📹 [UPLOAD] Iniciando upload de video a S3');
     console.log('📹 [UPLOAD] Request recibido, tamaño del body:', req.headers['content-length'] || 'desconocido');
+    console.log('📹 [UPLOAD] Content-Type:', req.headers['content-type'] || 'no especificado');
+    console.log('📹 [UPLOAD] req.file:', req.file ? 'presente' : 'ausente');
+    console.log('📹 [UPLOAD] req.files:', req.files ? 'presente' : 'ausente');
+    console.log('📹 [UPLOAD] req.body keys:', Object.keys(req.body || {}));
     
     if (!req.file) {
       console.error('❌ [UPLOAD] No se proporcionó ningún video');
+      console.error('❌ [UPLOAD] req.file es:', req.file);
+      console.error('❌ [UPLOAD] req.files es:', req.files);
+      console.error('❌ [UPLOAD] req.body es:', req.body);
+      
+      // Si hay un error de multer, puede estar en req.fileError
+      if (req.fileError) {
+        console.error('❌ [UPLOAD] Error de multer:', req.fileError);
+        return res.status(400).json({
+          success: false,
+          message: req.fileError.message || 'Error al procesar el archivo de video'
+        });
+      }
+      
       return res.status(400).json({
         success: false,
-        message: 'No se proporcionó ningún video'
+        message: 'No se proporcionó ningún video. Asegúrate de que el campo se llame "video" en el FormData.'
       });
     }
 
@@ -408,12 +455,60 @@ router.post('/s3/video', authenticateToken, uploadVideoToMemory.single('video'),
     console.error(`❌ [UPLOAD] Error message:`, error.message);
     console.error(`❌ [UPLOAD] Error stack:`, error.stack);
     
+    // Verificar si es un error de multer relacionado con el campo 'video'
+    if (error.message && error.message.includes("video")) {
+      console.error(`❌ [UPLOAD] Error relacionado con el campo 'video':`, error.message);
+    }
+    
     res.status(500).json({
       success: false,
       message: 'Error al subir el video a S3',
       error: error.message
     });
   }
+}, (error, req, res, next) => {
+  // Manejo de errores de multer
+  if (error) {
+    console.error('❌ [UPLOAD] Error en middleware de multer:', error);
+    console.error('❌ [UPLOAD] Error type:', error.constructor.name);
+    console.error('❌ [UPLOAD] Error message:', error.message);
+    
+    if (error instanceof multer.MulterError) {
+      console.error('❌ [UPLOAD] Es un error de Multer, código:', error.code);
+      if (error.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({
+          success: false,
+          message: 'El video es demasiado grande. El tamaño máximo es 50MB.'
+        });
+      }
+      if (error.code === 'LIMIT_UNEXPECTED_FILE') {
+        return res.status(400).json({
+          success: false,
+          message: 'Campo inesperado en el FormData. Asegúrate de que el campo se llame "video".'
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: `Error al procesar el archivo: ${error.message}`
+      });
+    }
+    
+    // Verificar si el error menciona 'video'
+    if (error.message && (error.message.includes('video') || error.message.includes("Property 'video' doesn't exist"))) {
+      console.error('❌ [UPLOAD] Error relacionado con la propiedad video');
+      return res.status(400).json({
+        success: false,
+        message: 'Error al procesar el video. Asegúrate de que el FormData contenga un campo llamado "video".'
+      });
+    }
+    
+    return res.status(400).json({
+      success: false,
+      message: error.message || 'Error al procesar el archivo de video'
+    });
+  }
+  
+  next();
 });
 
 // Upload de archivo genérico a S3 (para formularios)

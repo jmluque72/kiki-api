@@ -41,6 +41,8 @@ const StudentActionLog = require('./shared/models/StudentActionLog');
 const FormRequest = require('./shared/models/FormRequest');
 const FormResponse = require('./shared/models/FormResponse');
 const FormDivisionAssociation = require('./shared/models/FormDivisionAssociation');
+const EmailUnsubscribe = require('./shared/models/EmailUnsubscribe');
+const EmailDelivery = require('./shared/models/EmailDelivery');
 
 // Importar servicios
 const RefreshTokenService = require('./services/refreshTokenService');
@@ -5943,6 +5945,110 @@ app.get('/admin/login-stats', authenticateToken, requireAdmin, async (req, res) 
   }
 });
 
+// Obtener lista de usuarios que hicieron login y los que no (solo administradores)
+app.get('/admin/users-login-status', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { timeWindow = 7, status = 'approved' } = req.query;
+    const timeWindowHours = parseInt(timeWindow, 10) || 7;
+    const cutoffTime = new Date(Date.now() - timeWindowHours * 24 * 60 * 60 * 1000);
+    
+    console.log(`📊 [USER LOGIN STATUS] Obteniendo estado de login de usuarios (últimos ${timeWindowHours} días)...`);
+    
+    // Obtener todos los usuarios activos
+    const allUsers = await User.find({ status: status })
+      .populate('role', 'nombre')
+      .select('email name role status createdAt')
+      .sort({ email: 1 });
+    
+    // Obtener todos los logins exitosos en el período
+    const successfulLogins = await LoginAttempt.find({
+      success: true,
+      createdAt: { $gte: cutoffTime }
+    })
+      .select('email createdAt ipAddress deviceInfo location metadata')
+      .sort({ createdAt: -1 });
+    
+    // Crear un mapa de emails que hicieron login (último login)
+    const usersWithLogin = new Map();
+    successfulLogins.forEach(login => {
+      const email = login.email.toLowerCase();
+      if (!usersWithLogin.has(email) || usersWithLogin.get(email).createdAt < login.createdAt) {
+        usersWithLogin.set(email, {
+          lastLogin: login.createdAt,
+          ipAddress: login.ipAddress,
+          deviceInfo: login.deviceInfo,
+          location: login.location,
+          userId: login.metadata?.userId
+        });
+      }
+    });
+    
+    // Separar usuarios en dos grupos
+    const usersLoggedIn = [];
+    const usersNotLoggedIn = [];
+    
+    allUsers.forEach(user => {
+      const userEmail = user.email.toLowerCase();
+      const loginInfo = usersWithLogin.get(userEmail);
+      
+      const userData = {
+        _id: user._id,
+        email: user.email,
+        name: user.name,
+        role: user.role?.nombre || 'Sin rol',
+        status: user.status,
+        createdAt: user.createdAt
+      };
+      
+      if (loginInfo) {
+        // Usuario que hizo login
+        usersLoggedIn.push({
+          ...userData,
+          lastLogin: loginInfo.lastLogin,
+          loginCount: successfulLogins.filter(l => l.email.toLowerCase() === userEmail).length,
+          lastLoginIP: loginInfo.ipAddress,
+          lastLoginDevice: loginInfo.deviceInfo,
+          lastLoginLocation: loginInfo.location
+        });
+      } else {
+        // Usuario que NO hizo login
+        usersNotLoggedIn.push(userData);
+      }
+    });
+    
+    // Ordenar por fecha de último login (más reciente primero)
+    usersLoggedIn.sort((a, b) => new Date(b.lastLogin) - new Date(a.lastLogin));
+    
+    // Estadísticas resumidas
+    const stats = {
+      totalUsers: allUsers.length,
+      usersLoggedIn: usersLoggedIn.length,
+      usersNotLoggedIn: usersNotLoggedIn.length,
+      loginRate: allUsers.length > 0 
+        ? ((usersLoggedIn.length / allUsers.length) * 100).toFixed(2) + '%'
+        : '0%',
+      period: `${timeWindowHours} días`
+    };
+    
+    res.json({
+      success: true,
+      data: {
+        stats: stats,
+        usersLoggedIn: usersLoggedIn,
+        usersNotLoggedIn: usersNotLoggedIn
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ [USER LOGIN STATUS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error obteniendo estado de login de usuarios',
+      error: error.message
+    });
+  }
+});
+
 // Obtener intentos recientes de un usuario
 app.get('/admin/user-login-attempts/:email', authenticateToken, requireAdmin, async (req, res) => {
   try {
@@ -6025,10 +6131,10 @@ app.post('/admin/cleanup-login-attempts', authenticateToken, requireSuperAdmin, 
 // Registrar acción de estudiante (para coordinadores)
 app.post('/api/student-actions/log', authenticateToken, setUserInstitution, async (req, res) => {
   try {
-    const { estudiante, accion, comentarios, imagenes, fechaAccion } = req.body;
+    const { estudiante, accion, comentarios, imagenes, fechaAccion, valor } = req.body;
     const currentUser = req.user;
 
-    console.log('🎯 [STUDENT ACTION LOG] Registrando acción:', { estudiante, accion, comentarios });
+    console.log('🎯 [STUDENT ACTION LOG] Registrando acción:', { estudiante, accion, comentarios, valor });
 
     // Verificar que el estudiante existe y pertenece a la institución
     const student = await Student.findById(estudiante).populate('division');
@@ -6047,18 +6153,27 @@ app.post('/api/student-actions/log', authenticateToken, setUserInstitution, asyn
       return res.status(403).json({ success: false, message: 'El estudiante no pertenece a tu institución' });
     }
 
-    // Crear el log de acción
-    const actionLog = new StudentActionLog({
+    // Preparar datos del log de acción
+    const actionLogData = {
       estudiante,
       accion,
       registradoPor: currentUser._id,
       division: student.division._id,
       account: student.division.cuenta,
       fechaAccion: fechaAccion ? new Date(fechaAccion) : new Date(),
-      comentarios,
+      comentarios: comentarios || undefined,
       imagenes: imagenes || [],
       estado: 'registrado'
-    });
+    };
+
+    // Agregar valor solo si existe y no está vacío
+    if (valor && typeof valor === 'string' && valor.trim().length > 0) {
+      actionLogData.valor = valor.trim();
+      console.log('✅ [STUDENT ACTION LOG] Valor a guardar:', actionLogData.valor);
+    }
+
+    // Crear el log de acción
+    const actionLog = new StudentActionLog(actionLogData);
 
     await actionLog.save();
 
@@ -6454,6 +6569,157 @@ app.post('/api/admin/assign-account', authenticateToken, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor',
+      error: error.message
+    });
+  }
+});
+
+// ============================================
+// ENDPOINTS DE EMAIL - DESUSCRIPCIÓN Y MONITOREO
+// ============================================
+
+// Endpoint para desuscribirse de emails
+app.get('/unsubscribe', async (req, res) => {
+  try {
+    const { email } = req.query;
+    
+    if (!email) {
+      return res.status(400).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <title>Error - Desuscripción</title>
+          <style>
+            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+            .error { color: #d32f2f; }
+          </style>
+        </head>
+        <body>
+          <h1 class="error">Error</h1>
+          <p>No se proporcionó una dirección de email válida.</p>
+          <p><a href="/">Volver al inicio</a></p>
+        </body>
+        </html>
+      `);
+    }
+    
+    const normalizedEmail = email.toLowerCase().trim();
+    const ipAddress = req.ip || req.connection.remoteAddress;
+    const userAgent = req.get('user-agent');
+    
+    // Verificar si ya está desuscrito
+    const existing = await EmailUnsubscribe.findOne({ email: normalizedEmail });
+    
+    if (existing) {
+      return res.send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="UTF-8">
+          <title>Ya desuscrito - Kiki App</title>
+          <style>
+            body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f5f5f5; }
+            .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            .success { color: #2e7d32; }
+            .info { color: #666; margin-top: 20px; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <h1 class="success">✓ Ya estás desuscrito</h1>
+            <p>La dirección <strong>${normalizedEmail}</strong> ya está en nuestra lista de desuscripción.</p>
+            <p class="info">No recibirás más emails de Kiki App.</p>
+            <p class="info">Si cambias de opinión, contacta al administrador de tu institución.</p>
+          </div>
+        </body>
+        </html>
+      `);
+    }
+    
+    // Desuscribir el email
+    await EmailUnsubscribe.unsubscribe(normalizedEmail, 'user_request', {
+      ipAddress,
+      userAgent
+    });
+    
+    console.log(`📧 [UNSUBSCRIBE] Email desuscrito: ${normalizedEmail} desde IP: ${ipAddress}`);
+    
+    res.send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Desuscripción exitosa - Kiki App</title>
+        <style>
+          body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background-color: #f5f5f5; }
+          .container { max-width: 600px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .success { color: #2e7d32; }
+          .info { color: #666; margin-top: 20px; line-height: 1.6; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <h1 class="success">✓ Desuscripción exitosa</h1>
+          <p>La dirección <strong>${normalizedEmail}</strong> ha sido removida de nuestra lista de envío.</p>
+          <p class="info">No recibirás más emails promocionales de Kiki App.</p>
+          <p class="info"><strong>Nota:</strong> Aún recibirás emails importantes relacionados con tu cuenta, como notificaciones de seguridad y recuperación de contraseña.</p>
+          <p class="info">Si cambias de opinión, contacta al administrador de tu institución.</p>
+        </div>
+      </body>
+      </html>
+    `);
+    
+  } catch (error) {
+    console.error('❌ [UNSUBSCRIBE] Error procesando desuscripción:', error);
+    res.status(500).send(`
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>Error - Desuscripción</title>
+        <style>
+          body { font-family: Arial, sans-serif; text-align: center; padding: 50px; }
+          .error { color: #d32f2f; }
+        </style>
+      </head>
+      <body>
+        <h1 class="error">Error</h1>
+        <p>Ocurrió un error al procesar tu desuscripción. Por favor, intenta nuevamente más tarde.</p>
+        <p><a href="/">Volver al inicio</a></p>
+      </body>
+      </html>
+    `);
+  }
+});
+
+// Endpoint para obtener estadísticas de deliverabilidad (requiere autenticación admin)
+app.get('/api/email/stats', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { hours = 24 } = req.query;
+    const hoursNum = parseInt(hours, 10) || 24;
+    
+    const deliveryStats = await EmailDelivery.getDeliveryStats(hoursNum);
+    const statsByType = await EmailDelivery.getStatsByEmailType(hoursNum);
+    const unsubscribeCount = await EmailUnsubscribe.countDocuments();
+    
+    res.json({
+      success: true,
+      data: {
+        period: `${hoursNum} horas`,
+        delivery: deliveryStats,
+        byEmailType: statsByType,
+        unsubscribes: {
+          total: unsubscribeCount
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ [EMAIL STATS] Error obteniendo estadísticas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error obteniendo estadísticas de email',
       error: error.message
     });
   }
