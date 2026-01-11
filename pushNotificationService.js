@@ -1,3 +1,6 @@
+// Asegurar que dotenv esté cargado antes de inicializar
+require('dotenv').config();
+
 const apn = require('apn');
 const https = require('https');
 const admin = require('firebase-admin');
@@ -16,12 +19,14 @@ class PushNotificationService {
       let apnsProduction = process.env.NODE_ENV === 'production';
       
       // Si APNS_PRODUCTION está definido, usar ese valor
-      if (process.env.APNS_PRODUCTION !== undefined) {
+      // IMPORTANTE: Verificar que la variable existe Y no es una cadena vacía
+      if (process.env.APNS_PRODUCTION !== undefined && process.env.APNS_PRODUCTION !== '') {
         const apnsProdValue = process.env.APNS_PRODUCTION.toString().toLowerCase().trim();
         apnsProduction = apnsProdValue === 'true' || apnsProdValue === '1' || apnsProdValue === 'yes';
         console.log(`📋 [PUSH SERVICE] APNS_PRODUCTION encontrado: "${process.env.APNS_PRODUCTION}" -> ${apnsProduction}`);
       } else {
-        console.log(`📋 [PUSH SERVICE] APNS_PRODUCTION no definido, usando NODE_ENV: ${process.env.NODE_ENV}`);
+        console.log(`📋 [PUSH SERVICE] APNS_PRODUCTION no definido o vacío, usando NODE_ENV: ${process.env.NODE_ENV}`);
+        console.log(`📋 [PUSH SERVICE] APNS_PRODUCTION valor: "${process.env.APNS_PRODUCTION}" (tipo: ${typeof process.env.APNS_PRODUCTION})`);
       }
       
       // Crear provider para producción
@@ -46,13 +51,18 @@ class PushNotificationService {
       
       console.log(`✅ [PUSH SERVICE] APNs configurado - Entorno por defecto: ${apnsProduction ? 'PRODUCTION' : 'SANDBOX'}`);
       console.log(`📋 [PUSH SERVICE] Variables APNs: KEY_PATH=${apnsKeyPath ? '✅' : '❌'}, KEY_ID=${apnsKeyId ? '✅' : '❌'}, TEAM_ID=${apnsTeamId ? '✅' : '❌'}`);
+      console.log(`📋 [PUSH SERVICE] Valores leídos al inicializar:`);
+      console.log(`   NODE_ENV: ${process.env.NODE_ENV}`);
+      console.log(`   APNS_PRODUCTION: ${process.env.APNS_PRODUCTION} (tipo: ${typeof process.env.APNS_PRODUCTION})`);
+      console.log(`   apnsProduction calculado: ${apnsProduction}`);
       
       try {
         // Crear ambos providers para poder intentar ambos entornos
         this.apnProviderProduction = new apn.Provider(this.iosOptionsProduction);
         this.apnProviderSandbox = new apn.Provider(this.iosOptionsSandbox);
         this.defaultApnProvider = apnsProduction ? this.apnProviderProduction : this.apnProviderSandbox;
-        console.log('✅ [PUSH SERVICE] APNs configurado correctamente (ambos entornos disponibles)');
+        console.log(`✅ [PUSH SERVICE] APNs configurado correctamente (ambos entornos disponibles)`);
+        console.log(`📋 [PUSH SERVICE] defaultApnProvider configurado para: ${apnsProduction ? 'PRODUCTION' : 'SANDBOX'}`);
       } catch (error) {
         console.error('❌ [PUSH SERVICE] Error configurando APNs:', error.message);
         this.apnProviderProduction = null;
@@ -61,6 +71,9 @@ class PushNotificationService {
       }
     } else {
       console.warn('⚠️ [PUSH SERVICE] APNs no configurado. Variables requeridas: APNS_KEY_PATH, APNS_KEY_ID, APNS_TEAM_ID');
+      console.warn(`   APNS_KEY_PATH: ${apnsKeyPath ? '✅' : '❌'}`);
+      console.warn(`   APNS_KEY_ID: ${apnsKeyId ? '✅' : '❌'}`);
+      console.warn(`   APNS_TEAM_ID: ${apnsTeamId ? '✅' : '❌'}`);
       this.apnProviderProduction = null;
       this.apnProviderSandbox = null;
       this.defaultApnProvider = null;
@@ -141,7 +154,12 @@ class PushNotificationService {
   async sendNotification(deviceToken, platform, notification) {
     try {
       if (platform === 'ios') {
-        if (!this.apnProvider) {
+        // Verificar si hay algún provider disponible (production o sandbox)
+        if (!this.defaultApnProvider && !this.apnProviderProduction && !this.apnProviderSandbox) {
+          console.error('❌ [PUSH SERVICE] APNs no está configurado. Verificando variables de entorno...');
+          console.error(`   APNS_KEY_PATH: ${process.env.APNS_KEY_PATH ? '✅' : '❌'}`);
+          console.error(`   APNS_KEY_ID: ${process.env.APNS_KEY_ID ? '✅' : '❌'}`);
+          console.error(`   APNS_TEAM_ID: ${process.env.APNS_TEAM_ID ? '✅' : '❌'}`);
           throw new Error('APNs no está configurado. Verifica las variables de entorno: APNS_KEY_PATH, APNS_KEY_ID, APNS_TEAM_ID');
         }
         return await this.sendIOSNotification(deviceToken, notification);
@@ -183,18 +201,59 @@ class PushNotificationService {
     // Intentar primero con el entorno por defecto
     let provider = this.defaultApnProvider;
     let envName = this.defaultApnProvider === this.apnProviderProduction ? 'PRODUCTION' : 'SANDBOX';
-    
-    console.log(`📱 [PUSH SERVICE] Enviando notificación iOS - Entorno APNs: ${envName}, Token: ${deviceToken.substring(0, 20)}...`);
+    console.log('provider', provider);
+    console.log('envName', envName);
+    // Log detallado del entorno que se va a usar
+    console.log(`📱 [PUSH SERVICE] Enviando notificación iOS:`);
+    console.log(`   Entorno APNs seleccionado: ${envName}`);
+    console.log(`   defaultApnProvider === apnProviderProduction: ${this.defaultApnProvider === this.apnProviderProduction}`);
+    console.log(`   defaultApnProvider === apnProviderSandbox: ${this.defaultApnProvider === this.apnProviderSandbox}`);
+    console.log(`   Token: ${deviceToken.substring(0, 20)}...`);
     
     let result = await provider.send(apnNotification, deviceToken);
     
-    // Si falla con BadEnvironmentKeyInToken, intentar con el otro entorno
+    // Imprimir traza completa de la respuesta de APNs
+    console.log(`📊 [PUSH SERVICE] Respuesta APNs completa:`);
+    console.log(`   - Enviados: ${result.sent?.length || 0}`);
+    console.log(`   - Fallidos: ${result.failed?.length || 0}`);
+    
+    if (result.sent && result.sent.length > 0) {
+      console.log(`   ✅ Tokens enviados exitosamente:`);
+      result.sent.forEach((sent, index) => {
+        console.log(`      ${index + 1}. Device: ${sent.device}`);
+        if (sent.status) console.log(`         Status: ${sent.status}`);
+      });
+    }
+    
+    if (result.failed && result.failed.length > 0) {
+      console.log(`   ❌ Tokens que fallaron:`);
+      result.failed.forEach((failed, index) => {
+        console.log(`      ${index + 1}. Device: ${failed.device}`);
+        if (failed.status) console.log(`         Status: ${failed.status}`);
+        if (failed.response) {
+          console.log(`         Response:`, JSON.stringify(failed.response, null, 2));
+        }
+        if (failed.error) {
+          console.log(`         Error:`, failed.error);
+        }
+      });
+    }
+    
+    // Si falla con BadEnvironmentKeyInToken o BadDeviceToken, intentar con el otro entorno
+    // BadDeviceToken puede ocurrir cuando el token es válido pero para el otro entorno (sandbox vs production)
     if (result.failed && result.failed.length > 0) {
       const error = result.failed[0];
       const errorMessage = error.response?.reason || error.error?.message || error.error || 'Error desconocido';
       
-      if (errorMessage.includes('BadEnvironmentKeyInToken') || errorMessage.includes('BadEnvironment')) {
-        console.warn(`⚠️ [PUSH SERVICE] Error de entorno detectado. Intentando con el otro entorno...`);
+      // Intentar con el otro entorno si:
+      // 1. BadEnvironmentKeyInToken: La clave APNs es del entorno incorrecto
+      // 2. BadDeviceToken: El token del dispositivo es del entorno incorrecto (sandbox vs production)
+      const shouldRetry = errorMessage.includes('BadEnvironmentKeyInToken') || 
+                         errorMessage.includes('BadEnvironment') ||
+                         errorMessage === 'BadDeviceToken';
+      
+      if (shouldRetry) {
+        console.warn(`⚠️ [PUSH SERVICE] Error de entorno/token detectado (${errorMessage}). Intentando con el otro entorno...`);
         
         // Cambiar al otro entorno
         if (provider === this.apnProviderProduction) {
@@ -207,6 +266,33 @@ class PushNotificationService {
         
         console.log(`🔄 [PUSH SERVICE] Reintentando con entorno: ${envName}`);
         result = await provider.send(apnNotification, deviceToken);
+        
+        // Imprimir traza del reintento
+        console.log(`📊 [PUSH SERVICE] Respuesta APNs (reintento):`);
+        console.log(`   - Enviados: ${result.sent?.length || 0}`);
+        console.log(`   - Fallidos: ${result.failed?.length || 0}`);
+        
+        if (result.sent && result.sent.length > 0) {
+          console.log(`   ✅ Tokens enviados exitosamente (reintento):`);
+          result.sent.forEach((sent, index) => {
+            console.log(`      ${index + 1}. Device: ${sent.device}`);
+            if (sent.status) console.log(`         Status: ${sent.status}`);
+          });
+        }
+        
+        if (result.failed && result.failed.length > 0) {
+          console.log(`   ❌ Tokens que fallaron (reintento):`);
+          result.failed.forEach((failed, index) => {
+            console.log(`      ${index + 1}. Device: ${failed.device}`);
+            if (failed.status) console.log(`         Status: ${failed.status}`);
+            if (failed.response) {
+              console.log(`         Response:`, JSON.stringify(failed.response, null, 2));
+            }
+            if (failed.error) {
+              console.log(`         Error:`, failed.error);
+            }
+          });
+        }
       }
       
       // Si aún falla, lanzar error
@@ -220,7 +306,15 @@ class PushNotificationService {
       }
     }
     
-    console.log(`✅ [PUSH SERVICE] Notificación iOS enviada exitosamente - Entorno: ${envName}`);
+    // Log final del resultado
+    if (result.sent && result.sent.length > 0) {
+      console.log(`✅ [PUSH SERVICE] Notificación iOS enviada exitosamente - Entorno: ${envName}`);
+      console.log(`   Total enviados: ${result.sent.length}`);
+    } else if (result.failed && result.failed.length > 0) {
+      console.log(`⚠️ [PUSH SERVICE] Notificación iOS con errores - Entorno: ${envName}`);
+      console.log(`   Total fallidos: ${result.failed.length}`);
+    }
+    
     return result;
   }
 

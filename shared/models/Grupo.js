@@ -23,6 +23,11 @@ const grupoSchema = new mongoose.Schema({
     default: true,
     required: [true, 'El estado activo es obligatorio']
   },
+  requiereAprobacionNotificaciones: {
+    type: Boolean,
+    default: false,
+    required: false
+  },
   creadoPor: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

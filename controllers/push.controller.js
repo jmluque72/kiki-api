@@ -11,6 +11,14 @@ async function registerToken(req, res) {
     const userId = req.user.userId;
 
     logger.info('🔔 [PUSH REGISTER] Registrando token para usuario:', userId);
+    
+    // Log detallado del token recibido
+    console.log('📋 [PUSH REGISTER] Token recibido del cliente:');
+    console.log(`   Token completo: ${token}`);
+    console.log(`   Longitud: ${token?.length || 0}`);
+    console.log(`   Tipo: ${typeof token}`);
+    console.log(`   Plataforma: ${platform}`);
+    console.log(`   Usuario ID: ${userId}`);
 
     // Validar campos requeridos
     if (!token || !platform) {
@@ -28,27 +36,93 @@ async function registerToken(req, res) {
       });
     }
 
-    // Buscar o crear dispositivo
-    const device = await Device.findOneAndUpdate(
-      { 
+    // Limpiar el token (eliminar espacios en blanco, saltos de línea, etc.)
+    const cleanToken = token.trim().replace(/\s+/g, '');
+    console.log(`📋 [PUSH REGISTER] Token limpiado: ${cleanToken}`);
+    console.log(`   Longitud después de limpiar: ${cleanToken.length}`);
+
+    // IMPORTANTE: Buscar primero si hay un dispositivo existente para este usuario
+    // Si existe, actualizar el token en lugar de crear uno nuevo
+    const existingDevice = await Device.findOne({ userId: userId, isActive: true });
+    
+    let device;
+    
+    if (existingDevice) {
+      console.log(`📋 [PUSH REGISTER] Dispositivo existente encontrado para el usuario:`);
+      console.log(`   Device ID: ${existingDevice._id}`);
+      console.log(`   Token actual en DB: ${existingDevice.pushToken}`);
+      console.log(`   Token nuevo recibido: ${cleanToken}`);
+      
+      if (existingDevice.pushToken !== cleanToken) {
+        console.log(`⚠️ [PUSH REGISTER] El token ha cambiado! Actualizando dispositivo existente...`);
+        
+        // Si hay otro dispositivo con el token nuevo (de otro usuario), desactivarlo primero
+        // para evitar conflictos con el índice único
+        await Device.updateMany(
+          { pushToken: cleanToken, userId: { $ne: userId } },
+          { $set: { isActive: false } }
+        );
+      }
+      
+      // Actualizar el dispositivo existente con el nuevo token
+      existingDevice.pushToken = cleanToken;
+      existingDevice.platform = platform;
+      existingDevice.deviceId = deviceId || existingDevice.deviceId;
+      existingDevice.appVersion = appVersion || existingDevice.appVersion;
+      existingDevice.osVersion = osVersion || existingDevice.osVersion;
+      existingDevice.isActive = true;
+      existingDevice.lastUsed = new Date();
+      
+      await existingDevice.save();
+      device = existingDevice;
+      
+      console.log(`✅ [PUSH REGISTER] Dispositivo actualizado con nuevo token`);
+    } else {
+      console.log(`📋 [PUSH REGISTER] No hay dispositivo existente para el usuario, creando uno nuevo...`);
+      
+      // Si hay otro dispositivo con el token nuevo (de otro usuario), desactivarlo primero
+      await Device.updateMany(
+        { pushToken: cleanToken, userId: { $ne: userId } },
+        { $set: { isActive: false } }
+      );
+      
+      // Crear nuevo dispositivo
+      device = await Device.create({
         userId: userId,
-        pushToken: token 
-      },
-      {
-        userId: userId,
-        pushToken: token,
+        pushToken: cleanToken,
         platform: platform,
         deviceId: deviceId || null,
         appVersion: appVersion || null,
         osVersion: osVersion || null,
         isActive: true,
         lastUsed: new Date()
-      },
-      { 
-        upsert: true, 
-        new: true 
-      }
+      });
+      
+      console.log(`✅ [PUSH REGISTER] Nuevo dispositivo creado`);
+    }
+    
+    // Asegurarse de que solo este dispositivo esté activo para el usuario
+    await Device.updateMany(
+      { userId: userId, _id: { $ne: device._id }, isActive: true },
+      { $set: { isActive: false } }
     );
+    
+    console.log(`📋 [PUSH REGISTER] Verificado: solo este dispositivo está activo para el usuario`);
+
+    // Log del token guardado en la DB
+    console.log('📋 [PUSH REGISTER] Token guardado en la DB:');
+    console.log(`   Token completo: ${device.pushToken}`);
+    console.log(`   Longitud: ${device.pushToken?.length || 0}`);
+    console.log(`   Device ID: ${device._id}`);
+    
+    // Verificar si coinciden
+    if (cleanToken !== device.pushToken) {
+      console.error('❌ [PUSH REGISTER] ERROR: El token limpiado no coincide con el guardado en DB!');
+      console.error(`   Token limpiado: ${cleanToken}`);
+      console.error(`   Token en DB: ${device.pushToken}`);
+    } else {
+      console.log('✅ [PUSH REGISTER] Token coincide correctamente');
+    }
 
     logger.info('🔔 [PUSH REGISTER] Token registrado exitosamente:', device._id);
 

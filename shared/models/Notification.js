@@ -57,8 +57,32 @@ const notificationSchema = new mongoose.Schema({
   }],
   status: {
     type: String,
-    enum: ['sent', 'delivered', 'read'],
+    enum: ['pending', 'sent', 'delivered', 'read', 'rejected'],
     default: 'sent'
+  },
+  approvedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false
+  },
+  approvedAt: {
+    type: Date,
+    required: false
+  },
+  rejectedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: false
+  },
+  rejectedAt: {
+    type: Date,
+    required: false
+  },
+  rejectionReason: {
+    type: String,
+    trim: true,
+    maxlength: [500, 'La razón de rechazo no puede exceder 500 caracteres'],
+    required: false
   },
   priority: {
     type: String,
@@ -91,6 +115,10 @@ notificationSchema.index({ recipients: 1 });
 notificationSchema.index({ sentAt: -1 });
 notificationSchema.index({ status: 1 });
 notificationSchema.index({ type: 1 });
+
+// Índice compuesto para optimizar consultas de backoffice (filtrar por account y ordenar por sentAt)
+// Este índice es crítico para la consulta getAllInstitutionNotifications
+notificationSchema.index({ account: 1, sentAt: -1 });
 
 // Método para marcar como leída
 notificationSchema.methods.markAsRead = async function(userId) {

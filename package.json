@@ -15,9 +15,13 @@
     "test:ci": "jest --ci --coverage --watchAll=false",
     "worker:email": "node workers/start-email-worker.js",
     "worker:push": "node workers/start-push-worker.js",
+    "debug:push": "node scripts/debug-push-notifications.js",
+    "get:device": "node scripts/get-device.js",
+    "check:push-queue": "node scripts/check-push-queue.js",
     "sqs:create-queue": "node scripts/create-sqs-queue.js",
     "sqs:create-push-queue": "node scripts/create-push-sqs-queue.js",
     "db:add-indexes": "node scripts/add-recommended-indexes.js",
+    "db:create-notification-index": "node scripts/create-notification-backoffice-index.js",
     "migrate:fix-form-responses": "node scripts/fix-form-responses-preguntaid.js"
   },
   "keywords": [

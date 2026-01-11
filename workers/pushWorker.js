@@ -7,7 +7,22 @@ const config = require('../config/database');
 // Importar servicio de push notifications
 let pushNotificationService;
 try {
+  // Asegurar que dotenv esté cargado antes de requerir el servicio
+  require('dotenv').config();
+  
   pushNotificationService = require('../pushNotificationService');
+  
+  // Verificar que el servicio esté inicializado correctamente
+  if (pushNotificationService) {
+    console.log('🔔 [PUSH WORKER] Servicio de push cargado');
+    console.log(`   APNs configurado: ${pushNotificationService.apnProvider || pushNotificationService.defaultApnProvider ? '✅' : '❌'}`);
+    console.log(`   FCM configurado: ${pushNotificationService.fcmInitialized ? '✅' : '❌'}`);
+    
+    // Verificar variables de entorno
+    console.log(`   APNS_KEY_PATH: ${process.env.APNS_KEY_PATH ? '✅' : '❌'}`);
+    console.log(`   APNS_KEY_ID: ${process.env.APNS_KEY_ID ? '✅' : '❌'}`);
+    console.log(`   APNS_TEAM_ID: ${process.env.APNS_TEAM_ID ? '✅' : '❌'}`);
+  }
 } catch (error) {
   console.warn('⚠️ [PUSH WORKER] pushNotificationService no disponible:', error.message);
   pushNotificationService = null;
@@ -28,21 +43,46 @@ const VISIBILITY_TIMEOUT = 300; // 5 minutos de visibilidad
  */
 async function getFamilyUsersForStudent(studentId) {
   try {
+    const Role = require('../shared/models/Role');
+    
+    // Primero obtener los IDs de los roles familyadmin y familyviewer
+    const familyAdminRole = await Role.findOne({ nombre: 'familyadmin' });
+    const familyViewerRole = await Role.findOne({ nombre: 'familyviewer' });
+    
+    const roleIds = [];
+    if (familyAdminRole) roleIds.push(familyAdminRole._id);
+    if (familyViewerRole) roleIds.push(familyViewerRole._id);
+    
+    console.log('🔔 [PUSH WORKER] Buscando familiares para estudiante:', studentId);
+    console.log('🔔 [PUSH WORKER] Role IDs buscados:', roleIds);
+    
+    if (roleIds.length === 0) {
+      console.warn('⚠️ [PUSH WORKER] No se encontraron roles familyadmin o familyviewer');
+      return [];
+    }
+    
+    // Buscar asociaciones activas del estudiante con roles familyadmin y familyviewer
     const associations = await Shared.find({
       student: studentId,
       status: 'active',
-      'role.nombre': { $in: ['familyadmin', 'familyviewer'] }
+      role: { $in: roleIds }
     }).populate('user', 'name email').populate('role', 'nombre');
+    
+    console.log('🔔 [PUSH WORKER] Asociaciones encontradas:', associations.length);
     
     const familyUsers = [];
     
     for (const association of associations) {
-      if (association.user) {
+      if (association.user && association.role) {
+        console.log(`🔔 [PUSH WORKER] Procesando asociación - Usuario: ${association.user.name}, Rol: ${association.role.nombre}`);
+        
         const devices = await Device.find({
           userId: association.user._id,
           isActive: true,
-          pushToken: { $exists: true, $ne: null }
+          pushToken: { $exists: true, $ne: null, $ne: '' }
         });
+        
+        console.log(`🔔 [PUSH WORKER] Usuario ${association.user.name} tiene ${devices.length} dispositivos activos`);
         
         if (devices.length > 0) {
           familyUsers.push({
@@ -50,10 +90,16 @@ async function getFamilyUsersForStudent(studentId) {
             role: association.role,
             devices: devices
           });
+          console.log('🔔 [PUSH WORKER] ✅ Usuario con dispositivos:', association.user.name, '- Dispositivos:', devices.length);
+        } else {
+          console.log('🔔 [PUSH WORKER] ⚠️ Usuario sin dispositivos activos:', association.user.name);
         }
+      } else {
+        console.log('🔔 [PUSH WORKER] ⚠️ Asociación sin usuario o rol válido');
       }
     }
     
+    console.log('🔔 [PUSH WORKER] Total usuarios familiares con dispositivos:', familyUsers.length);
     return familyUsers;
   } catch (error) {
     console.error('❌ [PUSH WORKER] Error obteniendo familiares:', error);
@@ -80,11 +126,39 @@ const pushHandlers = {
     let success = false;
     
     try {
+      console.log(`🔔 [PUSH WORKER] Enviando push notification...`);
+      console.log(`   Token completo recibido: ${deviceToken}`);
+      console.log(`   Longitud del token: ${deviceToken?.length || 0}`);
+      console.log(`   Token (primeros 20): ${deviceToken.substring(0, 20)}...`);
+      console.log(`   Token (últimos 20): ...${deviceToken.substring(deviceToken.length - 20)}`);
+      console.log(`   Plataforma: ${platform}`);
+      console.log(`   Título: ${notification?.title || 'N/A'}`);
+      console.log(`   Mensaje: ${notification?.message || 'N/A'}`);
+      
       result = await pushNotificationService.sendNotification(
         deviceToken,
         platform,
         notification
       );
+      
+      // Imprimir resultado detallado
+      if (platform === 'ios' && result) {
+        console.log(`📊 [PUSH WORKER] Resultado APNs:`);
+        console.log(`   - Enviados: ${result.sent?.length || 0}`);
+        console.log(`   - Fallidos: ${result.failed?.length || 0}`);
+        if (result.sent && result.sent.length > 0) {
+          console.log(`   ✅ Push enviado exitosamente a iOS`);
+        }
+        if (result.failed && result.failed.length > 0) {
+          console.log(`   ❌ Push falló para iOS`);
+          result.failed.forEach((failed, index) => {
+            console.log(`      Error ${index + 1}:`, failed.response || failed.error || 'Error desconocido');
+          });
+        }
+      } else if (platform === 'android' && result) {
+        console.log(`📊 [PUSH WORKER] Resultado FCM:`, result);
+      }
+      
       success = true;
     } catch (error) {
       // Si hay un notificationId, actualizar el estado de la notificación
@@ -184,6 +258,11 @@ const pushHandlers = {
     for (const familyUser of familyUsers) {
       for (const device of familyUser.devices) {
         try {
+          console.log(`🔔 [PUSH WORKER] Token desde DB para usuario ${familyUser.user.name}:`);
+          console.log(`   Token completo: ${device.pushToken}`);
+          console.log(`   Longitud: ${device.pushToken?.length || 0}`);
+          console.log(`   Plataforma: ${device.platform}`);
+          
           await pushNotificationService.sendNotification(
             device.pushToken,
             device.platform,

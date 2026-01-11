@@ -66,6 +66,7 @@ exports.listGroups = async (req, res) => {
           descripcion: grupo.descripcion,
           cuenta: grupo.cuenta,
           activo: grupo.activo,
+          requiereAprobacionNotificaciones: grupo.requiereAprobacionNotificaciones || false,
           creadoPor: grupo.creadoPor,
           createdAt: grupo.createdAt,
           updatedAt: grupo.updatedAt
@@ -164,6 +165,7 @@ exports.createGroup = async (req, res) => {
           descripcion: grupo.descripcion,
           cuenta: grupo.cuenta,
           activo: grupo.activo,
+          requiereAprobacionNotificaciones: grupo.requiereAprobacionNotificaciones || false,
           creadoPor: grupo.creadoPor,
           createdAt: grupo.createdAt
         }
@@ -266,6 +268,7 @@ exports.getGroupById = async (req, res) => {
           descripcion: grupo.descripcion,
           cuenta: grupo.cuenta,
           activo: grupo.activo,
+          requiereAprobacionNotificaciones: grupo.requiereAprobacionNotificaciones || false,
           creadoPor: grupo.creadoPor,
           createdAt: grupo.createdAt,
           updatedAt: grupo.updatedAt
@@ -285,7 +288,7 @@ exports.getGroupById = async (req, res) => {
 // Actualizar grupo
 exports.updateGroup = async (req, res) => {
   try {
-    const { nombre, descripcion, activo } = req.body;
+    const { nombre, descripcion, activo, requiereAprobacionNotificaciones } = req.body;
 
     const grupo = await Grupo.findById(req.params.id)
       .populate('cuenta', 'nombre razonSocial');
@@ -322,6 +325,7 @@ exports.updateGroup = async (req, res) => {
     if (nombre !== undefined) grupo.nombre = nombre;
     if (descripcion !== undefined) grupo.descripcion = descripcion;
     if (activo !== undefined) grupo.activo = activo;
+    if (requiereAprobacionNotificaciones !== undefined) grupo.requiereAprobacionNotificaciones = requiereAprobacionNotificaciones;
 
     await grupo.save();
 
@@ -337,6 +341,7 @@ exports.updateGroup = async (req, res) => {
           descripcion: grupo.descripcion,
           cuenta: grupo.cuenta,
           activo: grupo.activo,
+          requiereAprobacionNotificaciones: grupo.requiereAprobacionNotificaciones || false,
           creadoPor: grupo.creadoPor,
           createdAt: grupo.createdAt,
           updatedAt: grupo.updatedAt

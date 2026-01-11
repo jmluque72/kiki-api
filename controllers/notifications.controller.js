@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const Notification = require('../shared/models/Notification');
+const NotificationTemplate = require('../shared/models/NotificationTemplate');
 const User = require('../shared/models/User');
 const Student = require('../shared/models/Student');
 const Shared = require('../shared/models/Shared');
@@ -12,11 +13,26 @@ async function getFamilyUsersForStudent(studentId) {
   try {
     console.log('🔔 [FAMILY LOOKUP] Buscando familiares para estudiante:', studentId);
     
+    // Primero obtener los IDs de los roles familyadmin y familyviewer
+    const familyAdminRole = await Role.findOne({ nombre: 'familyadmin' });
+    const familyViewerRole = await Role.findOne({ nombre: 'familyviewer' });
+    
+    const roleIds = [];
+    if (familyAdminRole) roleIds.push(familyAdminRole._id);
+    if (familyViewerRole) roleIds.push(familyViewerRole._id);
+    
+    console.log('🔔 [FAMILY LOOKUP] Role IDs buscados:', roleIds);
+    
+    if (roleIds.length === 0) {
+      console.warn('⚠️ [FAMILY LOOKUP] No se encontraron roles familyadmin o familyviewer');
+      return [];
+    }
+    
     // Buscar asociaciones activas del estudiante con roles familyadmin y familyviewer
     const associations = await Shared.find({
       student: studentId,
       status: 'active',
-      'role.nombre': { $in: ['familyadmin', 'familyviewer'] }
+      role: { $in: roleIds }
     }).populate('user', 'name email').populate('role', 'nombre');
     
     console.log('🔔 [FAMILY LOOKUP] Asociaciones encontradas:', associations.length);
@@ -25,17 +41,16 @@ async function getFamilyUsersForStudent(studentId) {
     
     for (const association of associations) {
       if (association.user && association.role) {
+        console.log(`🔔 [FAMILY LOOKUP] Procesando asociación - Usuario: ${association.user.name}, Rol: ${association.role.nombre}`);
+        
         // Obtener dispositivos activos del usuario
-        let devices;
-        if (Device.getActiveDevicesForUser) {
-          devices = await Device.getActiveDevicesForUser(association.user._id);
-        } else {
-          devices = await Device.find({
-            user: association.user._id,
-            activo: true,
-            pushToken: { $exists: true, $ne: null }
-          });
-        }
+        const devices = await Device.find({
+          userId: association.user._id,
+          isActive: true,
+          pushToken: { $exists: true, $ne: null, $ne: '' }
+        });
+        
+        console.log(`🔔 [FAMILY LOOKUP] Usuario ${association.user.name} tiene ${devices.length} dispositivos activos`);
         
         if (devices.length > 0) {
           familyUsers.push({
@@ -43,10 +58,12 @@ async function getFamilyUsersForStudent(studentId) {
             role: association.role,
             devices: devices
           });
-          console.log('🔔 [FAMILY LOOKUP] Usuario con dispositivos:', association.user.name, '- Dispositivos:', devices.length);
+          console.log('🔔 [FAMILY LOOKUP] ✅ Usuario con dispositivos:', association.user.name, '- Dispositivos:', devices.length);
         } else {
-          console.log('🔔 [FAMILY LOOKUP] Usuario sin dispositivos activos:', association.user.name);
+          console.log('🔔 [FAMILY LOOKUP] ⚠️ Usuario sin dispositivos activos:', association.user.name);
         }
+      } else {
+        console.log('🔔 [FAMILY LOOKUP] ⚠️ Asociación sin usuario o rol válido');
       }
     }
     
@@ -647,18 +664,57 @@ const getFamilyNotifications = async (req, res) => {
 const getNotificationDetails = async (req, res) => {
   try {
     const notificationId = req.params.id;
-    const userId = req.user._id;
+    
+    // Manejar tanto usuarios Cognito como usuarios legacy
+    let userId;
+    let currentUser;
+    
+    if (req.user.isCognitoUser) {
+      console.log('🔔 [GET NOTIFICATION DETAILS] Usuario Cognito:', req.user.email);
+      currentUser = await User.findOne({ email: req.user.email }).populate('role');
+      if (!currentUser) {
+        return res.status(404).json({
+          success: false,
+          message: 'Usuario no encontrado'
+        });
+      }
+      userId = currentUser._id;
+    } else {
+      userId = req.user._id || req.user.userId;
+      console.log('🔔 [GET NOTIFICATION DETAILS] Usuario legacy, ID:', userId);
+      currentUser = await User.findById(userId).populate('role');
+    }
     
     console.log('🔔 [GET NOTIFICATION DETAILS] ID:', notificationId);
-    console.log('🔔 [GET NOTIFICATION DETAILS] Usuario:', userId);
+    console.log('🔔 [GET NOTIFICATION DETAILS] Usuario ID:', userId);
     
     // Obtener información del usuario para verificar su rol
-    const user = await User.findById(userId).populate('role');
+    const user = currentUser;
     if (!user) {
       return res.status(404).json({
         success: false,
         message: 'Usuario no encontrado'
       });
+    }
+    
+    // Asegurar que el rol esté poblado correctamente
+    if (!user.role || typeof user.role === 'string') {
+      await user.populate('role');
+    }
+    
+    // Obtener el nombre del rol de múltiples formas posibles
+    let userRole = null;
+    if (user.role) {
+      if (typeof user.role === 'string') {
+        // Si es un string, buscar el rol en la base de datos
+        const Role = require('../shared/models/Role');
+        const roleDoc = await Role.findById(user.role);
+        userRole = roleDoc?.nombre;
+      } else if (user.role.nombre) {
+        userRole = user.role.nombre;
+      } else if (user.role.name) {
+        userRole = user.role.name;
+      }
     }
     
     // Buscar la notificación con detalles básicos
@@ -676,48 +732,79 @@ const getNotificationDetails = async (req, res) => {
     }
     
     // Verificar que el usuario tenga acceso a esta notificación
-    // Usar rol efectivo de ActiveAssociation si existe
-    const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
-    const effectiveRole = activeAssociation?.role?.nombre || user.role?.nombre;
-    const isCoordinador = effectiveRole === 'coordinador';
-    const hasAccess = isCoordinador || 
-                     notification.recipients.some(recipient => recipient.toString() === userId);
+    let hasAccess = false;
+    
+    console.log('🔔 [GET NOTIFICATION DETAILS] ========== VERIFICACIÓN DE ACCESO ==========');
+    console.log('🔔 [GET NOTIFICATION DETAILS] Usuario ID:', userId);
+    console.log('🔔 [GET NOTIFICATION DETAILS] Usuario email:', user.email);
+    console.log('🔔 [GET NOTIFICATION DETAILS] user.role:', user.role);
+    console.log('🔔 [GET NOTIFICATION DETAILS] userRole detectado:', userRole);
+    console.log('🔔 [GET NOTIFICATION DETAILS] Account de la notificación:', notification.account.toString());
+    
+    // Normalizar el rol a minúsculas para comparación
+    const normalizedRole = userRole ? userRole.toLowerCase() : null;
+    
+    // SOLO adminaccount puede ver detalles de notificaciones
+    if (normalizedRole === 'adminaccount' || normalizedRole === 'accountadmin' || normalizedRole === 'admin_account') {
+      hasAccess = true;
+      console.log('✅ [GET NOTIFICATION DETAILS] Acceso otorgado para adminaccount (rol detectado:', userRole, ')');
+    } else {
+      // Para otros roles, verificar si es coordinador o está en recipients
+      const activeAssociation = await ActiveAssociation.findOne({ user: userId }).populate('role');
+      const effectiveRole = activeAssociation?.role?.nombre || userRole;
+      const isCoordinador = effectiveRole === 'coordinador';
+      hasAccess = isCoordinador || 
+                   notification.recipients.some(recipient => recipient.toString() === userId);
+      console.log('🔔 [GET NOTIFICATION DETAILS] Otros roles - effectiveRole:', effectiveRole, 'isCoordinador:', isCoordinador, 'hasAccess:', hasAccess);
+    }
     
     if (!hasAccess) {
+      console.log('❌ [GET NOTIFICATION DETAILS] ========== ACCESO DENEGADO ==========');
+      console.log('❌ [GET NOTIFICATION DETAILS] userRole:', userRole);
+      console.log('❌ [GET NOTIFICATION DETAILS] user.role completo:', JSON.stringify(user.role));
+      console.log('❌ [GET NOTIFICATION DETAILS] notification.account:', notification.account.toString());
       return res.status(403).json({
         success: false,
         message: 'No tienes permisos para ver esta notificación'
       });
     }
     
-    // Poblar destinatarios manualmente (usuarios y estudiantes)
+    console.log('✅ [GET NOTIFICATION DETAILS] ========== ACCESO PERMITIDO ==========');
+    
+    // Poblar destinatarios manualmente (usuarios y estudiantes) - SIMPLIFICADO
     let notificationObj = notification.toObject();
     
     if (notification.recipients && notification.recipients.length > 0) {
-      const populatedRecipients = [];
+      // Buscar todos los estudiantes de una vez (más eficiente)
+      const recipientIds = notification.recipients.map(r => r.toString());
       
-      for (let recipientId of notification.recipients) {
-        // Intentar buscar como usuario
-        let recipient = await User.findById(recipientId).select('name email');
-        
-        // Si no es usuario, buscar como estudiante
-        if (!recipient) {
-          recipient = await Student.findById(recipientId).select('nombre apellido email');
-        }
-        
-        if (recipient) {
-          // Normalizar el nombre para usuarios y estudiantes
-          const recipientObj = recipient.toObject();
-          if (recipientObj.name) {
-            // Es un usuario, usar 'name' como 'nombre'
-            recipientObj.nombre = recipientObj.name;
-          } else if (recipientObj.nombre && recipientObj.apellido) {
-            // Es un estudiante, combinar nombre y apellido
-            recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
-          }
-          populatedRecipients.push(recipientObj);
-        }
-      }
+      // Buscar estudiantes
+      const students = await Student.find({ _id: { $in: recipientIds } }).select('nombre apellido email');
+      
+      // Buscar usuarios
+      const users = await User.find({ _id: { $in: recipientIds } }).select('name email');
+      
+      // Crear un mapa para acceso rápido
+      const recipientsMap = new Map();
+      
+      // Agregar estudiantes al mapa
+      students.forEach(student => {
+        const studentObj = student.toObject();
+        studentObj.nombre = `${student.nombre} ${student.apellido || ''}`.trim();
+        recipientsMap.set(student._id.toString(), studentObj);
+      });
+      
+      // Agregar usuarios al mapa
+      users.forEach(user => {
+        const userObj = user.toObject();
+        userObj.nombre = user.name || user.email;
+        recipientsMap.set(user._id.toString(), userObj);
+      });
+      
+      // Construir array de recipients en el mismo orden
+      const populatedRecipients = recipientIds
+        .map(id => recipientsMap.get(id))
+        .filter(r => r !== undefined);
       
       notificationObj.recipients = populatedRecipients;
     }
@@ -1355,6 +1442,167 @@ const getBackofficeNotifications = async (req, res) => {
 };
 
 /**
+ * Obtener todas las notificaciones de la institución (para el modal del header)
+ * Paginado de a 20, ordenado por fecha más reciente
+ */
+const getAllInstitutionNotifications = async (req, res) => {
+  try {
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] ========== INICIO ==========');
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Request recibido');
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] req.user:', req.user ? 'existe' : 'no existe');
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] req.user.isCognitoUser:', req.user?.isCognitoUser);
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] req.user.userId:', req.user?.userId);
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] req.user.email:', req.user?.email);
+    
+    // Verificar permisos del usuario
+    let currentUser;
+    if (req.user.isCognitoUser) {
+      console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Buscando usuario por email (Cognito)');
+      currentUser = await User.findOne({ email: req.user.email }).populate('role');
+    } else {
+      const { userId } = req.user;
+      console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Buscando usuario por ID:', userId);
+      currentUser = await User.findById(userId).populate('role');
+    }
+    
+    if (!currentUser) {
+      console.log('❌ [ALL INSTITUTION NOTIFICATIONS] Usuario no encontrado');
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    console.log('✅ [ALL INSTITUTION NOTIFICATIONS] Usuario encontrado:', currentUser._id);
+    
+    const userId = currentUser._id;
+    const { 
+      limit = 20, // Paginación de 20 por defecto
+      skip = 0
+    } = req.query;
+    
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Usuario:', userId);
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Parámetros:', { limit, skip });
+    
+    // Obtener información del usuario para verificar su rol
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Rol del usuario:', user.role?.nombre);
+    
+    // Construir query base
+    let query = {};
+    
+    // Lógica según el rol
+    if (user.role?.nombre === 'superadmin') {
+      // Superadmin ve todas las notificaciones de todas las cuentas
+      // No filtrar por cuenta para superadmin
+    } else if (user.role?.nombre === 'adminaccount') {
+      // Adminaccount ve todas las notificaciones de su cuenta
+      query.account = user.account?._id;
+    } else {
+      // Otros roles no tienen acceso
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para acceder a esta sección'
+      });
+    }
+    
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Query final:', JSON.stringify(query, null, 2));
+    
+    // Obtener total de notificaciones para la paginación
+    const total = await Notification.countDocuments(query);
+    
+    // Obtener notificaciones con paginación, ordenadas por fecha más reciente
+    const notifications = await Notification.find(query)
+      .populate('sender', 'name email')
+      .populate('account', 'nombre')
+      .populate('division', 'nombre')
+      .sort({ sentAt: -1 }) // Ordenar por fecha más reciente
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
+
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Notificaciones encontradas (raw):', notifications.length);
+
+    // Poblar recipients solo para notificaciones pending de tipo coordinador (para mostrar en el modal)
+    const populatedNotifications = [];
+    
+    for (let notification of notifications) {
+      const notificationObj = notification.toObject();
+      notificationObj.recipientsCount = notification.recipients?.length || 0;
+      
+      // Si es pending y tipo coordinador, poblar recipients para mostrar en el modal
+      if (notification.status === 'pending' && notification.type === 'coordinador' && notification.recipients && notification.recipients.length > 0) {
+        const populatedRecipients = [];
+        for (let recipientId of notification.recipients) {
+          // Intentar buscar como usuario
+          let recipient = await User.findById(recipientId).select('name email');
+          
+          // Si no es usuario, buscar como estudiante
+          if (!recipient) {
+            recipient = await Student.findById(recipientId).select('nombre apellido email');
+          }
+          
+          if (recipient) {
+            const recipientObj = recipient.toObject();
+            if (recipientObj.name) {
+              // Es un usuario
+              recipientObj.nombre = recipientObj.name;
+            } else if (recipientObj.nombre && recipientObj.apellido) {
+              // Es un estudiante, combinar nombre y apellido
+              recipientObj.nombre = `${recipientObj.nombre} ${recipientObj.apellido}`;
+            }
+            populatedRecipients.push(recipientObj);
+          }
+        }
+        notificationObj.recipients = populatedRecipients;
+      } else {
+        // Para otras notificaciones, no poblar recipients (solo mantener el count)
+        notificationObj.recipients = [];
+      }
+      
+      populatedNotifications.push(notificationObj);
+    }
+    
+    // Calcular información de paginación
+    const currentPage = Math.floor(parseInt(skip) / parseInt(limit)) + 1;
+    const totalPages = Math.ceil(total / parseInt(limit));
+    const hasNextPage = currentPage < totalPages;
+    const hasPrevPage = currentPage > 1;
+    
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Notificaciones encontradas:', populatedNotifications.length);
+    console.log('🔔 [ALL INSTITUTION NOTIFICATIONS] Paginación:', { currentPage, totalPages, total });
+    
+    res.json({
+      success: true,
+      data: populatedNotifications,
+      pagination: {
+        currentPage,
+        totalPages,
+        totalItems: total,
+        itemsPerPage: parseInt(limit),
+        hasNextPage,
+        hasPrevPage
+      }
+    });
+    
+  } catch (error) {
+    console.error('❌ [ALL INSTITUTION NOTIFICATIONS] Error completo:', error);
+    console.error('❌ [ALL INSTITUTION NOTIFICATIONS] Stack:', error.stack);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Error al obtener notificaciones',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
+  }
+};
+
+/**
  * Enviar nueva notificación
  */
 const sendNotification = async (req, res) => {
@@ -1442,6 +1690,21 @@ const sendNotification = async (req, res) => {
     }
 
     console.log('🔔 [SEND NOTIFICATION] Creando notificación...');
+    
+    // Verificar si la división requiere aprobación
+    let requiereAprobacion = false;
+    let notificationStatus = 'sent';
+    
+    if (divisionId) {
+      const Grupo = require('../shared/models/Grupo');
+      const division = await Grupo.findById(divisionId);
+      if (division && division.requiereAprobacionNotificaciones) {
+        requiereAprobacion = true;
+        notificationStatus = 'pending';
+        console.log('🔔 [SEND NOTIFICATION] División requiere aprobación - notificación quedará en estado "pending"');
+      }
+    }
+    
     // Crear la notificación
     const notification = new Notification({
       title,
@@ -1451,37 +1714,72 @@ const sendNotification = async (req, res) => {
       account: accountId,
       division: divisionId,
       recipients,
-      status: 'sent',
+      status: notificationStatus,
       priority: 'normal',
       readBy: [],
-      sentAt: new Date()
+      sentAt: requiereAprobacion ? undefined : new Date() // Solo establecer sentAt si se envía inmediatamente
     });
 
     await notification.save();
-    console.log('🔔 [SEND NOTIFICATION] Notificación guardada:', notification._id);
+    console.log('🔔 [SEND NOTIFICATION] Notificación guardada:', notification._id, 'Estado:', notificationStatus);
 
-    // Enviar push notifications a usuarios familiares de estudiantes
-    if (recipients && recipients.length > 0) {
-      console.log('🔔 [SEND NOTIFICATION] Enviando push notifications a familiares...');
+    // Solo enviar push notifications si la notificación fue aprobada (status = 'sent')
+    // Si está pendiente, no se envían hasta que sea aprobada
+    if (notificationStatus === 'sent') {
+      let studentsToNotify = [];
       
-      // Verificar si los destinatarios son estudiantes
-      const students = await Student.find({ _id: { $in: recipients } });
-      
-      if (students.length > 0) {
-        console.log('🔔 [SEND NOTIFICATION] Encontrados', students.length, 'estudiantes destinatarios');
+      // Si hay recipients específicos, usarlos
+      if (recipients && recipients.length > 0) {
+        console.log('🔔 [SEND NOTIFICATION] Recipients específicos recibidos:', recipients.length);
+        studentsToNotify = await Student.find({ _id: { $in: recipients } });
+        console.log('🔔 [SEND NOTIFICATION] Estudiantes encontrados de recipients:', studentsToNotify.length);
+      } 
+      // Si no hay recipients pero hay divisionId, buscar todos los estudiantes de la división
+      else if (divisionId) {
+        console.log('🔔 [SEND NOTIFICATION] No hay recipients específicos, pero hay divisionId. Buscando todos los estudiantes de la división:', divisionId);
+        studentsToNotify = await Student.find({ 
+          division: divisionId,
+          activo: true 
+        });
+        console.log('🔔 [SEND NOTIFICATION] Estudiantes encontrados en la división:', studentsToNotify.length);
         
-        // Enviar push notification a cada estudiante
-        for (const student of students) {
+        // Actualizar la notificación con los estudiantes encontrados
+        if (studentsToNotify.length > 0) {
+          notification.recipients = studentsToNotify.map(s => s._id);
+          await notification.save();
+          console.log('🔔 [SEND NOTIFICATION] Notificación actualizada con', studentsToNotify.length, 'estudiantes de la división');
+        }
+      }
+      
+      // Enviar push notifications a las familias de los estudiantes
+      if (studentsToNotify.length > 0) {
+        console.log('🔔 [SEND NOTIFICATION] Enviando push notifications a', studentsToNotify.length, 'familias...');
+        
+        let totalSent = 0;
+        let totalFailed = 0;
+        
+        for (const student of studentsToNotify) {
           try {
+            console.log('🔔 [SEND NOTIFICATION] Enviando push para estudiante:', student.nombre, student.apellido, '(ID:', student._id, ')');
             const pushResult = await sendPushNotificationToStudentFamily(student._id, notification);
-            console.log('🔔 [SEND NOTIFICATION] Push para estudiante', student.nombre, '- Enviados:', pushResult.sent, 'Fallidos:', pushResult.failed);
+            console.log('🔔 [SEND NOTIFICATION] Push para estudiante', student.nombre, '- Enviados:', pushResult.sent, 'Fallidos:', pushResult.failed, 'En cola:', pushResult.queued);
+            totalSent += pushResult.sent || 0;
+            totalFailed += pushResult.failed || 0;
           } catch (pushError) {
             console.error('🔔 [SEND NOTIFICATION] Error enviando push para estudiante', student.nombre, ':', pushError.message);
+            totalFailed++;
           }
         }
+        
+        console.log('🔔 [SEND NOTIFICATION] Resumen total - Enviados:', totalSent, 'Fallidos:', totalFailed);
       } else {
-        console.log('🔔 [SEND NOTIFICATION] No se encontraron estudiantes en los destinatarios');
+        console.log('🔔 [SEND NOTIFICATION] No hay estudiantes para enviar push notifications');
+        if (!divisionId && (!recipients || recipients.length === 0)) {
+          console.warn('⚠️ [SEND NOTIFICATION] ADVERTENCIA: No se especificaron recipients ni divisionId');
+        }
       }
+    } else {
+      console.log('🔔 [SEND NOTIFICATION] Notificación en estado', notificationStatus, '- no se envían push notifications hasta que sea aprobada');
     }
 
     // Populate sender info
@@ -1492,7 +1790,9 @@ const sendNotification = async (req, res) => {
 
     const responseData = {
       success: true,
-      message: 'Notificación enviada exitosamente',
+      message: requiereAprobacion 
+        ? 'Notificación creada y pendiente de aprobación' 
+        : 'Notificación enviada exitosamente',
       data: {
         _id: notification._id,
         title: notification.title,
@@ -1582,6 +1882,652 @@ const getRecipients = async (req, res) => {
   }
 };
 
+/**
+ * Obtener notificaciones pendientes de aprobación
+ */
+const getPendingNotifications = async (req, res) => {
+  try {
+    console.log('🔔 [PENDING NOTIFICATIONS] Obteniendo notificaciones pendientes...');
+    
+    const userId = req.user._id;
+    const user = await User.findById(userId).populate('role');
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Solo adminaccount y superadmin pueden ver notificaciones pendientes
+    if (user.role?.nombre !== 'adminaccount' && user.role?.nombre !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver notificaciones pendientes'
+      });
+    }
+    
+    // Construir query
+    let query = { status: 'pending' };
+    
+    if (user.role?.nombre === 'adminaccount') {
+      // Adminaccount solo ve notificaciones de su cuenta
+      if (req.userInstitution) {
+        query.account = req.userInstitution._id;
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes una institución asignada'
+        });
+      }
+    }
+    // Superadmin ve todas las notificaciones pendientes
+    
+    const notifications = await Notification.find(query)
+      .populate('sender', 'name email')
+      .populate('account', 'nombre')
+      .populate('division', 'nombre')
+      .sort({ createdAt: -1 })
+      .lean();
+    
+    // Agregar conteo de recipients sin poblar
+    const notificationsWithCount = notifications.map(notification => ({
+      ...notification,
+      recipientsCount: notification.recipients?.length || 0
+    }));
+    
+    console.log('🔔 [PENDING NOTIFICATIONS] Encontradas:', notificationsWithCount.length);
+    
+    res.json({
+      success: true,
+      data: notificationsWithCount
+    });
+    
+  } catch (error) {
+    console.error('❌ [PENDING NOTIFICATIONS] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener notificaciones pendientes'
+    });
+  }
+};
+
+/**
+ * Aprobar una notificación pendiente
+ */
+const approveNotification = async (req, res) => {
+  try {
+    console.log('🔔 [APPROVE NOTIFICATION] Aprobando notificación...');
+    
+    const { notificationId } = req.params;
+    const userId = req.user._id;
+    
+    const user = await User.findById(userId).populate('role');
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Solo adminaccount y superadmin pueden aprobar
+    if (user.role?.nombre !== 'adminaccount' && user.role?.nombre !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para aprobar notificaciones'
+      });
+    }
+    
+    // Buscar la notificación
+    const notification = await Notification.findById(notificationId);
+    
+    if (!notification) {
+      return res.status(404).json({
+        success: false,
+        message: 'Notificación no encontrada'
+      });
+    }
+    
+    // Verificar que esté pendiente
+    if (notification.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'La notificación no está pendiente de aprobación'
+      });
+    }
+    
+    // Verificar permisos según el rol
+    if (user.role?.nombre === 'adminaccount') {
+      if (req.userInstitution) {
+        if (notification.account.toString() !== req.userInstitution._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: 'No tienes permisos para aprobar esta notificación'
+          });
+        }
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes una institución asignada'
+        });
+      }
+    }
+    
+    // Aprobar la notificación
+    notification.status = 'sent';
+    notification.approvedBy = userId;
+    notification.approvedAt = new Date();
+    notification.sentAt = new Date();
+    
+    await notification.save();
+    console.log('🔔 [APPROVE NOTIFICATION] Notificación aprobada:', notificationId);
+    
+    // Enviar push notifications a los destinatarios
+    if (notification.recipients && notification.recipients.length > 0) {
+      console.log('🔔 [APPROVE NOTIFICATION] Enviando push notifications a', notification.recipients.length, 'destinatarios...');
+      
+      const students = await Student.find({ _id: { $in: notification.recipients } });
+      
+      console.log('🔔 [APPROVE NOTIFICATION] Estudiantes encontrados:', students.length);
+      
+      if (students.length > 0) {
+        let totalSent = 0;
+        let totalFailed = 0;
+        
+        for (const student of students) {
+          try {
+            console.log('🔔 [APPROVE NOTIFICATION] Enviando push para estudiante:', student.nombre, student.apellido, '(ID:', student._id, ')');
+            const pushResult = await sendPushNotificationToStudentFamily(student._id, notification);
+            console.log('🔔 [APPROVE NOTIFICATION] Push para estudiante', student.nombre, '- Enviados:', pushResult.sent, 'Fallidos:', pushResult.failed, 'En cola:', pushResult.queued);
+            totalSent += pushResult.sent || 0;
+            totalFailed += pushResult.failed || 0;
+          } catch (pushError) {
+            console.error('🔔 [APPROVE NOTIFICATION] Error enviando push para estudiante', student.nombre, ':', pushError.message);
+            totalFailed++;
+          }
+        }
+        
+        console.log('🔔 [APPROVE NOTIFICATION] Resumen total - Enviados:', totalSent, 'Fallidos:', totalFailed);
+      } else {
+        console.warn('🔔 [APPROVE NOTIFICATION] No se encontraron estudiantes para los recipients de la notificación');
+      }
+    } else {
+      console.log('🔔 [APPROVE NOTIFICATION] No hay recipients en la notificación, no se envían push notifications');
+    }
+    
+    // Populate para la respuesta
+    await notification.populate('sender', 'name email');
+    await notification.populate('account', 'nombre');
+    await notification.populate('division', 'nombre');
+    await notification.populate('approvedBy', 'name email');
+    
+    res.json({
+      success: true,
+      message: 'Notificación aprobada exitosamente',
+      data: notification
+    });
+    
+  } catch (error) {
+    console.error('❌ [APPROVE NOTIFICATION] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al aprobar notificación'
+    });
+  }
+};
+
+/**
+ * Rechazar una notificación pendiente
+ */
+const rejectNotification = async (req, res) => {
+  try {
+    console.log('🔔 [REJECT NOTIFICATION] Rechazando notificación...');
+    
+    const { notificationId } = req.params;
+    const { rejectionReason } = req.body;
+    const userId = req.user._id;
+    
+    const user = await User.findById(userId).populate('role');
+    
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+    
+    // Solo adminaccount y superadmin pueden rechazar
+    if (user.role?.nombre !== 'adminaccount' && user.role?.nombre !== 'superadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para rechazar notificaciones'
+      });
+    }
+    
+    // Buscar la notificación
+    const notification = await Notification.findById(notificationId);
+    
+    if (!notification) {
+      return res.status(404).json({
+        success: false,
+        message: 'Notificación no encontrada'
+      });
+    }
+    
+    // Verificar que esté pendiente
+    if (notification.status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'La notificación no está pendiente de aprobación'
+      });
+    }
+    
+    // Verificar permisos según el rol
+    if (user.role?.nombre === 'adminaccount') {
+      if (req.userInstitution) {
+        if (notification.account.toString() !== req.userInstitution._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: 'No tienes permisos para rechazar esta notificación'
+          });
+        }
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes una institución asignada'
+        });
+      }
+    }
+    
+    // Rechazar la notificación
+    notification.status = 'rejected';
+    notification.rejectedBy = userId;
+    notification.rejectedAt = new Date();
+    notification.rejectionReason = rejectionReason || '';
+    
+    await notification.save();
+    console.log('🔔 [REJECT NOTIFICATION] Notificación rechazada:', notificationId);
+    
+    // Populate para la respuesta
+    await notification.populate('sender', 'name email');
+    await notification.populate('account', 'nombre');
+    await notification.populate('division', 'nombre');
+    await notification.populate('rejectedBy', 'name email');
+    
+    res.json({
+      success: true,
+      message: 'Notificación rechazada exitosamente',
+      data: notification
+    });
+    
+  } catch (error) {
+    console.error('❌ [REJECT NOTIFICATION] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al rechazar notificación'
+    });
+  }
+};
+
+/**
+ * Crear template de notificación
+ */
+const createTemplate = async (req, res) => {
+  try {
+    const { nombre, texto, accountId } = req.body;
+    const userId = req.user._id;
+
+    console.log('📝 [TEMPLATE CREATE] Datos recibidos:', { nombre, texto, accountId });
+
+    // Validar campos requeridos
+    if (!nombre || !texto || !accountId) {
+      return res.status(400).json({
+        success: false,
+        message: 'Faltan campos requeridos: nombre, texto y accountId'
+      });
+    }
+
+    // Validar longitud
+    if (nombre.length > 100) {
+      return res.status(400).json({
+        success: false,
+        message: 'El nombre no puede exceder 100 caracteres'
+      });
+    }
+
+    if (texto.length > 500) {
+      return res.status(400).json({
+        success: false,
+        message: 'El texto no puede exceder 500 caracteres'
+      });
+    }
+
+    // Verificar permisos: solo adminaccount y superadmin pueden crear templates
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+
+    const userRole = user.role?.nombre;
+    const isSuperAdmin = userRole === 'superadmin';
+    const isAdminAccount = userRole === 'adminaccount';
+
+    if (!isSuperAdmin && !isAdminAccount) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para crear templates'
+      });
+    }
+
+    // Verificar que el adminaccount solo puede crear templates para su cuenta
+    if (isAdminAccount && !isSuperAdmin) {
+      if (req.userInstitution) {
+        if (accountId !== req.userInstitution._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: 'No tienes permisos para crear templates para esta cuenta'
+          });
+        }
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes una institución asignada'
+        });
+      }
+    }
+
+    // Crear template
+    const template = new NotificationTemplate({
+      nombre: nombre.trim(),
+      texto: texto.trim(),
+      account: accountId,
+      creadoPor: userId,
+      activo: true
+    });
+
+    await template.save();
+    await template.populate('creadoPor', 'name email');
+    await template.populate('account', 'nombre');
+
+    console.log('📝 [TEMPLATE CREATE] Template creado:', template._id);
+
+    res.status(201).json({
+      success: true,
+      message: 'Template creado exitosamente',
+      data: template
+    });
+
+  } catch (error) {
+    console.error('❌ [TEMPLATE CREATE] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al crear template'
+    });
+  }
+};
+
+/**
+ * Obtener templates de una institución
+ */
+const getTemplates = async (req, res) => {
+  try {
+    const { accountId } = req.query;
+    const userId = req.user._id;
+
+    console.log('📝 [TEMPLATE GET] Parámetros:', { accountId });
+
+    if (!accountId) {
+      return res.status(400).json({
+        success: false,
+        message: 'accountId es requerido'
+      });
+    }
+
+    // Verificar permisos
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+
+    const userRole = user.role?.nombre;
+    const isSuperAdmin = userRole === 'superadmin';
+    const isAdminAccount = userRole === 'adminaccount';
+    const isCoordinador = userRole === 'coordinador';
+
+    // Solo adminaccount, superadmin y coordinador pueden ver templates
+    if (!isSuperAdmin && !isAdminAccount && !isCoordinador) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver templates'
+      });
+    }
+
+    // Verificar que el adminaccount solo puede ver templates de su cuenta
+    if (isAdminAccount && !isSuperAdmin) {
+      if (req.userInstitution) {
+        if (accountId !== req.userInstitution._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: 'No tienes permisos para ver templates de esta cuenta'
+          });
+        }
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes una institución asignada'
+        });
+      }
+    }
+
+    // Obtener templates activos de la cuenta
+    const templates = await NotificationTemplate.find({
+      account: accountId,
+      activo: true
+    })
+      .populate('creadoPor', 'name email')
+      .populate('account', 'nombre')
+      .sort({ createdAt: -1 });
+
+    console.log('📝 [TEMPLATE GET] Templates encontrados:', templates.length);
+
+    res.json({
+      success: true,
+      data: templates
+    });
+
+  } catch (error) {
+    console.error('❌ [TEMPLATE GET] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al obtener templates'
+    });
+  }
+};
+
+/**
+ * Actualizar template de notificación
+ */
+const updateTemplate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { nombre, texto, activo } = req.body;
+    const userId = req.user._id;
+
+    console.log('📝 [TEMPLATE UPDATE] Datos recibidos:', { id, nombre, texto, activo });
+
+    const template = await NotificationTemplate.findById(id);
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        message: 'Template no encontrado'
+      });
+    }
+
+    // Verificar permisos
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+
+    const userRole = user.role?.nombre;
+    const isSuperAdmin = userRole === 'superadmin';
+    const isAdminAccount = userRole === 'adminaccount';
+
+    if (!isSuperAdmin && !isAdminAccount) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para actualizar templates'
+      });
+    }
+
+    // Verificar que el adminaccount solo puede actualizar templates de su cuenta
+    if (isAdminAccount && !isSuperAdmin) {
+      if (req.userInstitution) {
+        if (template.account.toString() !== req.userInstitution._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: 'No tienes permisos para actualizar este template'
+          });
+        }
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes una institución asignada'
+        });
+      }
+    }
+
+    // Validar longitud si se proporciona
+    if (nombre !== undefined) {
+      if (nombre.length > 100) {
+        return res.status(400).json({
+          success: false,
+          message: 'El nombre no puede exceder 100 caracteres'
+        });
+      }
+      template.nombre = nombre.trim();
+    }
+
+    if (texto !== undefined) {
+      if (texto.length > 500) {
+        return res.status(400).json({
+          success: false,
+          message: 'El texto no puede exceder 500 caracteres'
+        });
+      }
+      template.texto = texto.trim();
+    }
+
+    if (activo !== undefined) {
+      template.activo = activo;
+    }
+
+    await template.save();
+    await template.populate('creadoPor', 'name email');
+    await template.populate('account', 'nombre');
+
+    console.log('📝 [TEMPLATE UPDATE] Template actualizado:', template._id);
+
+    res.json({
+      success: true,
+      message: 'Template actualizado exitosamente',
+      data: template
+    });
+
+  } catch (error) {
+    console.error('❌ [TEMPLATE UPDATE] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al actualizar template'
+    });
+  }
+};
+
+/**
+ * Eliminar template de notificación (soft delete)
+ */
+const deleteTemplate = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const userId = req.user._id;
+
+    console.log('📝 [TEMPLATE DELETE] Template ID:', id);
+
+    const template = await NotificationTemplate.findById(id);
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        message: 'Template no encontrado'
+      });
+    }
+
+    // Verificar permisos
+    const user = await User.findById(userId).populate('role');
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'Usuario no encontrado'
+      });
+    }
+
+    const userRole = user.role?.nombre;
+    const isSuperAdmin = userRole === 'superadmin';
+    const isAdminAccount = userRole === 'adminaccount';
+
+    if (!isSuperAdmin && !isAdminAccount) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para eliminar templates'
+      });
+    }
+
+    // Verificar que el adminaccount solo puede eliminar templates de su cuenta
+    if (isAdminAccount && !isSuperAdmin) {
+      if (req.userInstitution) {
+        if (template.account.toString() !== req.userInstitution._id.toString()) {
+          return res.status(403).json({
+            success: false,
+            message: 'No tienes permisos para eliminar este template'
+          });
+        }
+      } else {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes una institución asignada'
+        });
+      }
+    }
+
+    // Soft delete: marcar como inactivo
+    template.activo = false;
+    await template.save();
+
+    console.log('📝 [TEMPLATE DELETE] Template desactivado:', template._id);
+
+    res.json({
+      success: true,
+      message: 'Template eliminado exitosamente'
+    });
+
+  } catch (error) {
+    console.error('❌ [TEMPLATE DELETE] Error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error al eliminar template'
+    });
+  }
+};
+
 module.exports = {
   getCalendarNotifications,
   getNotifications,
@@ -1592,7 +2538,15 @@ module.exports = {
   getUnreadCount,
   getFamilyUnreadCount,
   getBackofficeNotifications,
+  getAllInstitutionNotifications,
   sendNotification,
-  getRecipients
+  getRecipients,
+  getPendingNotifications,
+  approveNotification,
+  rejectNotification,
+  createTemplate,
+  getTemplates,
+  updateTemplate,
+  deleteTemplate
 };
 
