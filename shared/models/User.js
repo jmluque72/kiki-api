@@ -316,11 +316,10 @@ userSchema.methods.markPasswordExpirationWarning = async function() {
   }
 };
 
-// Índices para optimizar consultas (email ya tiene índice único automático)
+// Índices para optimizar consultas (email y dni ya tienen índice único vía unique: true)
 userSchema.index({ role: 1 });
 userSchema.index({ status: 1 });
 userSchema.index({ account: 1 });
-userSchema.index({ dni: 1 });
 userSchema.index({ createdAt: -1 });
 
 module.exports = mongoose.model('User', userSchema); 

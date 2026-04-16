@@ -5,9 +5,12 @@ const Grupo = require('../shared/models/Grupo');
 const Student = require('../shared/models/Student');
 const Role = require('../shared/models/Role');
 const ActiveAssociation = require('../shared/models/ActiveAssociation');
-const RequestedShared = require('../shared/models/RequestedShared');
 const { generateSignedUrl } = require('../config/s3.config');
-const { sendNotificationEmailToQueue, sendFamilyInvitationEmailToQueue } = require('../services/sqsEmailService');
+const {
+  sendNotificationEmailToQueue,
+  sendFamilyInvitationEmailToQueue,
+  sendFamilyInvitationNotificationEmailToQueue
+} = require('../services/sqsEmailService');
 const emailService = require('../services/emailService');
 
 /**
@@ -428,8 +431,16 @@ exports.requestAssociation = async (req, res) => {
   try {
     console.log('🎯 [SHARED REQUEST] Agregando familiar al estudiante');
     const { userId } = req.user;
-    const { email, nombre, apellido, studentId } = req.body;
-    
+    const { email, requestedEmail, nombre, apellido, studentId } = req.body;
+    const resolvedEmail = String(email || requestedEmail || '').trim();
+
+    if (!resolvedEmail) {
+      return res.status(400).json({
+        success: false,
+        message: 'El email es obligatorio'
+      });
+    }
+
     const activeAssociation = await ActiveAssociation.getActiveAssociation(userId);
     if (!activeAssociation) {
       return res.status(403).json({
@@ -437,7 +448,7 @@ exports.requestAssociation = async (req, res) => {
         message: 'No tienes una asociación activa'
       });
     }
-    
+
     const activeShared = await Shared.findById(activeAssociation.activeShared).populate('role');
     if (activeShared.role?.nombre !== 'familyadmin') {
       return res.status(403).json({
@@ -445,17 +456,18 @@ exports.requestAssociation = async (req, res) => {
         message: 'Solo los administradores familiares pueden agregar familiares'
       });
     }
-    
+
     const userAssociation = await Shared.findById(activeAssociation.activeShared)
       .populate('account division student role');
-    
+
     const allUserAssociations = await Shared.find({
       user: userId,
+      role: activeShared.role._id,
       status: 'active'
     }).populate('student');
 
-    const studentBelongsToUser = allUserAssociations.some(assoc => 
-      assoc.student && assoc.student._id.toString() === studentId
+    const studentBelongsToUser = allUserAssociations.some(
+      (assoc) => assoc.student && assoc.student._id.toString() === String(studentId)
     );
 
     if (!studentBelongsToUser) {
@@ -465,32 +477,18 @@ exports.requestAssociation = async (req, res) => {
       });
     }
 
-    const student = await Student.findById(studentId)
-      .populate('account', 'nombre')
-      .populate('division', 'nombre');
+    const studentAssociation = allUserAssociations.find(
+      (assoc) => assoc.student?._id.toString() === String(studentId)
+    );
+    const associationToUse = studentAssociation || userAssociation;
+
+    const student = await Student.findById(studentId).select('nombre apellido');
 
     if (!student) {
       return res.status(404).json({
         success: false,
         message: 'Estudiante no encontrado'
       });
-    }
-
-    const existingUser = await User.findOne({ email: email.toLowerCase().trim() });
-    
-    if (existingUser) {
-      const existingAssociation = await Shared.findOne({
-        user: existingUser._id,
-        student: studentId,
-        status: 'active'
-      });
-
-      if (existingAssociation) {
-        return res.status(400).json({
-          success: false,
-          message: 'Este usuario ya está asociado a este estudiante'
-        });
-      }
     }
 
     const familyviewerRole = await Role.findOne({ nombre: 'familyviewer' });
@@ -501,35 +499,129 @@ exports.requestAssociation = async (req, res) => {
       });
     }
 
-    const requestedShared = new RequestedShared({
-      email: email.toLowerCase().trim(),
-      nombre: nombre,
-      apellido: apellido,
-      student: studentId,
-      account: userAssociation.account._id,
-      division: userAssociation.division?._id,
-      role: familyviewerRole._id,
-      requestedBy: userId,
-      status: 'pending'
-    });
+    const existingUser = await User.findOne({ email: resolvedEmail.toLowerCase() });
 
-    await requestedShared.save();
+    if (existingUser) {
+      const existingShared = await Shared.findOne({
+        user: existingUser._id,
+        student: studentId,
+        status: 'active'
+      });
 
-    try {
-      await sendFamilyInvitationEmailToQueue(
-        email.toLowerCase().trim(),
-        nombre || 'Familiar',
-        null // password - se genera en el worker si es necesario
-      );
-    } catch (emailError) {
-      console.error('❌ [SHARED REQUEST] Error enviando email:', emailError);
+      if (existingShared) {
+        return res.status(400).json({
+          success: false,
+          message: 'El usuario ya tiene una asociación activa con este estudiante'
+        });
+      }
+
+      const newShared = new Shared({
+        user: existingUser._id,
+        account: associationToUse.account._id,
+        division: associationToUse.division?._id,
+        student: studentId,
+        role: familyviewerRole._id,
+        status: 'active',
+        createdBy: userId
+      });
+
+      await newShared.save();
+
+      const existingActiveAssociation = await ActiveAssociation.getActiveAssociation(existingUser._id);
+      if (!existingActiveAssociation) {
+        try {
+          await ActiveAssociation.setActiveAssociation(existingUser._id, newShared._id);
+        } catch (err) {
+          console.error('❌ [SHARED REQUEST] Error estableciendo asociación activa:', err);
+        }
+      }
+
+      const studentName = student ? `${student.nombre} ${student.apellido}` : 'el estudiante';
+      try {
+        await sendFamilyInvitationNotificationEmailToQueue(
+          existingUser.email,
+          existingUser.name,
+          studentName
+        );
+      } catch (emailError) {
+        console.error('❌ [SHARED REQUEST] Error enviando email de notificación:', emailError);
+      }
+
+      return res.status(201).json({
+        success: true,
+        message: 'Asociación creada exitosamente. Se envió un email de notificación.',
+        data: {
+          user: {
+            _id: existingUser._id,
+            name: existingUser.name,
+            email: existingUser.email
+          },
+          association: newShared
+        }
+      });
     }
 
-    res.status(201).json({
+    const generateRandomPassword = () => {
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+      let password = '';
+      for (let i = 0; i < 8; i += 1) {
+        password += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      return password;
+    };
+
+    // Contraseña temporal en claro: se hashea en User.save(); el mismo valor va al mail.
+    const randomPassword = generateRandomPassword();
+    const displayName = [nombre, apellido].filter(Boolean).join(' ').trim() || 'Familiar';
+
+    const newUser = new User({
+      name: displayName,
+      email: resolvedEmail.toLowerCase(),
+      password: randomPassword,
+      role: familyviewerRole._id,
+      status: 'approved',
+      isFirstLogin: true
+    });
+
+    await newUser.save();
+
+    const newShared = new Shared({
+      user: newUser._id,
+      account: associationToUse.account._id,
+      division: associationToUse.division?._id,
+      student: studentId,
+      role: familyviewerRole._id,
+      status: 'active',
+      createdBy: userId
+    });
+
+    await newShared.save();
+
+    const existingActiveAssociation = await ActiveAssociation.getActiveAssociation(newUser._id);
+    if (!existingActiveAssociation) {
+      try {
+        await ActiveAssociation.setActiveAssociation(newUser._id, newShared._id);
+      } catch (err) {
+        console.error('❌ [SHARED REQUEST] Error estableciendo asociación activa:', err);
+      }
+    }
+
+    try {
+      await sendFamilyInvitationEmailToQueue(newUser.email, newUser.name, randomPassword); // misma contraseña temporal que en BD (hasheada)
+    } catch (emailError) {
+      console.error('❌ [SHARED REQUEST] Error enviando email con credenciales:', emailError);
+    }
+
+    return res.status(201).json({
       success: true,
-      message: 'Invitación enviada exitosamente',
+      message: 'Familiar agregado exitosamente. Se envió un email con las credenciales de acceso.',
       data: {
-        requestedShared
+        user: {
+          _id: newUser._id,
+          name: newUser.name,
+          email: newUser.email
+        },
+        association: newShared
       }
     });
   } catch (error) {

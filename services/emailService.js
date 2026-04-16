@@ -1,31 +1,48 @@
 const nodemailer = require('nodemailer');
 const config = require('../config/env.config');
+const {
+  getKikiLogoSrc,
+  getKikiLogoInlineAttachments,
+  getAppleBadgeUrl,
+  getGooglePlayBadgeUrl,
+} = require('../config/emailAssets');
 const EmailUnsubscribe = require('../shared/models/EmailUnsubscribe');
 const EmailDelivery = require('../shared/models/EmailDelivery');
 
 class EmailService {
   constructor() {
+    // ⚠️ DEBUG TEMPORAL: forzar credenciales para descartar problemas de carga de ENV en ECS.
+    // Quitar este bloque después de validar.
+    const FORCE_GMAIL_CREDENTIALS = true;
+    const FORCED_GMAIL_USER = 'noreplykikiapp@gmail.com';
+    const FORCED_GMAIL_PASSWORD = 'nhmbykbxxeaxygvp';
+
+    const gmailUser = FORCE_GMAIL_CREDENTIALS
+      ? FORCED_GMAIL_USER
+      : (process.env.GMAIL_USER || process.env.SMTP_USER || 'noreplykikiapp@gmail.com');
+    const gmailPassword = FORCE_GMAIL_CREDENTIALS
+      ? FORCED_GMAIL_PASSWORD
+      : (process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS);
+
     // Configurar Gmail en lugar de AWS SES
     this.gmailTransporter = nodemailer.createTransport({
       service: 'gmail',
       auth: {
-        user: process.env.GMAIL_USER,
-        pass: process.env.GMAIL_APP_PASSWORD
+        user: gmailUser,
+        pass: gmailPassword
       }
     });
     
     // Email remitente
-    this.fromEmail = process.env.GMAIL_USER || 'noreplykikiapp@gmail.com';
+    this.fromEmail = gmailUser;
     this.fromName = 'Kiki App';
   }
 
   // Función helper para generar badges de App Store y Google Play (URLs públicas)
   // Mejorado para mejor compatibilidad con clientes de email usando tablas
   getAppStoreBadgesHTML() {
-    // Usar URLs públicas permanentes de Google Drive (formato que funciona en emails)
-    // Formato: https://drive.google.com/uc?export=view&id=FILE_ID
-    const appleBadgeUrl = 'https://drive.google.com/uc?export=view&id=1iHl9TB11buK7j6eh8G-W48L82X6FbELi';
-    const googlePlayBadgeUrl = 'https://drive.google.com/uc?export=view&id=1Vmbu4esRamKgTsiWK_G9xLGz1oKOJdkz';
+    const appleBadgeUrl = getAppleBadgeUrl();
+    const googlePlayBadgeUrl = getGooglePlayBadgeUrl();
     
     return `
       <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%" style="margin: 30px 0;">
@@ -65,9 +82,7 @@ class EmailService {
   // Template base moderno con header de KIKI (formato unificado)
   // Mejorado para mejor deliverabilidad y evitar spam
   getBaseTemplate(content, title = 'KIKI') {
-    // Usar URL pública permanente de Google Drive (formato que funciona en emails)
-    // Formato: https://drive.google.com/uc?export=view&id=FILE_ID
-    const logoUrl = 'https://drive.google.com/uc?export=view&id=1jPsauBej_P9NnG57YnrpnFz50UZQftpz';
+    const logoUrl = getKikiLogoSrc();
     const logoHTML = `
       <div style="text-align: center; margin-bottom: 20px; padding: 20px 0;">
         <img src="${logoUrl}" alt="Kiki Logo" width="200" height="auto" style="max-width: 200px; height: auto; margin: 0 auto; display: block; border: 0;">
@@ -359,7 +374,8 @@ class EmailService {
         },
         // Configuraciones adicionales
         priority: 'normal',
-        encoding: 'utf-8'
+        encoding: 'utf-8',
+        attachments: getKikiLogoInlineAttachments(),
       };
 
       const result = await this.gmailTransporter.sendMail(mailOptions);

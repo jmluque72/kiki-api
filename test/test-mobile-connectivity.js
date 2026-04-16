@@ -1,7 +1,7 @@
 const axios = require('axios');
 require('dotenv').config();
 
-const API_BASE_URL = 'http://192.168.68.103:3000/api';
+const API_BASE_URL = 'http://192.168.200.153:3000/api';
 
 async function testMobileConnectivity() {
   console.log('🌐 [TEST MOBILE CONNECTIVITY] Verificando conectividad...\n');

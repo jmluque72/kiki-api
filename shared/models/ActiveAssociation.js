@@ -49,7 +49,7 @@ const activeAssociationSchema = new mongoose.Schema({
 });
 
 // Índices para optimizar consultas
-activeAssociationSchema.index({ user: 1 });
+// user ya tiene índice único vía unique: true
 activeAssociationSchema.index({ account: 1 });
 activeAssociationSchema.index({ role: 1 });
 

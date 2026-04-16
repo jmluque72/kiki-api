@@ -3,6 +3,8 @@ const User = require('../shared/models/User');
 const Role = require('../shared/models/Role');
 const Shared = require('../shared/models/Shared');
 const AccountConfig = require('../shared/models/AccountConfig');
+const PaymentConfig = require('../shared/models/PaymentConfig');
+const Grupo = require('../shared/models/Grupo');
 const ActiveAssociation = require('../shared/models/ActiveAssociation');
 const Activity = require('../shared/models/Activity');
 const { generateSignedUrl } = require('../config/s3.config');
@@ -612,14 +614,27 @@ exports.getAccountConfig = async (req, res) => {
         });
       }
     } else {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para ver la configuración'
-      });
+      // Usuarios familia (familyadmin, familyviewer, etc.) pueden leer la config de la cuenta a la que pertenecen
+      const hasAssociation = await Shared.findOne({
+        user: currentUser._id,
+        account: accountId,
+        status: 'active'
+      }).lean();
+      if (!hasAssociation) {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes permisos para ver la configuración de esta cuenta'
+        });
+      }
     }
 
     const config = await AccountConfig.getOrCreateConfig(accountId);
 
+    // Normalizar estructura para evitar undefined en el front
+    const quickNotificationSettings = Array.isArray(config.quickNotificationSettings)
+      ? config.quickNotificationSettings
+      : [];
+    
     res.json({
       success: true,
       data: {
@@ -627,6 +642,7 @@ exports.getAccountConfig = async (req, res) => {
           _id: config._id,
           account: config.account,
           requiereAprobarActividades: config.requiereAprobarActividades,
+          quickNotificationSettings,
           createdAt: config.createdAt,
           updatedAt: config.updatedAt
         }
@@ -645,7 +661,7 @@ exports.getAccountConfig = async (req, res) => {
 exports.updateAccountConfig = async (req, res) => {
   try {
     const { accountId } = req.params;
-    const { requiereAprobarActividades } = req.body;
+    const { requiereAprobarActividades, quickNotificationSettings } = req.body;
     const currentUser = req.user;
 
     if (currentUser.role?.nombre === 'superadmin') {
@@ -670,8 +686,19 @@ exports.updateAccountConfig = async (req, res) => {
       config.requiereAprobarActividades = requiereAprobarActividades;
     }
 
+    // Actualizar configuración de notificaciones rápidas si viene en el body
+    if (Array.isArray(quickNotificationSettings)) {
+      // Filtrar entradas mínimamente válidas (con code string)
+      config.quickNotificationSettings = quickNotificationSettings
+        .filter(item => item && typeof item.code === 'string')
+        .map(item => ({
+          code: item.code,
+          enabled: typeof item.enabled === 'boolean' ? item.enabled : true
+        }));
+    }
+    
     await config.save();
-
+    
     res.json({
       success: true,
       message: 'Configuración actualizada exitosamente',
@@ -680,6 +707,7 @@ exports.updateAccountConfig = async (req, res) => {
           _id: config._id,
           account: config.account,
           requiereAprobarActividades: config.requiereAprobarActividades,
+          quickNotificationSettings: config.quickNotificationSettings || [],
           updatedAt: config.updatedAt
         }
       }
@@ -804,6 +832,168 @@ exports.getAccountLogo = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error interno del servidor al obtener el logo'
+    });
+  }
+};
+
+// --- Configuración de cobranzas (pagos) por cuenta ---
+
+exports.getPaymentConfig = async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const currentUser = req.user;
+
+    if (currentUser.role?.nombre === 'superadmin') {
+      // ok
+    } else if (currentUser.role?.nombre === 'adminaccount' && req.userInstitution) {
+      if (accountId !== req.userInstitution._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes permisos para ver la configuración de cobranzas de esta cuenta'
+        });
+      }
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para ver la configuración de cobranzas'
+      });
+    }
+
+    const config = await PaymentConfig.getOrCreateConfig(accountId);
+    const matriculaAnual = config.matriculaAnual || { cobran: false, monto: 0 };
+    const cuotaPorDivision = Array.isArray(config.cuotaPorDivision) ? config.cuotaPorDivision : [];
+    const matriculaPorDivision = Array.isArray(config.matriculaPorDivision) ? config.matriculaPorDivision : [];
+    const productos = Array.isArray(config.productos) ? config.productos : [];
+
+    res.json({
+      success: true,
+      data: {
+        config: {
+          _id: config._id,
+          account: config.account,
+          matriculaAnual: {
+            cobran: !!matriculaAnual.cobran,
+            monto: Number(matriculaAnual.monto) || 0
+          },
+          matriculaPorDivision: matriculaPorDivision.map((item) => ({
+            division: item.division,
+            monto: Number(item.monto) || 0
+          })),
+          cuotaPorDivision: cuotaPorDivision.map((item) => ({
+            division: item.division,
+            monto: Number(item.monto) || 0
+          })),
+          productos: productos.map((item) => ({
+            _id: item._id,
+            nombre: item.nombre || '',
+            precio: Number(item.precio) || 0,
+            activo: item.activo !== false
+          })),
+          moneda: config.moneda || 'ARS',
+          createdAt: config.createdAt,
+          updatedAt: config.updatedAt
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error obteniendo configuración de cobranzas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
+  }
+};
+
+exports.updatePaymentConfig = async (req, res) => {
+  try {
+    const { accountId } = req.params;
+    const { matriculaAnual, matriculaPorDivision, cuotaPorDivision, productos, moneda } = req.body;
+    const currentUser = req.user;
+
+    if (currentUser.role?.nombre === 'superadmin') {
+      // ok
+    } else if (currentUser.role?.nombre === 'adminaccount' && req.userInstitution) {
+      if (accountId !== req.userInstitution._id.toString()) {
+        return res.status(403).json({
+          success: false,
+          message: 'No tienes permisos para actualizar la configuración de cobranzas de esta cuenta'
+        });
+      }
+    } else {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para actualizar la configuración de cobranzas'
+      });
+    }
+
+    const divisionesDeLaCuenta = await Grupo.find({ cuenta: accountId }).select('_id').lean();
+    const divisionIdsValidos = new Set(divisionesDeLaCuenta.map((d) => d._id.toString()));
+
+    const config = await PaymentConfig.getOrCreateConfig(accountId);
+
+    if (matriculaAnual && typeof matriculaAnual === 'object') {
+      if (typeof matriculaAnual.cobran === 'boolean') config.matriculaAnual.cobran = matriculaAnual.cobran;
+      if (typeof matriculaAnual.monto === 'number' && matriculaAnual.monto >= 0) {
+        config.matriculaAnual.monto = matriculaAnual.monto;
+      }
+    }
+
+    if (Array.isArray(matriculaPorDivision)) {
+      config.matriculaPorDivision = matriculaPorDivision
+        .filter((item) => item && item.division && divisionIdsValidos.has(String(item.division)))
+        .map((item) => ({
+          division: item.division,
+          monto: Math.max(0, Number(item.monto) || 0)
+        }));
+    }
+
+    if (Array.isArray(cuotaPorDivision)) {
+      config.cuotaPorDivision = cuotaPorDivision
+        .filter((item) => item && item.division && divisionIdsValidos.has(String(item.division)))
+        .map((item) => ({
+          division: item.division,
+          monto: Math.max(0, Number(item.monto) || 0)
+        }));
+    }
+
+    if (Array.isArray(productos)) {
+      config.productos = productos
+        .filter((item) => item && typeof item.nombre === 'string' && item.nombre.trim())
+        .map((item) => ({
+          _id: item._id,
+          nombre: item.nombre.trim().substring(0, 120),
+          precio: Math.max(0, Number(item.precio) || 0),
+          activo: item.activo !== false
+        }));
+    }
+
+    if (moneda && typeof moneda === 'string' && moneda.trim()) {
+      config.moneda = moneda.trim().substring(0, 10);
+    }
+
+    await config.save();
+
+    res.json({
+      success: true,
+      message: 'Configuración de cobranzas actualizada correctamente',
+      data: {
+        config: {
+          _id: config._id,
+          account: config.account,
+          matriculaAnual: config.matriculaAnual,
+          matriculaPorDivision: config.matriculaPorDivision,
+          cuotaPorDivision: config.cuotaPorDivision,
+          productos: config.productos,
+          moneda: config.moneda,
+          updatedAt: config.updatedAt
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Error actualizando configuración de cobranzas:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
     });
   }
 };

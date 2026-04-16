@@ -22,7 +22,11 @@
     "sqs:create-push-queue": "node scripts/create-push-sqs-queue.js",
     "db:add-indexes": "node scripts/add-recommended-indexes.js",
     "db:create-notification-index": "node scripts/create-notification-backoffice-index.js",
-    "migrate:fix-form-responses": "node scripts/fix-form-responses-preguntaid.js"
+    "migrate:fix-form-responses": "node scripts/fix-form-responses-preguntaid.js",
+    "email:resend:institution-welcome": "node scripts/resend-institution-welcome-email.js",
+    "email:upload-assets-s3": "node scripts/upload-email-assets-to-s3.js",
+    "s3:public-email-assets-policy": "node scripts/s3-public-email-assets-policy.js",
+    "email:test-images": "node scripts/send-test-email-images.js"
   },
   "keywords": [
     "node",

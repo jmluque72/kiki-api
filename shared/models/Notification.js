@@ -109,7 +109,7 @@ const notificationSchema = new mongoose.Schema({
 
 // Índices para optimizar consultas
 notificationSchema.index({ sender: 1 });
-notificationSchema.index({ account: 1 });
+// { account: 1 } eliminado: el índice compuesto { account, sentAt } ya lo cubre
 notificationSchema.index({ division: 1 });
 notificationSchema.index({ recipients: 1 });
 notificationSchema.index({ sentAt: -1 });

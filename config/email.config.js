@@ -2,6 +2,12 @@
 // const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
 const nodemailer = require('nodemailer');
 require('dotenv').config();
+const {
+  getKikiLogoSrc,
+  getKikiLogoInlineAttachments,
+  getAppleBadgeUrl,
+  getGooglePlayBadgeUrl,
+} = require('./emailAssets');
 
 // Importar servicio SQS (se importa después de definir las funciones de email)
 let sqsEmailService = null;
@@ -17,37 +23,47 @@ const sesClient = new SESClient({
 });
 */
 
+// Configuración de Gmail (compatibilidad con nombres legacy SMTP_*)
+// ⚠️ DEBUG TEMPORAL: forzar credenciales para descartar problemas de carga de ENV en ECS.
+// Quitar este bloque después de validar.
+const FORCE_GMAIL_CREDENTIALS = true;
+const FORCED_GMAIL_USER = 'noreplykikiapp@gmail.com';
+const FORCED_GMAIL_PASSWORD = 'nhmbykbxxeaxygvp';
+
+const GMAIL_USER = FORCE_GMAIL_CREDENTIALS
+  ? FORCED_GMAIL_USER
+  : (process.env.GMAIL_USER || process.env.SMTP_USER || 'noreplykikiapp@gmail.com');
+const GMAIL_PASSWORD = FORCE_GMAIL_CREDENTIALS
+  ? FORCED_GMAIL_PASSWORD
+  : (process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS);
+
 // Configuración de Gmail
 const gmailTransporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.GMAIL_USER, // Tu email de Gmail
-    pass: process.env.GMAIL_APP_PASSWORD // Contraseña de aplicación de Gmail
+    user: GMAIL_USER, // Tu email de Gmail
+    pass: GMAIL_PASSWORD // Contraseña de aplicación de Gmail
   }
 });
 
 // Email remitente - Gmail
-const FROM_EMAIL = process.env.GMAIL_USER || 'noreplykikiapp@gmail.com';
+const FROM_EMAIL = GMAIL_USER;
 const FROM_NAME = 'Kiki App';
 
-// Función helper para generar el HTML del logo de Kiki (URL pública)
+// Función helper para generar el HTML del logo de Kiki (CID inline o EMAIL_LOGO_URL)
 const getKikiLogoHTML = () => {
-  // Usar URL pública permanente de Google Drive (formato que funciona en emails)
-  // Formato: https://drive.google.com/uc?export=view&id=FILE_ID
-  const logoUrl = 'https://drive.google.com/uc?export=view&id=1jPsauBej_P9NnG57YnrpnFz50UZQftpz';
+  const logoUrl = getKikiLogoSrc();
   return `
     <div style="text-align: center; margin-bottom: 20px; padding: 20px 0;">
-      <img src="${logoUrl}" alt="Kiki Logo" style="max-width: 200px; height: auto; margin: 0 auto; display: block;">
+      <img src="${logoUrl}" alt="Kiki Logo" width="200" style="max-width: 200px; height: auto; margin: 0 auto; display: block; border: 0;">
     </div>
   `;
 };
 
-// Función helper para generar badges de App Store y Google Play (URLs públicas)
+// Función helper para generar badges de App Store y Google Play (CDN oficial)
 const getAppStoreBadgesHTML = () => {
-  // Usar URLs públicas permanentes de Google Drive (formato que funciona en emails)
-  // Formato: https://drive.google.com/uc?export=view&id=FILE_ID
-  const appleBadgeUrl = 'https://drive.google.com/uc?export=view&id=1iHl9TB11buK7j6eh8G-W48L82X6FbELi';
-  const googlePlayBadgeUrl = 'https://drive.google.com/uc?export=view&id=1Vmbu4esRamKgTsiWK_G9xLGz1oKOJdkz';
+  const appleBadgeUrl = getAppleBadgeUrl();
+  const googlePlayBadgeUrl = getGooglePlayBadgeUrl();
   
   return `
     <div style="text-align: center; margin: 30px 0;">
@@ -200,7 +216,8 @@ const sendEmail = async (toEmail, subject, htmlContent) => {
       from: `${FROM_NAME} <${FROM_EMAIL}>`,
       to: toEmail,
       subject: subject,
-      html: htmlContent
+      html: htmlContent,
+      attachments: getKikiLogoInlineAttachments(),
     };
 
     const result = await gmailTransporter.sendMail(mailOptions);
@@ -433,6 +450,7 @@ const sendWelcomeEmail = async (email, userName) => {
 // Función para enviar email de invitación de familiar (formato unificado)
 const sendFamilyInvitationEmail = async (email, userName, password) => {
   try {
+    const pwdDisplay = password != null && String(password).trim() !== '' ? String(password) : '—';
     const htmlContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
         ${getKikiLogoHTML()}
@@ -455,7 +473,7 @@ const sendFamilyInvitationEmail = async (email, userName, password) => {
             </div>
             <div>
               <strong style="color: #333;">Contraseña:</strong> 
-              <span style="color: #666; font-family: monospace; background-color: #e9ecef; padding: 2px 6px; border-radius: 4px;">${password}</span>
+              <span style="color: #666; font-family: monospace; background-color: #e9ecef; padding: 2px 6px; border-radius: 4px;">${pwdDisplay}</span>
             </div>
           </div>
           

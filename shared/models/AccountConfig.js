@@ -16,6 +16,20 @@ const accountConfigSchema = new mongoose.Schema({
     type: Boolean,
     default: true // Por defecto requiere aprobación (comportamiento actual)
   },
+
+  // Configuración de "comunicaciones rápidas" por tipo
+  // Cada entrada define un código de notificación rápida y si está habilitada para la institución
+  quickNotificationSettings: [{
+    code: {
+      type: String,
+      required: true,
+      trim: true
+    },
+    enabled: {
+      type: Boolean,
+      default: true
+    }
+  }],
   
   // Otros flags de configuración pueden agregarse aquí en el futuro
 }, {

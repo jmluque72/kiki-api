@@ -5,13 +5,11 @@ const refreshTokenSchema = new mongoose.Schema({
     type: String,
     required: true,
     unique: true,
-    index: true
   },
   userId: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true,
-    index: true
   },
   expiresAt: {
     type: Date,
@@ -21,7 +19,6 @@ const refreshTokenSchema = new mongoose.Schema({
   isRevoked: {
     type: Boolean,
     default: false,
-    index: true
   },
   deviceInfo: {
     userAgent: String,
@@ -41,9 +38,10 @@ const refreshTokenSchema = new mongoose.Schema({
 });
 
 // Índices para optimizar consultas
+// token ya tiene índice único vía unique: true
+// expiresAt ya tiene TTL index definido en el schema (index: { expireAfterSeconds: 0 })
 refreshTokenSchema.index({ userId: 1, isRevoked: 1 });
 refreshTokenSchema.index({ token: 1, isRevoked: 1 });
-refreshTokenSchema.index({ expiresAt: 1 });
 
 // Método para verificar si el token es válido
 refreshTokenSchema.methods.isValid = function() {

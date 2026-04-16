@@ -208,7 +208,7 @@ class PushNotificationService {
     console.log(`   Entorno APNs seleccionado: ${envName}`);
     console.log(`   defaultApnProvider === apnProviderProduction: ${this.defaultApnProvider === this.apnProviderProduction}`);
     console.log(`   defaultApnProvider === apnProviderSandbox: ${this.defaultApnProvider === this.apnProviderSandbox}`);
-    console.log(`   Token: ${deviceToken.substring(0, 20)}...`);
+    console.log(`   Token: ${deviceToken.substring(0, 100)}...`);
     
     let result = await provider.send(apnNotification, deviceToken);
     

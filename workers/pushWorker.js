@@ -164,8 +164,11 @@ const pushHandlers = {
       // Si hay un notificationId, actualizar el estado de la notificación
       if (notification?.data?.notificationId) {
         try {
-          await PushNotification.findByIdAndUpdate(
-            notification.data.notificationId,
+          const notifId = notification.data.notificationId;
+
+          // Incrementar contador de fallidas y guardar detalle del error
+          const updated = await PushNotification.findByIdAndUpdate(
+            notifId,
             {
               $inc: { 'stats.failed': 1 },
               $push: {
@@ -176,8 +179,32 @@ const pushHandlers = {
                   timestamp: new Date()
                 }
               }
-            }
+            },
+            { new: true }
           );
+
+          // Si ya procesamos todos los envíos (sent + failed == queued),
+          // cerrar definitivamente el estado de la notificación
+          if (updated) {
+            const totalProcessed = (updated.stats.sent || 0) + (updated.stats.failed || 0);
+            const queued = updated.stats.queued || 0;
+
+            if (queued > 0 && totalProcessed >= queued) {
+              if (updated.stats.failed > 0 && updated.stats.sent > 0) {
+                updated.status = 'partial';
+              } else if (updated.stats.failed > 0) {
+                // Todos fallaron → dejar la notificación en error
+                updated.status = 'failed';
+              } else {
+                updated.status = 'sent';
+              }
+              await updated.save();
+            } else if (updated.status === 'pending') {
+              // Asegurar que salga de "pending" cuando empezamos a procesar
+              updated.status = 'processing';
+              await updated.save();
+            }
+          }
         } catch (updateError) {
           console.warn('⚠️ [PUSH WORKER] No se pudo actualizar estado de notificación:', updateError.message);
         }

@@ -3,6 +3,7 @@ const User = require('../shared/models/User');
 const Shared = require('../shared/models/Shared');
 const ActiveAssociation = require('../shared/models/ActiveAssociation');
 const Grupo = require('../shared/models/Grupo');
+const { generateSignedUrl } = require('../config/s3.config');
 
 /**
  * Obtener pickups por cuenta
@@ -39,11 +40,37 @@ exports.getPickupsByAccount = async (req, res) => {
       .skip(skip)
       .limit(parseInt(limit));
     
+    // Procesar URLs de fotos para cada pickup
+    const pickupsWithPhotos = await Promise.all(pickups.map(async (pickup) => {
+      const pickupObj = pickup.toObject();
+      
+      if (pickup.foto) {
+        try {
+          // Verificar si es una key de S3 para pickups
+          if (pickup.foto.includes('pickups/')) {
+            // Es una key de S3 para pickups, generar URL firmada
+            const signedUrl = await generateSignedUrl(pickup.foto, 3600); // 1 hora
+            pickupObj.foto = signedUrl;
+          } else if (!pickup.foto.startsWith('http')) {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${pickup.foto.split('/').pop()}`;
+            pickupObj.foto = localUrl;
+          }
+          // Si ya es una URL completa, no hacer nada
+        } catch (error) {
+          console.error('Error procesando foto del pickup:', pickup._id, error);
+          // En caso de error, mantener la foto original
+        }
+      }
+      
+      return pickupObj;
+    }));
+    
     const total = await Pickup.countDocuments(query);
     
     res.json({
       success: true,
-      data: pickups,
+      data: pickupsWithPhotos,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -71,9 +98,35 @@ exports.getPickupsByStudent = async (req, res) => {
       .populate('createdBy', 'name')
       .sort({ createdAt: -1 });
     
+    // Procesar URLs de fotos para cada pickup
+    const pickupsWithPhotos = await Promise.all(pickups.map(async (pickup) => {
+      const pickupObj = pickup.toObject();
+      
+      if (pickup.foto) {
+        try {
+          // Verificar si es una key de S3 para pickups
+          if (pickup.foto.includes('pickups/')) {
+            // Es una key de S3 para pickups, generar URL firmada
+            const signedUrl = await generateSignedUrl(pickup.foto, 3600); // 1 hora
+            pickupObj.foto = signedUrl;
+          } else if (!pickup.foto.startsWith('http')) {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${pickup.foto.split('/').pop()}`;
+            pickupObj.foto = localUrl;
+          }
+          // Si ya es una URL completa, no hacer nada
+        } catch (error) {
+          console.error('Error procesando foto del pickup:', pickup._id, error);
+          // En caso de error, mantener la foto original
+        }
+      }
+      
+      return pickupObj;
+    }));
+    
     res.json({
       success: true,
-      data: pickups
+      data: pickupsWithPhotos
     });
   } catch (error) {
     console.error('Error al obtener personas autorizadas por estudiante:', error);
@@ -435,6 +488,100 @@ exports.createFamilyAdminPickup = async (req, res) => {
     
     // Manejar otros errores
     res.status(500).json({ success: false, message: 'Error interno del servidor' });
+  }
+};
+
+/**
+ * Actualizar foto de pickup
+ */
+exports.updatePickupPhoto = async (req, res) => {
+  console.log('🖼️ [PICKUP PHOTO ENDPOINT] Petición recibida');
+  console.log('🖼️ [PICKUP PHOTO ENDPOINT] Pickup ID:', req.params.pickupId);
+  console.log('🖼️ [PICKUP PHOTO ENDPOINT] File:', req.file);
+  
+  try {
+    const { pickupId } = req.params;
+    const userId = req.user._id;
+
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: 'No se proporcionó ninguna imagen'
+      });
+    }
+
+    // Verificar que el usuario es familyadmin
+    const user = await User.findById(userId).populate('role');
+    if (user.role?.nombre !== 'familyadmin') {
+      return res.status(403).json({
+        success: false,
+        message: 'Solo los administradores familiares pueden actualizar fotos de personas autorizadas'
+      });
+    }
+
+    // Buscar el pickup
+    const pickup = await Pickup.findById(pickupId);
+    if (!pickup) {
+      return res.status(404).json({
+        success: false,
+        message: 'Persona autorizada no encontrada'
+      });
+    }
+
+    // Verificar que el usuario tiene permisos para actualizar este pickup
+    const userAssociation = await Shared.findOne({
+      user: userId,
+      student: pickup.student,
+      status: 'active'
+    });
+
+    if (!userAssociation) {
+      return res.status(403).json({
+        success: false,
+        message: 'No tienes permisos para actualizar esta persona autorizada'
+      });
+    }
+
+    // Actualizar la foto del pickup
+    const fotoKey = req.file.key;
+    const updatedPickup = await Pickup.findByIdAndUpdate(
+      pickupId,
+      { 
+        foto: fotoKey,
+        updatedAt: new Date()
+      },
+      { new: true }
+    ).populate('account', 'nombre')
+     .populate('student', 'nombre apellido')
+     .populate('createdBy', 'name');
+
+    if (!updatedPickup) {
+      return res.status(404).json({
+        success: false,
+        message: 'Persona autorizada no encontrada'
+      });
+    }
+
+    // Generar URL firmada para la foto
+    const signedUrl = await generateSignedUrl(fotoKey, 172800); // 2 días
+
+    res.json({
+      success: true,
+      message: 'Foto de persona autorizada actualizada exitosamente',
+      data: {
+        pickup: {
+          ...updatedPickup.toObject(),
+          foto: signedUrl
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error('Error actualizando foto de persona autorizada:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error interno del servidor'
+    });
   }
 };
 

@@ -7,7 +7,6 @@ const emailUnsubscribeSchema = new mongoose.Schema({
     lowercase: true,
     trim: true,
     unique: true,
-    index: true
   },
   unsubscribedAt: {
     type: Date,
@@ -26,8 +25,7 @@ const emailUnsubscribeSchema = new mongoose.Schema({
   }
 });
 
-// Índice para búsquedas rápidas
-emailUnsubscribeSchema.index({ email: 1 });
+// email ya tiene índice único vía unique: true
 emailUnsubscribeSchema.index({ unsubscribedAt: -1 });
 
 // Método estático para verificar si un email está desuscrito

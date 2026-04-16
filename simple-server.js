@@ -14,6 +14,7 @@ const XLSX = require('xlsx');
 // Importar configuración
 require('dotenv').config();
 const config = require('./config/database');
+const { isPrivateLanHttpOrigin, getLocalIPv4Addresses } = require('./utils/localNetwork');
 const { generateSignedUrl } = require('./config/s3.config');
 
 // Importar modelos
@@ -29,6 +30,8 @@ const Asistencia = require('./shared/models/Asistencia');
 const Activity = require('./shared/models/Activity');
 const ActivityFavorite = require('./shared/models/ActivityFavorite');
 const AccountConfig = require('./shared/models/AccountConfig');
+const accountsController = require('./controllers/accounts.controller');
+const paymentsController = require('./controllers/payments.controller');
 const Student = require('./shared/models/Student');
 const Notification = require('./shared/models/Notification');
 const Device = require('./shared/models/Device');
@@ -188,6 +191,7 @@ const activitiesRoutes = require('./routes/activities.routes');
 const authRoutes = require('./routes/auth.routes');
 // Importar rutas de estudiantes
 const studentsRoutes = require('./routes/students.routes');
+const birthdaysRoutes = require('./routes/birthdays.routes');
 // Importar rutas de asistencias
 const attendanceRoutes = require('./routes/attendance.routes');
 // Importar rutas de asociaciones
@@ -357,11 +361,9 @@ app.use(cors({
       return callback(null, true);
     }
     
-    // Permitir localhost solo en desarrollo
-    if (process.env.NODE_ENV === 'development') {
-      if (origin.startsWith('http://localhost') || origin.startsWith('http://127.0.0.1')) {
-        return callback(null, true);
-      }
+    // Permitir localhost y cualquier origen en IP privada (LAN) en desarrollo
+    if (process.env.NODE_ENV === 'development' && isPrivateLanHttpOrigin(origin)) {
+      return callback(null, true);
     }
     
     // Lista estricta de orígenes permitidos en producción
@@ -417,6 +419,8 @@ app.use((req, res, next) => {
 // express.json() solo parsea requests con Content-Type: application/json
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+app.use('/api', require('./routes/clientCrash.routes'));
 
 // Endpoint de prueba para acciones (antes del middleware de redirección)
 app.get('/api/test-actions', (req, res) => {
@@ -764,8 +768,9 @@ app.use((req, res, next) => {
       !req.path.startsWith('/api/form-requests') &&
       !req.path.startsWith('/api/admin/push-notifications') &&
       !req.path.startsWith('/api/tutor-actions') &&
-      !req.path.match(/^\/api\/accounts\/[^\/]+\/(config|admin-users)$/)) {
-    // Remover el /api duplicado del inicio, excepto para student-actions, test-actions, debug, documents, events/export, form-requests, admin/push-notifications, accounts config y accounts admin-users
+      !req.path.match(/^\/api\/accounts\/[^\/]+\/(config|admin-users|payment-config|payments|payment-stats)$/) &&
+      !req.path.match(/^\/api\/accounts\/[^\/]+\/students\/[^\/]+\/payment-product$/)) {
+    // Remover el /api duplicado del inicio, excepto para student-actions, test-actions, debug, documents, events/export, form-requests, admin/push-notifications, accounts config, admin-users, payment-config, payments, payment-stats y asignación de producto de cobranza por alumno
     // Las rutas de upload se redirigen de /api/upload a /upload
     const newPath = req.path.replace(/^\/api/, '');
     console.log(`🔄 [REDIRECT] Redirigiendo ${req.method} ${req.path} -> ${newPath}`);
@@ -804,6 +809,10 @@ console.log('🔍 Registrando rutas de estudiantes...');
 app.use('/', studentsRoutes);
 console.log('✅ Rutas de estudiantes registradas');
 
+console.log('[routes] Registrando rutas de cumpleanos...');
+app.use('/', birthdaysRoutes);
+console.log('[routes] Rutas de cumpleanos registradas');
+
 console.log('🔍 Registrando rutas de asistencias...');
 app.use('/', attendanceRoutes);
 console.log('✅ Rutas de asistencias registradas');
@@ -841,6 +850,13 @@ app.use('/upload', uploadRoutes);
 console.log('✅ Rutas de upload registradas');
 
 console.log('🔍 Registrando rutas de cuentas...');
+// Rutas de cobranzas ANTES del router de accounts para que matcheen correctamente
+app.get('/api/accounts/:accountId/payment-config', authenticateToken, setUserInstitution, validateObjectId('accountId'), accountsController.getPaymentConfig);
+app.put('/api/accounts/:accountId/payment-config', authenticateToken, setUserInstitution, validateObjectId('accountId'), accountsController.updatePaymentConfig);
+app.get('/api/accounts/:accountId/payments', authenticateToken, setUserInstitution, validateObjectId('accountId'), paymentsController.listPayments);
+app.post('/api/accounts/:accountId/payments', authenticateToken, setUserInstitution, validateObjectId('accountId'), paymentsController.upsertPayment);
+app.get('/api/accounts/:accountId/payment-stats', authenticateToken, setUserInstitution, validateObjectId('accountId'), paymentsController.getPaymentStats);
+app.put('/api/accounts/:accountId/students/:studentId/payment-product', authenticateToken, setUserInstitution, validateObjectId('accountId'), validateObjectId('studentId'), paymentsController.assignStudentPaymentProduct);
 app.use('/', accountsRoutes);
 console.log('✅ Rutas de cuentas registradas');
 
@@ -4298,17 +4314,45 @@ app.get('/pickups/by-student/:studentId', authenticateToken, async (req, res) =>
       student: studentId,
       status: 'active' // Filtrar solo los activos
     })
-      .select('nombre apellido dni status')
+      .select('nombre apellido dni foto status')
       .sort({ nombre: 1 });
 
-    res.json({
-      success: true,
-      data: pickups.map(pickup => ({
+    // Procesar URLs de fotos para cada pickup
+    const { generateSignedUrl } = require('./config/s3.config');
+    const pickupsWithPhotos = await Promise.all(pickups.map(async (pickup) => {
+      const pickupObj = {
         _id: pickup._id,
         nombre: pickup.nombre,
         apellido: pickup.apellido || '',
-        dni: pickup.dni || ''
-      }))
+        dni: pickup.dni || '',
+        foto: null
+      };
+      
+      if (pickup.foto) {
+        try {
+          // Verificar si es una key de S3 para pickups
+          if (pickup.foto.includes('pickups/')) {
+            // Es una key de S3 para pickups, generar URL firmada
+            const signedUrl = await generateSignedUrl(pickup.foto, 3600); // 1 hora
+            pickupObj.foto = signedUrl;
+          } else if (!pickup.foto.startsWith('http')) {
+            // Es una key local, generar URL local
+            const localUrl = `${req.protocol}://${req.get('host')}/uploads/${pickup.foto.split('/').pop()}`;
+            pickupObj.foto = localUrl;
+          } else {
+            pickupObj.foto = pickup.foto;
+          }
+        } catch (error) {
+          console.error('Error procesando foto del pickup:', pickup._id, error);
+        }
+      }
+      
+      return pickupObj;
+    }));
+
+    res.json({
+      success: true,
+      data: pickupsWithPhotos
     });
 
   } catch (error) {
@@ -6745,7 +6789,15 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 API de Kiki corriendo en puerto ${PORT}`);
   console.log(`📡 Health check disponible en http://localhost:${PORT}/health`);
   console.log(`📖 Documentación disponible en http://localhost:${PORT}/api`);
-  console.log(`🌐 API accesible desde la red local en http://0.0.0.0:${PORT}`);
+  const localIps = getLocalIPv4Addresses();
+  if (localIps.length > 0) {
+    console.log('🌐 Desde otro dispositivo en la misma red (LAN), usa por ejemplo:');
+    localIps.forEach(({ interface: iface, address }) => {
+      console.log(`   → http://${address}:${PORT}/api  (${iface})`);
+    });
+  } else {
+    console.log(`🌐 API escuchando en todas las interfaces (0.0.0.0:${PORT}`);
+  }
   
   // Iniciar worker de emails si está configurado
   if (process.env.SQS_EMAIL_QUEUE_URL) {

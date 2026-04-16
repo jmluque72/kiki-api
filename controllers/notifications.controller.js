@@ -2176,7 +2176,7 @@ const rejectNotification = async (req, res) => {
 const createTemplate = async (req, res) => {
   try {
     const { nombre, texto, accountId } = req.body;
-    const userId = req.user._id;
+    const userId = req.user._id || req.user.userId;
 
     console.log('📝 [TEMPLATE CREATE] Datos recibidos:', { nombre, texto, accountId });
 
@@ -2201,43 +2201,6 @@ const createTemplate = async (req, res) => {
         success: false,
         message: 'El texto no puede exceder 500 caracteres'
       });
-    }
-
-    // Verificar permisos: solo adminaccount y superadmin pueden crear templates
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-
-    const userRole = user.role?.nombre;
-    const isSuperAdmin = userRole === 'superadmin';
-    const isAdminAccount = userRole === 'adminaccount';
-
-    if (!isSuperAdmin && !isAdminAccount) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para crear templates'
-      });
-    }
-
-    // Verificar que el adminaccount solo puede crear templates para su cuenta
-    if (isAdminAccount && !isSuperAdmin) {
-      if (req.userInstitution) {
-        if (accountId !== req.userInstitution._id.toString()) {
-          return res.status(403).json({
-            success: false,
-            message: 'No tienes permisos para crear templates para esta cuenta'
-          });
-        }
-      } else {
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes una institución asignada'
-        });
-      }
     }
 
     // Crear template
@@ -2276,7 +2239,6 @@ const createTemplate = async (req, res) => {
 const getTemplates = async (req, res) => {
   try {
     const { accountId } = req.query;
-    const userId = req.user._id;
 
     console.log('📝 [TEMPLATE GET] Parámetros:', { accountId });
 
@@ -2285,45 +2247,6 @@ const getTemplates = async (req, res) => {
         success: false,
         message: 'accountId es requerido'
       });
-    }
-
-    // Verificar permisos
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-
-    const userRole = user.role?.nombre;
-    const isSuperAdmin = userRole === 'superadmin';
-    const isAdminAccount = userRole === 'adminaccount';
-    const isCoordinador = userRole === 'coordinador';
-
-    // Solo adminaccount, superadmin y coordinador pueden ver templates
-    if (!isSuperAdmin && !isAdminAccount && !isCoordinador) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para ver templates'
-      });
-    }
-
-    // Verificar que el adminaccount solo puede ver templates de su cuenta
-    if (isAdminAccount && !isSuperAdmin) {
-      if (req.userInstitution) {
-        if (accountId !== req.userInstitution._id.toString()) {
-          return res.status(403).json({
-            success: false,
-            message: 'No tienes permisos para ver templates de esta cuenta'
-          });
-        }
-      } else {
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes una institución asignada'
-        });
-      }
     }
 
     // Obtener templates activos de la cuenta
@@ -2358,7 +2281,6 @@ const updateTemplate = async (req, res) => {
   try {
     const { id } = req.params;
     const { nombre, texto, activo } = req.body;
-    const userId = req.user._id;
 
     console.log('📝 [TEMPLATE UPDATE] Datos recibidos:', { id, nombre, texto, activo });
 
@@ -2368,43 +2290,6 @@ const updateTemplate = async (req, res) => {
         success: false,
         message: 'Template no encontrado'
       });
-    }
-
-    // Verificar permisos
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-
-    const userRole = user.role?.nombre;
-    const isSuperAdmin = userRole === 'superadmin';
-    const isAdminAccount = userRole === 'adminaccount';
-
-    if (!isSuperAdmin && !isAdminAccount) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para actualizar templates'
-      });
-    }
-
-    // Verificar que el adminaccount solo puede actualizar templates de su cuenta
-    if (isAdminAccount && !isSuperAdmin) {
-      if (req.userInstitution) {
-        if (template.account.toString() !== req.userInstitution._id.toString()) {
-          return res.status(403).json({
-            success: false,
-            message: 'No tienes permisos para actualizar este template'
-          });
-        }
-      } else {
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes una institución asignada'
-        });
-      }
     }
 
     // Validar longitud si se proporciona
@@ -2459,7 +2344,6 @@ const updateTemplate = async (req, res) => {
 const deleteTemplate = async (req, res) => {
   try {
     const { id } = req.params;
-    const userId = req.user._id;
 
     console.log('📝 [TEMPLATE DELETE] Template ID:', id);
 
@@ -2469,43 +2353,6 @@ const deleteTemplate = async (req, res) => {
         success: false,
         message: 'Template no encontrado'
       });
-    }
-
-    // Verificar permisos
-    const user = await User.findById(userId).populate('role');
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: 'Usuario no encontrado'
-      });
-    }
-
-    const userRole = user.role?.nombre;
-    const isSuperAdmin = userRole === 'superadmin';
-    const isAdminAccount = userRole === 'adminaccount';
-
-    if (!isSuperAdmin && !isAdminAccount) {
-      return res.status(403).json({
-        success: false,
-        message: 'No tienes permisos para eliminar templates'
-      });
-    }
-
-    // Verificar que el adminaccount solo puede eliminar templates de su cuenta
-    if (isAdminAccount && !isSuperAdmin) {
-      if (req.userInstitution) {
-        if (template.account.toString() !== req.userInstitution._id.toString()) {
-          return res.status(403).json({
-            success: false,
-            message: 'No tienes permisos para eliminar este template'
-          });
-        }
-      } else {
-        return res.status(403).json({
-          success: false,
-          message: 'No tienes una institución asignada'
-        });
-      }
     }
 
     // Soft delete: marcar como inactivo
