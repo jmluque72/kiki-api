@@ -56,11 +56,11 @@ class LoginMonitorService {
     try {
       console.log('🚨 [LOGIN MONITOR] Actividad sospechosa detectada:', suspiciousActivity.reason);
       
-      // Bloquear IP si hay múltiples intentos fallidos
-      if (suspiciousActivity.reason === 'multiple_failed_attempts' && suspiciousActivity.count >= 10) {
-        await LoginAttempt.blockIP(attemptData.ipAddress, 60); // 1 hora
-        console.log(`🚫 [LOGIN MONITOR] IP ${attemptData.ipAddress} bloqueada por actividad sospechosa`);
-      }
+      // Bloquear IP si hay múltiples intentos fallidos - DESACTIVADO
+      // if (suspiciousActivity.reason === 'multiple_failed_attempts' && suspiciousActivity.count >= 10) {
+      //   await LoginAttempt.blockIP(attemptData.ipAddress, 60); // 1 hora
+      //   console.log(`🚫 [LOGIN MONITOR] IP ${attemptData.ipAddress} bloqueada por actividad sospechosa`);
+      // }
       
       // Notificar administradores (implementar en el futuro)
       await this.notifyAdmins(attemptData, suspiciousActivity);
@@ -101,21 +101,25 @@ class LoginMonitorService {
   }
 
   /**
-   * Verificar si una IP está bloqueada
+   * Verificar si una IP está bloqueada - DESACTIVADO (siempre retorna false)
    */
   static async isIPBlocked(ipAddress) {
-    try {
-      const blockedAttempt = await LoginAttempt.findOne({
-        ipAddress: ipAddress,
-        blocked: true,
-        blockedUntil: { $gt: new Date() }
-      });
-      
-      return !!blockedAttempt;
-    } catch (error) {
-      console.error('❌ [LOGIN MONITOR] Error verificando bloqueo de IP:', error);
-      return false;
-    }
+    // Bloqueo de IP desactivado - siempre retornar false
+    return false;
+    
+    // Código original comentado:
+    // try {
+    //   const blockedAttempt = await LoginAttempt.findOne({
+    //     ipAddress: ipAddress,
+    //     blocked: true,
+    //     blockedUntil: { $gt: new Date() }
+    //   });
+    //   
+    //   return !!blockedAttempt;
+    // } catch (error) {
+    //   console.error('❌ [LOGIN MONITOR] Error verificando bloqueo de IP:', error);
+    //   return false;
+    // }
   }
 
   /**

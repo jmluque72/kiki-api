@@ -47,12 +47,12 @@ async function testActivityImagesS3Final() {
 
     // 3. Simular la URL que usa la app móvil (API_BASE_URL ya incluye /api)
     console.log('\n3️⃣ Probando URL corregida (simulando app móvil)...');
-    const mobileApiBaseUrl = 'http://192.168.68.103:3000/api'; // Como en la app móvil
+    const mobileApiBaseUrl = 'http://192.168.200.153:3000/api'; // Como en la app móvil
     const uploadUrl = `${mobileApiBaseUrl}/upload/s3/image`;
     
     console.log('   API_BASE_URL (app móvil):', mobileApiBaseUrl);
     console.log('   URL final:', uploadUrl);
-    console.log('   URL esperada: http://192.168.68.103:3000/api/upload/s3/image');
+    console.log('   URL esperada: http://192.168.200.153:3000/api/upload/s3/image');
 
     const formData = new FormData();
     formData.append('image', fs.createReadStream(testImagePath), {
@@ -96,7 +96,7 @@ async function testActivityImagesS3Final() {
     console.log('\n🔧 Corrección aplicada:');
     console.log('   ❌ Antes: ${API_BASE_URL}/api/upload/s3/image');
     console.log('   ✅ Después: ${API_BASE_URL}/upload/s3/image');
-    console.log('   📍 Resultado: http://192.168.68.103:3000/api/upload/s3/image');
+    console.log('   📍 Resultado: http://192.168.200.153:3000/api/upload/s3/image');
 
   } catch (error) {
     console.error('\n❌ [TEST ACTIVITY IMAGES S3 FINAL] Error:', error.message);
@@ -108,7 +108,7 @@ async function testActivityImagesS3Final() {
     
     console.log('\n🔧 Posibles soluciones:');
     console.log('   1. Verificar que el servidor esté corriendo en puerto 3000');
-    console.log('   2. Verificar que la IP 192.168.68.103 sea accesible');
+    console.log('   2. Verificar que la IP 192.168.200.153 sea accesible');
     console.log('   3. Verificar que el endpoint /api/upload/s3/image esté funcionando');
   }
 }

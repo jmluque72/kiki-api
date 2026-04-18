@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const User = require('../shared/models/User');
 const config = require('../config/env.config');
+const logger = require('../utils/logger');
 
 const authenticateToken = async (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -14,16 +15,22 @@ const authenticateToken = async (req, res, next) => {
   }
 
   try {
-    console.log('🔍 Verificando token...');
-    console.log('🔑 JWT_SECRET:', config.JWT_SECRET);
+    if (!config.JWT_SECRET) {
+      logger.error('[AUTH] JWT_SECRET no configurado');
+      return res.status(500).json({
+        success: false,
+        message: 'Error de configuración del servidor'
+      });
+    }
     
+    logger.debug('[AUTH] Verificando token...');
     const decoded = jwt.verify(token, config.JWT_SECRET);
-    console.log('✅ Token decodificado:', decoded);
+    logger.debug('[AUTH] Token decodificado exitosamente');
     
     const user = await User.findById(decoded.userId).populate('role');
     
     if (!user) {
-      console.log('❌ Usuario no encontrado');
+      logger.warn('[AUTH] Usuario no encontrado', { userId: decoded.userId });
       return res.status(401).json({
         success: false,
         message: 'Usuario no encontrado'
@@ -31,14 +38,14 @@ const authenticateToken = async (req, res, next) => {
     }
     
     if (user.status !== 'approved') {
-      console.log('❌ Usuario no aprobado:', user.status);
+      logger.warn('[AUTH] Usuario no aprobado', { userId: user._id, status: user.status });
       return res.status(401).json({
         success: false,
         message: 'Usuario no aprobado'
       });
     }
 
-    console.log('✅ Usuario autenticado:', user.email);
+    logger.info('[AUTH] Usuario autenticado', { userId: user._id });
     req.user = {
       _id: user._id,
       userId: user._id,
@@ -48,11 +55,10 @@ const authenticateToken = async (req, res, next) => {
     };
     next();
   } catch (error) {
-    console.error('❌ Error verificando token:', error.message);
+    logger.error('[AUTH] Error verificando token', { error: error.message });
     return res.status(401).json({
       success: false,
-      message: 'Token inválido',
-      error: error.message
+      message: 'Token inválido'
     });
   }
 };

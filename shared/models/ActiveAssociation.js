@@ -49,7 +49,7 @@ const activeAssociationSchema = new mongoose.Schema({
 });
 
 // Índices para optimizar consultas
-activeAssociationSchema.index({ user: 1 });
+// user ya tiene índice único vía unique: true
 activeAssociationSchema.index({ account: 1 });
 activeAssociationSchema.index({ role: 1 });
 
@@ -76,6 +76,16 @@ activeAssociationSchema.statics.setActiveAssociation = async function(userId, sh
       throw new Error('La asociación no pertenece al usuario');
     }
 
+    // LOG CRÍTICO: Verificar qué estudiante tiene la Shared antes de actualizar
+    console.log('🔍 [ACTIVE ASSOCIATION SET] Shared que se va a activar:', {
+      sharedId: shared._id.toString(),
+      studentId: shared.student?._id?.toString(),
+      studentNombre: shared.student?.nombre,
+      studentApellido: shared.student?.apellido,
+      account: shared.account?.nombre,
+      role: shared.role?.nombre
+    });
+
     // Crear o actualizar la asociación activa
     const activeAssociation = await this.findOneAndUpdate(
       { user: userId },
@@ -91,11 +101,23 @@ activeAssociationSchema.statics.setActiveAssociation = async function(userId, sh
       { upsert: true, new: true }
     );
 
-    console.log(`✅ [ACTIVE ASSOCIATION] Asociación activa establecida para usuario ${userId}:`, {
+    // LOG CRÍTICO: Verificar qué se guardó en la base de datos
+    const savedAssociation = await this.findById(activeAssociation._id)
+      .populate('student', 'nombre apellido');
+    
+    console.log(`✅ [ACTIVE ASSOCIATION SET] Asociación activa establecida para usuario ${userId}:`, {
       account: shared.account.nombre,
       role: shared.role.nombre,
       division: shared.division?.nombre,
-      student: shared.student?.nombre
+      student: shared.student?.nombre,
+      studentId: shared.student?._id?.toString()
+    });
+    
+    console.log(`🔍 [ACTIVE ASSOCIATION SET] Verificación post-guardado:`, {
+      savedStudentId: savedAssociation.student?._id?.toString(),
+      savedStudentNombre: savedAssociation.student?.nombre,
+      savedStudentApellido: savedAssociation.student?.apellido,
+      activeSharedId: savedAssociation.activeShared?.toString()
     });
 
     return activeAssociation;
@@ -112,8 +134,8 @@ activeAssociationSchema.statics.getActiveAssociation = async function(userId) {
       .populate('activeShared')
       .populate('account')
       .populate('role')
-      .populate('division')
-      .populate('student');
+      .populate('division');
+      // NO poblar 'student' aquí - lo obtendremos desde activeShared
 
     if (!activeAssociation) {
       console.log(`⚠️ [ACTIVE ASSOCIATION] No hay asociación activa para usuario ${userId}`);
@@ -121,14 +143,30 @@ activeAssociationSchema.statics.getActiveAssociation = async function(userId) {
     }
 
     // Verificar que la asociación activa sigue siendo válida
+    // Y obtener el estudiante desde activeShared (fuente de verdad)
     const Shared = require('./Shared');
-    const shared = await Shared.findById(activeAssociation.activeShared);
+    const shared = await Shared.findById(activeAssociation.activeShared)
+      .populate('student', 'nombre apellido avatar');
     
     if (!shared || shared.status !== 'active') {
       console.log(`⚠️ [ACTIVE ASSOCIATION] La asociación activa ya no es válida para usuario ${userId}`);
       // Eliminar la asociación activa inválida
       await this.deleteOne({ user: userId });
       return null;
+    }
+
+    // CRÍTICO: Usar el estudiante de activeShared (Shared), no el campo desnormalizado
+    // Actualizar el campo student en activeAssociation con el de Shared para mantener consistencia
+    if (shared.student) {
+      activeAssociation.student = shared.student;
+      console.log('✅ [ACTIVE ASSOCIATION] Estudiante obtenido desde activeShared:', {
+        studentId: shared.student._id.toString(),
+        studentNombre: shared.student.nombre,
+        studentApellido: shared.student.apellido
+      });
+    } else {
+      activeAssociation.student = null;
+      console.log('⚠️ [ACTIVE ASSOCIATION] activeShared no tiene estudiante');
     }
 
     return activeAssociation;

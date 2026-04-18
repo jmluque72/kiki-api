@@ -41,8 +41,8 @@ const deviceSchema = new mongoose.Schema({
 });
 
 // Índices para optimizar consultas
+// pushToken ya tiene índice único vía unique: true
 deviceSchema.index({ userId: 1 });
-deviceSchema.index({ pushToken: 1 });
 deviceSchema.index({ platform: 1 });
 deviceSchema.index({ isActive: 1 });
 

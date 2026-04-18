@@ -50,6 +50,10 @@ const studentSchema = new mongoose.Schema({
     ref: 'Grupo',
     required: true
   },
+  paymentProductId: {
+    type: String,
+    default: null
+  },
   tutor: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
@@ -86,10 +90,8 @@ const studentSchema = new mongoose.Schema({
 });
 
 // Índices para optimizar consultas
+// email, dni y qrCode ya tienen índice único (unique: true) definido en el schema
 studentSchema.index({ account: 1, division: 1, year: 1 });
-studentSchema.index({ email: 1 });
-studentSchema.index({ dni: 1 });
-studentSchema.index({ qrCode: 1 });
 
 // Middleware para actualizar updatedAt
 studentSchema.pre('save', function(next) {

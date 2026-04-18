@@ -35,6 +35,10 @@ const pickupSchema = new mongoose.Schema({
     trim: true,
     // Validación de formato removida para permitir DNIs no estándar
   },
+  foto: {
+    type: String,
+    default: null
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',

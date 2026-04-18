@@ -51,6 +51,13 @@ const studentActionLogSchema = new mongoose.Schema({
     maxlength: 500
   },
   
+  // Valor seleccionado de la acción (si la acción tiene valores configurados)
+  valor: {
+    type: String,
+    required: false,
+    trim: true
+  },
+  
   // Imágenes relacionadas (opcional)
   imagenes: [{
     type: String,

@@ -9,7 +9,7 @@ El usuario reportó que en la app móvil aparece el error:
 ## ✅ **Estado del Backend**
 
 ### Verificaciones Realizadas
-- ✅ **Servidor funcionando**: El servidor responde correctamente en `http://192.168.68.103:3000/api`
+- ✅ **Servidor funcionando**: El servidor responde correctamente en `http://192.168.200.153:3000/api`
 - ✅ **Endpoint de avatar**: `PUT /users/avatar` funciona correctamente
 - ✅ **Subida a S3**: Los avatares se suben correctamente a S3
 - ✅ **URLs firmadas**: Se generan correctamente
@@ -27,12 +27,12 @@ Este error indica que `error.response` es `undefined`, lo que significa que:
 ### Posibles Causas
 
 #### 1. **Problema de Conectividad de Red**
-- El dispositivo móvil no puede alcanzar `192.168.68.103:3000`
+- El dispositivo móvil no puede alcanzar `192.168.200.153:3000`
 - Firewall bloqueando la conexión
 - Dispositivo móvil en red diferente
 
 #### 2. **Configuración de IP Incorrecta**
-- La IP `192.168.68.103` puede haber cambiado
+- La IP `192.168.200.153` puede haber cambiado
 - El dispositivo móvil necesita la IP correcta del servidor
 
 #### 3. **Timeout de Request**
@@ -53,7 +53,7 @@ ifconfig | grep "inet " | grep -v 127.0.0.1
 ### 2. **Verificar Conectividad desde el Dispositivo Móvil**
 ```bash
 # Desde el dispositivo móvil o emulador
-ping 192.168.68.103
+ping 192.168.200.153
 ```
 
 ### 3. **Actualizar Configuración de la App Móvil**
@@ -61,7 +61,7 @@ En `KikiApp/src/config/apiConfig.ts`:
 ```typescript
 export const getApiBaseUrl = () => {
   // Verificar que esta IP sea la correcta
-  return 'http://192.168.68.103:3000/api';
+  return 'http://192.168.200.153:3000/api';
 };
 ```
 
@@ -133,7 +133,7 @@ return 'http://localhost:3000/api';
 // Agregar este test en la app móvil
 const testConnectivity = async () => {
   try {
-    const response = await fetch('http://192.168.68.103:3000/api/users/profile');
+    const response = await fetch('http://192.168.200.153:3000/api/users/profile');
     console.log('✅ Conectividad OK:', response.status);
   } catch (error) {
     console.log('❌ Error de conectividad:', error.message);
@@ -146,7 +146,7 @@ const testConnectivity = async () => {
 // Verificar que el login funcione
 const testLogin = async () => {
   try {
-    const response = await fetch('http://192.168.68.103:3000/api/users/login', {
+    const response = await fetch('http://192.168.200.153:3000/api/users/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({

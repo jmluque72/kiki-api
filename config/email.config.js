@@ -2,6 +2,15 @@
 // const { SESClient, SendEmailCommand } = require('@aws-sdk/client-ses');
 const nodemailer = require('nodemailer');
 require('dotenv').config();
+const {
+  getKikiLogoSrc,
+  getKikiLogoInlineAttachments,
+  getAppleBadgeUrl,
+  getGooglePlayBadgeUrl,
+} = require('./emailAssets');
+
+// Importar servicio SQS (se importa después de definir las funciones de email)
+let sqsEmailService = null;
 
 // Configuración de AWS SES - Comentado para uso futuro
 /*
@@ -14,33 +23,47 @@ const sesClient = new SESClient({
 });
 */
 
+// Configuración de Gmail (compatibilidad con nombres legacy SMTP_*)
+// ⚠️ DEBUG TEMPORAL: forzar credenciales para descartar problemas de carga de ENV en ECS.
+// Quitar este bloque después de validar.
+const FORCE_GMAIL_CREDENTIALS = true;
+const FORCED_GMAIL_USER = 'noreplykikiapp@gmail.com';
+const FORCED_GMAIL_PASSWORD = 'nhmbykbxxeaxygvp';
+
+const GMAIL_USER = FORCE_GMAIL_CREDENTIALS
+  ? FORCED_GMAIL_USER
+  : (process.env.GMAIL_USER || process.env.SMTP_USER || 'noreplykikiapp@gmail.com');
+const GMAIL_PASSWORD = FORCE_GMAIL_CREDENTIALS
+  ? FORCED_GMAIL_PASSWORD
+  : (process.env.GMAIL_APP_PASSWORD || process.env.SMTP_PASS);
+
 // Configuración de Gmail
 const gmailTransporter = nodemailer.createTransport({
   service: 'gmail',
   auth: {
-    user: process.env.GMAIL_USER, // Tu email de Gmail
-    pass: process.env.GMAIL_APP_PASSWORD // Contraseña de aplicación de Gmail
+    user: GMAIL_USER, // Tu email de Gmail
+    pass: GMAIL_PASSWORD // Contraseña de aplicación de Gmail
   }
 });
 
 // Email remitente - Gmail
-const FROM_EMAIL = process.env.GMAIL_USER || 'noreplykikiapp@gmail.com';
+const FROM_EMAIL = GMAIL_USER;
 const FROM_NAME = 'Kiki App';
 
-// Función helper para generar el HTML del logo de Kiki (URL pública)
+// Función helper para generar el HTML del logo de Kiki (CID inline o EMAIL_LOGO_URL)
 const getKikiLogoHTML = () => {
-  const logoUrl = 'https://drive.google.com/uc?export=download&id=1jPsauBej_P9NnG57YnrpnFz50UZQftpz';
+  const logoUrl = getKikiLogoSrc();
   return `
     <div style="text-align: center; margin-bottom: 20px; padding: 20px 0;">
-      <img src="${logoUrl}" alt="Kiki Logo" style="max-width: 200px; height: auto; margin: 0 auto; display: block;">
+      <img src="${logoUrl}" alt="Kiki Logo" width="200" style="max-width: 200px; height: auto; margin: 0 auto; display: block; border: 0;">
     </div>
   `;
 };
 
-// Función helper para generar badges de App Store y Google Play (URLs públicas)
+// Función helper para generar badges de App Store y Google Play (CDN oficial)
 const getAppStoreBadgesHTML = () => {
-  const appleBadgeUrl = 'https://drive.google.com/uc?export=download&id=1iHl9TB11buK7j6eh8G-W48L82X6FbELi';
-  const googlePlayBadgeUrl = 'https://drive.google.com/uc?export=download&id=1Vmbu4esRamKgTsiWK_G9xLGz1oKOJdkz';
+  const appleBadgeUrl = getAppleBadgeUrl();
+  const googlePlayBadgeUrl = getGooglePlayBadgeUrl();
   
   return `
     <div style="text-align: center; margin: 30px 0;">
@@ -62,23 +85,102 @@ const getAppStoreBadgesHTML = () => {
   `;
 };
 
-// Función para envío asíncrono de emails (no bloquea el flujo principal)
+// Función helper para obtener el servicio SQS (lazy loading)
+const getSqsEmailService = () => {
+  if (!sqsEmailService) {
+    sqsEmailService = require('../services/sqsEmailService');
+  }
+  return sqsEmailService;
+};
+
+// Función para envío asíncrono de emails usando SQS (no bloquea el flujo principal)
 const sendEmailAsync = async (emailFunction, context = null, ...args) => {
-  // Ejecutar el envío de email en segundo plano sin esperar
-  setImmediate(async () => {
-    try {
-      if (context && typeof emailFunction === 'function') {
-        // Si se proporciona contexto, usar bind para mantener el contexto
-        await emailFunction.bind(context)(...args);
-      } else {
-        // Función normal sin contexto
-        await emailFunction(...args);
-      }
-      console.log('✅ [ASYNC EMAIL] Email enviado exitosamente');
-    } catch (error) {
-      console.error('❌ [ASYNC EMAIL] Error enviando email:', error.message);
+  try {
+    // Detectar el tipo de email basándose en el nombre de la función
+    const functionName = emailFunction?.name || '';
+    let emailType = null;
+    let emailData = {};
+
+    // Mapear funciones conocidas a tipos de email
+    if (functionName === 'sendInstitutionWelcomeEmail' || emailFunction === sendInstitutionWelcomeEmail) {
+      emailType = 'sendInstitutionWelcomeEmail';
+      emailData = {
+        to: args[0], // email
+        userName: args[1], // userName
+        institutionName: args[2], // institutionName
+        password: args[3] // password
+      };
+    } else if (functionName === 'sendNewUserCreatedEmail' || (context && context.sendNewUserCreatedEmail === emailFunction)) {
+      emailType = 'sendNewUserCreatedEmail';
+      emailData = {
+        userData: args[0],
+        password: args[1],
+        institutionName: args[2],
+        roleType: args[3]
+      };
+    } else if (functionName === 'sendFamilyViewerCreatedEmail' || (context && context.sendFamilyViewerCreatedEmail === emailFunction)) {
+      emailType = 'sendFamilyViewerCreatedEmail';
+      emailData = {
+        userData: args[0],
+        password: args[1],
+        institutionName: args[2]
+      };
+    } else {
+      // Si no se puede determinar el tipo, intentar inferir desde los argumentos
+      console.warn(`⚠️ [SQS EMAIL] No se pudo determinar el tipo de email para función: ${functionName}`);
+      // Fallback: intentar enviar directamente (comportamiento anterior)
+      setImmediate(async () => {
+        try {
+          if (context && typeof emailFunction === 'function') {
+            await emailFunction.bind(context)(...args);
+          } else {
+            await emailFunction(...args);
+          }
+          console.log('✅ [ASYNC EMAIL] Email enviado exitosamente (fallback)');
+        } catch (error) {
+          console.error('❌ [ASYNC EMAIL] Error enviando email:', error.message);
+        }
+      });
+      return;
     }
-  });
+
+    // Enviar a SQS
+    const { sendEmailToQueue } = getSqsEmailService();
+    const result = await sendEmailToQueue(emailType, emailData);
+    if (result.success) {
+      console.log(`✅ [SQS EMAIL] Mensaje enviado a cola SQS - Tipo: ${emailType}`);
+    } else {
+      console.error(`❌ [SQS EMAIL] Error enviando a SQS: ${result.error}`);
+      // Fallback: intentar enviar directamente si SQS falla
+      setImmediate(async () => {
+        try {
+          if (context && typeof emailFunction === 'function') {
+            await emailFunction.bind(context)(...args);
+          } else {
+            await emailFunction(...args);
+          }
+          console.log('✅ [ASYNC EMAIL] Email enviado exitosamente (fallback después de error SQS)');
+        } catch (error) {
+          console.error('❌ [ASYNC EMAIL] Error enviando email:', error.message);
+        }
+      });
+    }
+  } catch (error) {
+    console.error('❌ [SQS EMAIL] Error en sendEmailAsync:', error.message);
+    // Fallback: intentar enviar directamente
+    setImmediate(async () => {
+      try {
+        if (context && typeof emailFunction === 'function') {
+          await emailFunction.bind(context)(...args);
+        } else {
+          await emailFunction(...args);
+        }
+        console.log('✅ [ASYNC EMAIL] Email enviado exitosamente (fallback después de error)');
+      } catch (fallbackError) {
+        console.error('❌ [ASYNC EMAIL] Error enviando email:', fallbackError.message);
+      }
+    });
+  }
 };
 
 // Función para generar contraseña aleatoria segura
@@ -114,7 +216,8 @@ const sendEmail = async (toEmail, subject, htmlContent) => {
       from: `${FROM_NAME} <${FROM_EMAIL}>`,
       to: toEmail,
       subject: subject,
-      html: htmlContent
+      html: htmlContent,
+      attachments: getKikiLogoInlineAttachments(),
     };
 
     const result = await gmailTransporter.sendMail(mailOptions);
@@ -347,6 +450,7 @@ const sendWelcomeEmail = async (email, userName) => {
 // Función para enviar email de invitación de familiar (formato unificado)
 const sendFamilyInvitationEmail = async (email, userName, password) => {
   try {
+    const pwdDisplay = password != null && String(password).trim() !== '' ? String(password) : '—';
     const htmlContent = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; background-color: #ffffff;">
         ${getKikiLogoHTML()}
@@ -369,7 +473,7 @@ const sendFamilyInvitationEmail = async (email, userName, password) => {
             </div>
             <div>
               <strong style="color: #333;">Contraseña:</strong> 
-              <span style="color: #666; font-family: monospace; background-color: #e9ecef; padding: 2px 6px; border-radius: 4px;">${password}</span>
+              <span style="color: #666; font-family: monospace; background-color: #e9ecef; padding: 2px 6px; border-radius: 4px;">${pwdDisplay}</span>
             </div>
           </div>
           
